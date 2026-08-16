@@ -39,7 +39,6 @@ except ImportError:
     OpenAI = None
 
 
-# Try Streamlit Secrets first
 OPENAI_API_KEY = ""
 
 try:
@@ -51,7 +50,6 @@ except Exception:
     OPENAI_API_KEY = ""
 
 
-# Fall back to environment variable
 if not OPENAI_API_KEY:
 
     OPENAI_API_KEY = os.getenv(
@@ -79,20 +77,11 @@ st.markdown(
     """
     <style>
 
-    /* ======================================================
-       DESKTOP
-       ====================================================== */
-
     .block-container {
         padding-top: 1rem;
         padding-left: 2rem;
         padding-right: 2rem;
     }
-
-
-    /* ======================================================
-       MOBILE
-       ====================================================== */
 
     @media only screen and (max-width: 768px) {
 
@@ -101,8 +90,6 @@ st.markdown(
             padding-left: 0.7rem;
             padding-right: 0.7rem;
         }
-
-        /* Headings */
 
         h1 {
             font-size: 1.6rem !important;
@@ -116,8 +103,6 @@ st.markdown(
             font-size: 1.1rem !important;
         }
 
-        /* Metrics */
-
         [data-testid="stMetric"] {
             padding: 0.4rem 0.2rem;
         }
@@ -130,26 +115,18 @@ st.markdown(
             font-size: 1.15rem !important;
         }
 
-        /* Buttons */
-
         .stButton > button {
             width: 100%;
             min-height: 2.7rem;
         }
 
-        /* Inputs */
-
         input {
             font-size: 16px !important;
         }
 
-        /* Dataframes */
-
         [data-testid="stDataFrame"] {
             width: 100% !important;
         }
-
-        /* Chat input */
 
         [data-testid="stChatInput"] {
             width: 100%;
@@ -164,7 +141,7 @@ st.markdown(
 
 
 # ============================================================
-# APPLICATION HEADER
+# HEADER
 # ============================================================
 
 st.title(
@@ -237,7 +214,7 @@ NIFTY50 = [
 
 
 # ============================================================
-# LOAD FULL NSE EQUITY UNIVERSE
+# FULL NSE EQUITY UNIVERSE
 # ============================================================
 
 @st.cache_data(
@@ -259,7 +236,7 @@ def load_nse_equity_universe():
                 "(Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 "
                 "(KHTML, like Gecko) "
-                "Chrome/120.0 Safari/537.36"
+                "Chrome/131.0 Safari/537.36"
             ),
 
         "Accept":
@@ -287,13 +264,10 @@ def load_nse_equity_universe():
         )
 
         df.columns = [
-
             str(column)
             .strip()
             .upper()
-
             for column in df.columns
-
         ]
 
         if "SYMBOL" not in df.columns:
@@ -301,12 +275,10 @@ def load_nse_equity_universe():
             return []
 
         symbols = (
-
             df["SYMBOL"]
             .astype(str)
             .str.strip()
             .str.upper()
-
         )
 
         symbols = symbols[
@@ -333,6 +305,67 @@ def load_nse_equity_universe():
 
 
 # ============================================================
+# CLEAN NIFTY 500 SYMBOLS
+# ============================================================
+
+def clean_nifty500_symbols(symbols):
+
+    symbols = [
+
+        str(symbol)
+        .strip()
+        .upper()
+
+        for symbol in symbols
+
+    ]
+
+
+    # Remove invalid values
+
+    symbols = [
+
+        symbol
+
+        for symbol in symbols
+
+        if symbol
+
+        and symbol not in [
+
+            "NAN",
+            "NONE",
+            "SYMBOL",
+            "NULL"
+
+        ]
+
+    ]
+
+
+    # Remove duplicate symbols while
+    # preserving first occurrence
+
+    symbols = list(
+        dict.fromkeys(
+            symbols
+        )
+    )
+
+
+    # Sort alphabetically
+
+    symbols = sorted(
+        symbols
+    )
+
+
+    # Return exactly 500
+
+    return symbols[:500]
+
+
+# ============================================================
 # LOAD NIFTY 500
 # ============================================================
 
@@ -348,13 +381,18 @@ def load_nifty500():
 
     nse_urls = [
 
-        "https://nsearchives.nseindia.com/"
-        "content/indices/ind_nifty500list.csv",
+        (
+            "https://nsearchives.nseindia.com/"
+            "content/indices/ind_nifty500list.csv"
+        ),
 
-        "https://archives.nseindia.com/"
-        "content/indices/ind_nifty500list.csv"
+        (
+            "https://archives.nseindia.com/"
+            "content/indices/ind_nifty500list.csv"
+        )
 
     ]
+
 
     headers = {
 
@@ -394,65 +432,79 @@ def load_nifty500():
             )
 
 
-            if response.status_code == 200:
+            if response.status_code != 200:
 
-                df = pd.read_csv(
+                continue
 
-                    StringIO(
-                        response.text
+
+            df = pd.read_csv(
+
+                StringIO(
+                    response.text
+                )
+
+            )
+
+
+            df.columns = [
+
+                str(column)
+                .strip()
+                .upper()
+
+                for column in df.columns
+
+            ]
+
+
+            if "SYMBOL" not in df.columns:
+
+                continue
+
+
+            symbols = (
+
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+
+            )
+
+
+            symbols = symbols[
+                ~symbols.isin(
+                    [
+                        "",
+                        "NAN",
+                        "NONE"
+                    ]
+                )
+            ]
+
+
+            symbols = (
+
+                symbols
+                .drop_duplicates()
+                .tolist()
+
+            )
+
+
+            if len(symbols) >= 500:
+
+                cleaned = (
+                    clean_nifty500_symbols(
+                        symbols
                     )
-
                 )
 
 
-                df.columns = [
+                if len(cleaned) == 500:
 
-                    str(c)
-                    .strip()
-                    .upper()
+                    return cleaned
 
-                    for c in df.columns
-
-                ]
-
-
-                if "SYMBOL" in df.columns:
-
-                    symbols = (
-
-                        df["SYMBOL"]
-                        .astype(str)
-                        .str.strip()
-                        .str.upper()
-
-                    )
-
-
-                    symbols = symbols[
-                        ~symbols.isin(
-                            [
-                                "",
-                                "NAN",
-                                "NONE"
-                            ]
-                        )
-                    ]
-
-
-                    symbols = (
-
-                        symbols
-                        .drop_duplicates()
-                        .tolist()
-
-                    )
-
-
-                    if len(symbols) >= 450:
-
-                        return sorted(
-                            symbols
-                        )
 
         except Exception:
 
@@ -495,11 +547,11 @@ def load_nifty500():
 
             df.columns = [
 
-                str(c)
+                str(column)
                 .strip()
                 .upper()
 
-                for c in df.columns
+                for column in df.columns
 
             ]
 
@@ -536,11 +588,19 @@ def load_nifty500():
                 )
 
 
-                if len(symbols) >= 450:
+                if len(symbols) >= 500:
 
-                    return sorted(
-                        symbols
+                    cleaned = (
+                        clean_nifty500_symbols(
+                            symbols
+                        )
                     )
+
+
+                    if len(cleaned) == 500:
+
+                        return cleaned
+
 
     except Exception:
 
@@ -548,16 +608,7 @@ def load_nifty500():
 
 
     # ========================================================
-    # SOURCE 3 — BUILT-IN FALLBACK
-    # ========================================================
-    #
-    # If NSE blocks Streamlit Cloud, use a cached list.
-    #
-    # This prevents the application from crashing.
-    #
-    # The list is intentionally generated from the
-    # Nifty 500 constituent file maintained separately.
-    #
+    # SOURCE 3 — FALLBACK
     # ========================================================
 
     fallback_url = (
@@ -591,16 +642,14 @@ def load_nifty500():
 
             df.columns = [
 
-                str(c)
+                str(column)
                 .strip()
                 .upper()
 
-                for c in df.columns
+                for column in df.columns
 
             ]
 
-
-            # Find symbol column
 
             symbol_column = None
 
@@ -646,11 +695,19 @@ def load_nifty500():
                 )
 
 
-                if len(symbols) >= 450:
+                if len(symbols) >= 500:
 
-                    return sorted(
-                        symbols
+                    cleaned = (
+                        clean_nifty500_symbols(
+                            symbols
+                        )
                     )
+
+
+                    if len(cleaned) == 500:
+
+                        return cleaned
+
 
     except Exception:
 
@@ -658,7 +715,7 @@ def load_nifty500():
 
 
     # ========================================================
-    # FINAL FAILURE
+    # FAILURE
     # ========================================================
 
     return []
@@ -686,16 +743,22 @@ def download_batches(
         )
     )
 
+
     for start in range(
+
         0,
+
         len(ticker_list),
+
         batch_size
+
     ):
 
         batch = ticker_list[
             start:
             start + batch_size
         ]
+
 
         yahoo_tickers = [
 
@@ -704,6 +767,7 @@ def download_batches(
             for symbol in batch
 
         ]
+
 
         try:
 
@@ -725,9 +789,11 @@ def download_batches(
 
             )
 
+
             if data is None:
 
                 continue
+
 
             if data.empty:
 
@@ -746,8 +812,11 @@ def download_batches(
 
 
                 if isinstance(
+
                     stock.columns,
+
                     pd.MultiIndex
+
                 ):
 
                     level0 = (
@@ -773,8 +842,8 @@ def download_batches(
 
                             col[0]
 
-                            for col in
-                            stock.columns
+                            for col
+                            in stock.columns
 
                         ]
 
@@ -785,8 +854,8 @@ def download_batches(
 
                             col[1]
 
-                            for col in
-                            stock.columns
+                            for col
+                            in stock.columns
 
                         ]
 
@@ -799,8 +868,8 @@ def download_batches(
                         .strip()
                         .title()
 
-                        for column in
-                        stock.columns
+                        for column
+                        in stock.columns
 
                     ]
 
@@ -818,9 +887,11 @@ def download_batches(
 
                 if all(
 
-                    column in stock.columns
+                    column
+                    in stock.columns
 
-                    for column in required
+                    for column
+                    in required
 
                 ):
 
@@ -828,8 +899,11 @@ def download_batches(
                         required
                     ].copy()
 
+
                     stock = stock.dropna(
+
                         subset=required
+
                     )
 
 
@@ -848,8 +922,11 @@ def download_batches(
             # =================================================
 
             if not isinstance(
+
                 data.columns,
+
                 pd.MultiIndex
+
             ):
 
                 continue
@@ -863,6 +940,7 @@ def download_batches(
                 .tolist()
 
             )
+
 
             level1 = (
 
@@ -880,22 +958,17 @@ def download_batches(
                     symbol + ".NS"
                 )
 
+
                 try:
 
-                    if (
-                        yahoo_symbol
-                        in level0
-                    ):
+                    if yahoo_symbol in level0:
 
                         stock = data[
                             yahoo_symbol
                         ].copy()
 
 
-                    elif (
-                        yahoo_symbol
-                        in level1
-                    ):
+                    elif yahoo_symbol in level1:
 
                         stock = data[
                             :,
@@ -909,21 +982,26 @@ def download_batches(
 
 
                     if isinstance(
+
                         stock.columns,
+
                         pd.MultiIndex
+
                     ):
 
                         stock.columns = [
 
                             col[0]
+
                             if isinstance(
                                 col,
                                 tuple
                             )
+
                             else col
 
-                            for col in
-                            stock.columns
+                            for col
+                            in stock.columns
 
                         ]
 
@@ -934,8 +1012,8 @@ def download_batches(
                         .strip()
                         .title()
 
-                        for column in
-                        stock.columns
+                        for column
+                        in stock.columns
 
                     ]
 
@@ -953,11 +1031,11 @@ def download_batches(
 
                     if not all(
 
-                        column in
-                        stock.columns
+                        column
+                        in stock.columns
 
-                        for column in
-                        required
+                        for column
+                        in required
 
                     ):
 
@@ -968,8 +1046,11 @@ def download_batches(
                         required
                     ].copy()
 
+
                     stock = stock.dropna(
+
                         subset=required
+
                     )
 
 
@@ -1019,7 +1100,9 @@ def calculate_indicators(
 
 
     data = data.dropna(
+
         subset=required
+
     )
 
 
@@ -1099,6 +1182,7 @@ def calculate_indicators(
     data["RSI14"] = (
 
         100 -
+
         (
             100 /
             (1 + rs)
@@ -1237,10 +1321,15 @@ def calculate_indicators(
 # ============================================================
 
 def stage_one_filter(
+
     data,
+
     min_price,
+
     min_volume,
+
     min_turnover
+
 ):
 
     if len(data) < 210:
@@ -1272,8 +1361,6 @@ def stage_one_filter(
         return False
 
 
-    # Price
-
     if (
 
         latest["Close"]
@@ -1285,8 +1372,6 @@ def stage_one_filter(
         return False
 
 
-    # Volume
-
     if (
 
         latest["AVG_VOLUME20"]
@@ -1297,8 +1382,6 @@ def stage_one_filter(
 
         return False
 
-
-    # Turnover
 
     turnover_crore = (
 
@@ -1320,8 +1403,6 @@ def stage_one_filter(
         return False
 
 
-    # 200 SMA trend
-
     if (
 
         latest["Close"]
@@ -1337,7 +1418,7 @@ def stage_one_filter(
 
 
 # ============================================================
-# STAGE 2 TECHNICAL ANALYSIS
+# STAGE 2 ANALYSIS
 # ============================================================
 
 def stage_two_analysis(
@@ -1355,10 +1436,6 @@ def stage_two_analysis(
 
     n_minus_2 = data.iloc[-3]
 
-
-    # ========================================================
-    # FIVE CORE CONDITIONS
-    # ========================================================
 
     condition_1 = (
 
@@ -1405,10 +1482,6 @@ def stage_two_analysis(
     )
 
 
-    # ========================================================
-    # CONFIRMATIONS
-    # ========================================================
-
     volume_confirm = (
 
         latest["VOLUME_RATIO"]
@@ -1436,50 +1509,38 @@ def stage_two_analysis(
     )
 
 
-    # ========================================================
-    # SCORE
-    # ========================================================
-
     score = 0
 
 
     if condition_1:
-
         score += 2
 
 
     if condition_2:
-
         score += 1
 
 
     if condition_3:
-
         score += 1
 
 
     if condition_4:
-
         score += 1
 
 
     if condition_5:
-
         score += 2
 
 
     if volume_confirm:
-
         score += 1
 
 
     if rsi_confirm:
-
         score += 1
 
 
     if macd_confirm:
-
         score += 1
 
 
@@ -1547,7 +1608,7 @@ def stage_two_analysis(
 
 
 # ============================================================
-# SIDEBAR NAVIGATION
+# SIDEBAR
 # ============================================================
 
 st.sidebar.title(
@@ -1685,10 +1746,6 @@ if module == "📊 Technical Chart":
             st.stop()
 
 
-        # ====================================================
-        # CANDLESTICK CHART
-        # ====================================================
-
         fig = go.Figure()
 
 
@@ -1713,8 +1770,6 @@ if module == "📊 Technical Chart":
         )
 
 
-        # SMA 20
-
         fig.add_trace(
 
             go.Scatter(
@@ -1731,8 +1786,6 @@ if module == "📊 Technical Chart":
 
         )
 
-
-        # SMA 50
 
         fig.add_trace(
 
@@ -1751,8 +1804,6 @@ if module == "📊 Technical Chart":
         )
 
 
-        # SMA 200
-
         fig.add_trace(
 
             go.Scatter(
@@ -1769,8 +1820,6 @@ if module == "📊 Technical Chart":
 
         )
 
-
-        # Donchian Upper
 
         fig.add_trace(
 
@@ -1790,8 +1839,6 @@ if module == "📊 Technical Chart":
 
         )
 
-
-        # Donchian Lower
 
         fig.add_trace(
 
@@ -1848,10 +1895,6 @@ if module == "📊 Technical Chart":
         )
 
 
-        # ====================================================
-        # CURRENT VALUES
-        # ====================================================
-
         latest = data.iloc[-1]
 
 
@@ -1904,10 +1947,6 @@ if module == "📊 Technical Chart":
 
         )
 
-
-        # ====================================================
-        # TECHNICAL SETUP
-        # ====================================================
 
         analysis = stage_two_analysis(
             data
@@ -1974,10 +2013,6 @@ elif module == "🚀 Smart Breakout Scanner":
     )
 
 
-    # ========================================================
-    # LOAD UNIVERSES
-    # ========================================================
-
     with st.spinner(
         "Loading NSE stock universe..."
     ):
@@ -1990,10 +2025,6 @@ elif module == "🚀 Smart Breakout Scanner":
             load_nifty500()
         )
 
-
-    # ========================================================
-    # UNIVERSE SELECTOR
-    # ========================================================
 
     st.sidebar.subheader(
         "Stock Universe"
@@ -2037,6 +2068,10 @@ elif module == "🚀 Smart Breakout Scanner":
         stocks = []
 
 
+    # ========================================================
+    # NIFTY 500 VALIDATION
+    # ========================================================
+
     if (
 
         universe == "Nifty 500"
@@ -2048,15 +2083,20 @@ elif module == "🚀 Smart Breakout Scanner":
         st.error(
 
             """
-            Nifty 500 list could not be loaded.
+            ⚠️ Nifty 500 constituent data could
+            not be loaded.
 
-            Please select Nifty 50 or try again later.
+            Please try again in a few seconds.
             """
 
         )
 
         st.stop()
 
+
+    # ========================================================
+    # FULL NSE VALIDATION
+    # ========================================================
 
     if (
 
@@ -2069,10 +2109,11 @@ elif module == "🚀 Smart Breakout Scanner":
         st.error(
 
             """
-            Full NSE equity list could not be loaded.
+            ⚠️ Full NSE equity list could not
+            be loaded.
 
-            The NSE data server may temporarily reject
-            automated requests.
+            The NSE data server may temporarily
+            reject automated requests.
 
             Please try again later.
             """
@@ -2202,10 +2243,6 @@ elif module == "🚀 Smart Breakout Scanner":
     )
 
 
-    # ========================================================
-    # RUN BUTTON
-    # ========================================================
-
     run_scanner = st.sidebar.button(
 
         "🚀 RUN SMART SCANNER",
@@ -2287,10 +2324,6 @@ MACD = 1 point
             st.stop()
 
 
-        # ====================================================
-        # DOWNLOAD
-        # ====================================================
-
         progress = st.progress(
 
             0,
@@ -2327,10 +2360,6 @@ MACD = 1 point
 
         total = len(market)
 
-
-        # ====================================================
-        # STAGE 1
-        # ====================================================
 
         for symbol, raw_data in market.items():
 
@@ -2390,10 +2419,6 @@ MACD = 1 point
                 )
 
 
-        # ====================================================
-        # STAGE 1 SUMMARY
-        # ====================================================
-
         st.subheader(
             "🔎 Stage 1 Results"
         )
@@ -2403,36 +2428,26 @@ MACD = 1 point
 
 
         c1.metric(
-
             "Universe",
-
             len(stocks)
-
         )
 
 
         c2.metric(
-
             "Data Retrieved",
-
             len(market)
-
         )
 
 
         c3.metric(
-
             "Stage 1 Survivors",
-
             len(stage1_stocks)
-
         )
 
 
         if not stage1_stocks:
 
             progress.empty()
-
 
             st.warning(
 
@@ -2452,10 +2467,6 @@ MACD = 1 point
 
             st.stop()
 
-
-        # ====================================================
-        # STAGE 2
-        # ====================================================
 
         progress.progress(
 
@@ -2481,16 +2492,12 @@ MACD = 1 point
             try:
 
                 data = calculate_indicators(
-
                     market[symbol]
-
                 )
 
 
                 analysis = stage_two_analysis(
-
                     data
-
                 )
 
 
@@ -2549,99 +2556,95 @@ MACD = 1 point
                     continue
 
 
-                results.append(
+                results.append({
 
-                    {
+                    "Stock":
+                        symbol,
 
-                        "Stock":
-                            symbol,
+                    "Close":
+                        round(
+                            analysis["Close"],
+                            2
+                        ),
 
-                        "Close":
-                            round(
-                                analysis["Close"],
-                                2
-                            ),
+                    "200 SMA":
+                        round(
+                            analysis["SMA200"],
+                            2
+                        ),
 
-                        "200 SMA":
-                            round(
-                                analysis["SMA200"],
-                                2
-                            ),
+                    "RSI":
+                        round(
+                            analysis["RSI"],
+                            1
+                        ),
 
-                        "RSI":
-                            round(
-                                analysis["RSI"],
-                                1
-                            ),
+                    "Volume Ratio":
+                        round(
+                            analysis[
+                                "Volume Ratio"
+                            ],
+                            2
+                        ),
 
-                        "Volume Ratio":
-                            round(
-                                analysis[
-                                    "Volume Ratio"
-                                ],
-                                2
-                            ),
+                    "Avg Turnover ₹Cr":
+                        round(
+                            analysis[
+                                "Turnover"
+                            ],
+                            2
+                        ),
 
-                        "Avg Turnover ₹Cr":
-                            round(
-                                analysis[
-                                    "Turnover"
-                                ],
-                                2
-                            ),
+                    "C1":
+                        "✓"
+                        if analysis["C1"]
+                        else "✗",
 
-                        "C1":
-                            "✓"
-                            if analysis["C1"]
-                            else "✗",
+                    "C2":
+                        "✓"
+                        if analysis["C2"]
+                        else "✗",
 
-                        "C2":
-                            "✓"
-                            if analysis["C2"]
-                            else "✗",
+                    "C3":
+                        "✓"
+                        if analysis["C3"]
+                        else "✗",
 
-                        "C3":
-                            "✓"
-                            if analysis["C3"]
-                            else "✗",
+                    "C4":
+                        "✓"
+                        if analysis["C4"]
+                        else "✗",
 
-                        "C4":
-                            "✓"
-                            if analysis["C4"]
-                            else "✗",
+                    "C5":
+                        "✓"
+                        if analysis["C5"]
+                        else "✗",
 
-                        "C5":
-                            "✓"
-                            if analysis["C5"]
-                            else "✗",
+                    "Volume":
+                        "✓"
+                        if analysis[
+                            "Volume Confirm"
+                        ]
+                        else "✗",
 
-                        "Volume":
-                            "✓"
-                            if analysis[
-                                "Volume Confirm"
-                            ]
-                            else "✗",
+                    "RSI Confirm":
+                        "✓"
+                        if analysis[
+                            "RSI Confirm"
+                        ]
+                        else "✗",
 
-                        "RSI Confirm":
-                            "✓"
-                            if analysis[
-                                "RSI Confirm"
-                            ]
-                            else "✗",
+                    "MACD Confirm":
+                        "✓"
+                        if analysis[
+                            "MACD Confirm"
+                        ]
+                        else "✗",
 
-                        "MACD Confirm":
-                            "✓"
-                            if analysis[
-                                "MACD Confirm"
-                            ]
-                            else "✗",
+                    "Technical Score":
+                        analysis["Score"]
 
-                        "Technical Score":
-                            analysis["Score"]
-
-                    }
-
-                )
+                })
 
 
             except Exception:
@@ -2675,16 +2678,12 @@ MACD = 1 point
         progress.empty()
 
 
-        # ====================================================
-        # RESULTS
-        # ====================================================
-
         if not results:
 
             st.warning(
 
                 """
-                No stocks passed the Stage 2
+                No stocks passed Stage 2
                 technical conditions.
 
                 Try reducing the minimum score.
@@ -2727,10 +2726,6 @@ MACD = 1 point
             )
 
 
-            # =================================================
-            # TOP STOCKS
-            # =================================================
-
             st.subheader(
 
                 "🏆 Top Early Breakout Candidates"
@@ -2770,14 +2765,8 @@ MACD = 1 point
             )
 
 
-            # =================================================
-            # SCORE DISTRIBUTION
-            # =================================================
-
             st.subheader(
-
                 "📊 Score Distribution"
-
             )
 
 
@@ -2799,10 +2788,6 @@ MACD = 1 point
             )
 
 
-            # =================================================
-            # FULL RESULTS
-            # =================================================
-
             st.subheader(
                 "📋 Detailed Results"
             )
@@ -2818,10 +2803,6 @@ MACD = 1 point
 
             )
 
-
-            # =================================================
-            # DOWNLOAD
-            # =================================================
 
             csv = results_df.to_csv(
                 index=False
@@ -2843,10 +2824,6 @@ MACD = 1 point
             )
 
 
-            # =================================================
-            # SUMMARY
-            # =================================================
-
             st.subheader(
                 "📈 Scanner Summary"
             )
@@ -2858,29 +2835,20 @@ MACD = 1 point
 
 
             c1.metric(
-
                 "Universe",
-
                 len(stocks)
-
             )
 
 
             c2.metric(
-
                 "Stage 1",
-
                 len(stage1_stocks)
-
             )
 
 
             c3.metric(
-
                 "Stage 2",
-
                 len(results_df)
-
             )
 
 
@@ -2922,10 +2890,6 @@ else:
     )
 
 
-    # ========================================================
-    # API STATUS
-    # ========================================================
-
     if client is None:
 
         st.warning(
@@ -2933,8 +2897,7 @@ else:
             """
             OpenAI API is not currently available.
 
-            If you want to use the AI Analyst,
-            add your API key under:
+            Add your API key under:
 
             **Streamlit Cloud → Settings → Secrets**
 
@@ -3009,9 +2972,9 @@ You may discuss:
 Do not invent live market prices,
 technical indicator values or company data.
 
-If the application has not supplied
-actual market data, clearly state that
-you cannot verify the current value.
+If actual market data has not been supplied,
+clearly state that you cannot verify the
+current value.
 
 Do not present predictions as certainty.
 
@@ -3046,10 +3009,6 @@ not personalized financial advice.
                     error_text = str(e)
 
 
-                    # ========================================
-                    # FRIENDLY API ERROR
-                    # ========================================
-
                     if (
 
                         "429" in error_text
@@ -3073,8 +3032,7 @@ not personalized financial advice.
                             is exhausted.
 
                             Please add API credits to your
-                            OpenAI API billing account and
-                            try again.
+                            OpenAI API billing account.
                             """
 
                         )
@@ -3096,8 +3054,11 @@ not personalized financial advice.
                             """
                             ❌ Invalid OpenAI API key.
 
-                            Please check the API key under
-                            Streamlit Cloud → Settings → Secrets.
+                            Check:
+
+                            Streamlit Cloud
+                            → Settings
+                            → Secrets
                             """
 
                         )
