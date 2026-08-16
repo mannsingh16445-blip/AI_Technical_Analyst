@@ -1026,6 +1026,18 @@ else:
     else:
 
         stocks = nse_stocks
+        if universe == "Full NSE" and not nse_stocks:
+
+    st.error(
+        """
+        Full NSE list could not be loaded.
+
+        The NSE data server may be temporarily
+        blocking the request. Please try again later.
+        """
+    )
+
+    st.stop()
 
     # --------------------------------------------------------
     # STAGE 1 FILTERS
