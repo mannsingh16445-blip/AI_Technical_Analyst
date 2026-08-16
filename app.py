@@ -86,7 +86,12 @@ def load_nse_equity_universe():
         ]
 
         if "SYMBOL" not in df.columns:
-            return NIFTY50
+
+            st.warning(
+                "NSE returned an unexpected file format."
+            )
+
+            return []
 
         symbols = (
             df["SYMBOL"]
@@ -103,13 +108,19 @@ def load_nse_equity_universe():
             ])
         ]
 
-        return sorted(
+        symbols = sorted(
             symbols.drop_duplicates().tolist()
         )
 
-    except Exception:
+        return symbols
 
-        return NIFTY50
+    except Exception as e:
+
+        st.warning(
+            f"NSE stock list could not be downloaded: {e}"
+        )
+
+        return []
 
 
 # ============================================================
