@@ -510,7 +510,7 @@ def load_nifty_index_constituents(
 
     Supported:
       NIFTY_MIDCAP_100  -> 100 constituents
-      NIFTY_SMALLCAP_500 -> 500 constituents
+      NIFTY_SMALLCAP_250 -> 250 constituents
 
     A small fallback set of official endpoint variants is used
     because NSE/Nifty Indices occasionally changes archive hosts.
@@ -529,15 +529,15 @@ def load_nifty_index_constituents(
             "IndexConstituent/ind_niftymidcap100list.csv"
         ],
 
-        "NIFTY_SMALLCAP_500": [
+        "NIFTY_SMALLCAP_250": [
             "https://www.nsearchives.nseindia.com/"
-            "content/indices/ind_niftysmallcap500list.csv",
+            "content/indices/ind_niftysmallcap250list.csv",
 
             "https://archives.nseindia.com/"
-            "content/indices/ind_niftysmallcap500list.csv",
+            "content/indices/ind_niftysmallcap250list.csv",
 
             "https://www.niftyindices.com/"
-            "IndexConstituent/ind_niftysmallcap500list.csv"
+            "IndexConstituent/ind_niftysmallcap250list.csv"
         ]
     }
 
@@ -627,13 +627,13 @@ def load_nifty_midcap100():
     )
 
 
-def load_nifty_smallcap500():
+def load_nifty_smallcap250():
     """
-    Current Nifty Smallcap 500 constituents.
+    Current Nifty Smallcap 250 constituents.
     """
     return load_nifty_index_constituents(
-        "NIFTY_SMALLCAP_500",
-        400
+        "NIFTY_SMALLCAP_250",
+        200
     )
 
 
@@ -643,7 +643,7 @@ def resolve_stock_universe(
     nifty500,
     fno_stocks,
     nifty_midcap100,
-    nifty_smallcap500
+    nifty_smallcap250
 ):
     """
     Central universe resolver used by scanners and backtester.
@@ -658,8 +658,8 @@ def resolve_stock_universe(
     if universe == "Nifty Midcap 100":
         return list(nifty_midcap100)[:100]
 
-    if universe == "Nifty Smallcap 500":
-        return list(nifty_smallcap500)[:500]
+    if universe == "Nifty Smallcap 250":
+        return list(nifty_smallcap250)[:500]
 
     if universe == "NSE F&O Stocks":
         return list(fno_stocks)
@@ -2350,6 +2350,198 @@ def hourly_rsi_wma_signal_asof(
     }
 
 
+# ============================================================
+# HOURLY DONCHIAN + 200 SMA + RSI(9) BREAKOUT SCANNER
+# ============================================================
+
+def calculate_hourly_donchian_breakout(
+    hourly_data,
+    as_of=None
+):
+    """
+    Exact implementation of the supplied Chartink hourly rules.
+
+    H1: [0] 1-hour Close > [-1] 1-hour High
+    H2: [-1] 1-hour High < [-2] 1-hour High
+    H3: [0] 1-hour Close > [0] 1-hour SMA(Close, 200)
+    H4: [-1] 1-hour Low > [0] 1-hour Donchian Lower Band(5)
+    H5: [-1] 1-hour High < [0] 1-hour Donchian Upper Band(5)
+    H6: [0] 1-hour RSI(9) >= 55
+
+    Donchian bands are calculated literally from the current
+    5-bar window:
+        Upper = rolling 5-bar High maximum
+        Lower = rolling 5-bar Low minimum
+
+    For historical use, only bars <= as_of are considered.
+    """
+
+    if hourly_data is None or hourly_data.empty:
+        return None
+
+    df = hourly_data.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    if as_of is not None:
+        cutoff = pd.Timestamp(as_of)
+
+        # Handle timezone mismatch safely.
+        try:
+            if getattr(df.index, "tz", None) is not None and cutoff.tzinfo is None:
+                cutoff = cutoff.tz_localize(df.index.tz)
+            elif getattr(df.index, "tz", None) is None and cutoff.tzinfo is not None:
+                cutoff = cutoff.tz_localize(None)
+        except Exception:
+            cutoff = pd.Timestamp(as_of).tz_localize(None)
+
+        df = df.loc[df.index <= cutoff]
+
+    required = ["Open", "High", "Low", "Close", "Volume"]
+
+    if any(c not in df.columns for c in required):
+        return None
+
+    df = df.dropna(subset=required).copy()
+
+    if len(df) < 205:
+        return None
+
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    high = pd.to_numeric(df["High"], errors="coerce")
+    low = pd.to_numeric(df["Low"], errors="coerce")
+
+    sma200 = close.rolling(200).mean()
+
+    donchian_upper = high.rolling(5).max()
+    donchian_lower = low.rolling(5).min()
+
+    # RSI(9) using the app's existing Wilder RSI implementation.
+    rsi9 = calculate_rsi_wilder(close, 9)
+
+    work = pd.DataFrame(
+        {
+            "Close": close,
+            "High": high,
+            "Low": low,
+            "SMA200": sma200,
+            "DonchianUpper5": donchian_upper,
+            "DonchianLower5": donchian_lower,
+            "RSI9": rsi9,
+        },
+        index=df.index
+    ).dropna()
+
+    if len(work) < 3:
+        return None
+
+    latest = work.iloc[-1]
+    prev = work.iloc[-2]
+    prev2 = work.iloc[-3]
+
+    conditions = {
+        "H1 Close > Previous Hour High":
+            float(latest["Close"]) > float(prev["High"]),
+
+        "H2 Previous Hour High < 2-Hours-Ago High":
+            float(prev["High"]) < float(prev2["High"]),
+
+        "H3 Close > Hourly SMA(200)":
+            float(latest["Close"]) > float(latest["SMA200"]),
+
+        "H4 Previous Hour Low > Current Donchian Lower(5)":
+            float(prev["Low"]) > float(latest["DonchianLower5"]),
+
+        "H5 Previous Hour High < Current Donchian Upper(5)":
+            float(prev["High"]) < float(latest["DonchianUpper5"]),
+
+        "H6 Hourly RSI(9) >= 55":
+            float(latest["RSI9"]) >= 55.0,
+    }
+
+    return {
+        "Pass": all(conditions.values()),
+        "Conditions": conditions,
+        "Date": work.index[-1],
+        "Close": float(latest["Close"]),
+        "Previous High": float(prev["High"]),
+        "Two Hours Ago High": float(prev2["High"]),
+        "Previous Low": float(prev["Low"]),
+        "SMA200": float(latest["SMA200"]),
+        "Donchian Upper5": float(latest["DonchianUpper5"]),
+        "Donchian Lower5": float(latest["DonchianLower5"]),
+        "RSI9": float(latest["RSI9"]),
+    }
+
+
+def hourly_donchian_breakout_asof(
+    hourly_data,
+    as_of
+):
+    """
+    Look-ahead-safe historical version.
+
+    For a daily backtest signal date, inspect all hourly bars
+    available on that calendar date and use the latest hourly
+    bar that satisfies all six conditions.
+
+    The trade itself is still entered only on subsequent daily
+    sessions by the common backtest engine.
+    """
+
+    if hourly_data is None or hourly_data.empty:
+        return None
+
+    df = hourly_data.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    signal_date = pd.Timestamp(as_of).date()
+
+    # All hourly history through the signal date.
+    try:
+        date_mask = df.index.date <= signal_date
+        available = df.loc[date_mask]
+    except Exception:
+        available = df.copy()
+
+    if available.empty:
+        return None
+
+    # Evaluate each hourly bar in chronological order by passing
+    # a prefix of the data to the exact condition engine.
+    # This avoids using any future hourly bar.
+    passed = None
+
+    # We need at least 205 bars for SMA(200).
+    for i in range(204, len(available)):
+        prefix = available.iloc[:i + 1]
+        result = calculate_hourly_donchian_breakout(prefix)
+
+        if result is None:
+            continue
+
+        # Only accept signals occurring on the requested date.
+        result_date = pd.Timestamp(result["Date"]).date()
+
+        if (
+            result_date == signal_date
+            and result["Pass"]
+        ):
+            passed = result
+
+    return passed
+
+
+
 def top20_score_asof(
     data,
     as_of,
@@ -3604,6 +3796,7 @@ module = st.sidebar.radio(
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
         "📈 120-Day High Breakout Scanner",
+        "⚡ Hourly Donchian Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -3882,8 +4075,8 @@ elif module == "🚀 Smart Breakout Scanner":
             load_nifty_midcap100()
         )
 
-        nifty_smallcap500 = (
-            load_nifty_smallcap500()
+        nifty_smallcap250 = (
+            load_nifty_smallcap250()
         )
 
     # --------------------------------------------------------
@@ -3900,7 +4093,7 @@ elif module == "🚀 Smart Breakout Scanner":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "NSE F&O Stocks",
             "Full NSE"
         ]
@@ -3912,7 +4105,7 @@ elif module == "🚀 Smart Breakout Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     if (
@@ -3963,13 +4156,13 @@ elif module == "🚀 Smart Breakout Scanner":
         st.stop()
 
     if (
-        universe == "Nifty Smallcap 500"
+        universe == "Nifty Smallcap 250"
         and not stocks
     ):
 
         st.error(
             """
-            Nifty Smallcap 500 list could not be loaded.
+            Nifty Smallcap 250 list could not be loaded.
 
             Please try again later.
             """
@@ -4015,10 +4208,10 @@ elif module == "🚀 Smart Breakout Scanner":
             "the midcap segment, sourced from Nifty Indices."
         )
 
-    if universe == "Nifty Smallcap 500":
+    if universe == "Nifty Smallcap 250":
 
         st.caption(
-            "Nifty Smallcap 500 = 500 small-cap NSE stocks, "
+            "Nifty Smallcap 250 = 250 small-cap NSE stocks, "
             "sourced from Nifty Indices."
         )
 
@@ -4667,8 +4860,8 @@ elif module == "📈 120-Day High Breakout Scanner":
             load_nifty_midcap100()
         )
 
-        nifty_smallcap500 = (
-            load_nifty_smallcap500()
+        nifty_smallcap250 = (
+            load_nifty_smallcap250()
         )
 
     st.sidebar.subheader(
@@ -4682,7 +4875,7 @@ elif module == "📈 120-Day High Breakout Scanner":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "Full NSE"
         ],
         index=0,
@@ -4695,7 +4888,7 @@ elif module == "📈 120-Day High Breakout Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     max_stocks = st.sidebar.slider(
@@ -4960,6 +5153,259 @@ elif module == "📈 120-Day High Breakout Scanner":
 
 
 # ============================================================
+# HOURLY DONCHIAN BREAKOUT SCANNER
+# ============================================================
+
+elif module == "⚡ Hourly Donchian Breakout Scanner":
+
+    st.header(
+        "⚡ Hourly Donchian + 200 SMA + RSI(9) Scanner"
+    )
+
+    st.write(
+        """
+        Exact six-condition implementation of the supplied
+        Chartink hourly cash-segment scanner.
+        """
+    )
+
+    with st.expander(
+        "📋 Exact Scanner Conditions",
+        expanded=True
+    ):
+
+        st.markdown(
+            """
+            **H1:** [0] 1 hour Close > [-1] 1 hour High
+
+            **H2:** [-1] 1 hour High < [-2] 1 hour High
+
+            **H3:** [0] 1 hour Close >
+            [0] 1 hour SMA(Close, 200)
+
+            **H4:** [-1] 1 hour Low >
+            [0] 1 hour Donchian Lower Band(5)
+
+            **H5:** [-1] 1 hour High <
+            [0] 1 hour Donchian Upper Band(5)
+
+            **H6:** [0] 1 hour RSI(9) >= **55**
+            """
+        )
+
+    st.warning(
+        """
+        This scanner uses 60-minute Yahoo Finance data.
+        Yahoo Finance limits historical 60-minute data to the
+        recent available intraday window, so this scanner is
+        intended for current/recent signals rather than
+        multi-year intraday history.
+        """
+    )
+
+    with st.spinner(
+        "Loading NSE stock universes..."
+    ):
+
+        nse_stocks = load_nse_equity_universe()
+        nifty500 = load_nifty500()
+        fno_stocks = load_fno_stocks()
+        nifty_midcap100 = load_nifty_midcap100()
+        nifty_smallcap250 = load_nifty_smallcap250()
+
+    st.sidebar.subheader(
+        "⚡ Hourly Donchian Scanner"
+    )
+
+    universe = st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        index=0,
+        key="hourly_donchian_universe"
+    )
+
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    max_stocks = st.sidebar.slider(
+        "Maximum Stocks to Scan",
+        min_value=10,
+        max_value=min(
+            500,
+            max(10, len(stocks))
+        ),
+        value=min(
+            100,
+            max(10, len(stocks))
+        ),
+        step=10,
+        key="hourly_donchian_max_stocks"
+    )
+
+    batch_size = st.sidebar.slider(
+        "Download Batch Size",
+        min_value=25,
+        max_value=100,
+        value=50,
+        step=25,
+        key="hourly_donchian_batch"
+    )
+
+    run_scan = st.sidebar.button(
+        "⚡ RUN HOURLY SCANNER",
+        type="primary",
+        key="run_hourly_donchian"
+    )
+
+    if not stocks:
+        st.error(
+            f"No stocks are available for **{universe}**."
+        )
+        st.stop()
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks available: **{len(stocks)}** | "
+        f"Timeframe: **1 Hour**"
+    )
+
+    if run_scan:
+
+        selected = stocks[:max_stocks]
+
+        with st.spinner(
+            f"Downloading 60-minute data for "
+            f"{len(selected)} stocks..."
+        ):
+
+            market = download_rsi_wma_batches(
+                selected,
+                "Hourly",
+                batch_size
+            )
+
+        rows = []
+
+        for symbol in selected:
+
+            data = market.get(symbol)
+
+            if data is None or data.empty:
+                continue
+
+            result = calculate_hourly_donchian_breakout(
+                data
+            )
+
+            if result is None:
+                continue
+
+            passed_count = sum(
+                bool(v)
+                for v in result["Conditions"].values()
+            )
+
+            rows.append(
+                {
+                    "Stock": symbol,
+                    "Status": (
+                        "🟢 PASS"
+                        if result["Pass"]
+                        else "—"
+                    ),
+                    "Conditions Passed":
+                        f"{passed_count}/6",
+                    "Signal Time":
+                        str(result["Date"]),
+                    "Close":
+                        round(result["Close"], 2),
+                    "Previous High":
+                        round(result["Previous High"], 2),
+                    "2H Ago High":
+                        round(result["Two Hours Ago High"], 2),
+                    "Hourly SMA200":
+                        round(result["SMA200"], 2),
+                    "Donchian Upper(5)":
+                        round(result["Donchian Upper5"], 2),
+                    "Donchian Lower(5)":
+                        round(result["Donchian Lower5"], 2),
+                    "RSI(9)":
+                        round(result["RSI9"], 2),
+                }
+            )
+
+        result_df = pd.DataFrame(rows)
+
+        if result_df.empty:
+
+            st.warning(
+                "No usable hourly data was returned."
+            )
+
+        else:
+
+            passed_df = result_df[
+                result_df["Status"] == "🟢 PASS"
+            ].copy()
+
+            st.success(
+                f"**{len(passed_df)} stocks passed all "
+                f"6 conditions** out of "
+                f"**{len(result_df)} tested.**"
+            )
+
+            if not passed_df.empty:
+
+                st.subheader(
+                    "🟢 Hourly Breakout Signals"
+                )
+
+                st.dataframe(
+                    passed_df,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Hourly Scanner Results",
+                    passed_df.to_csv(index=False),
+                    "Hourly_Donchian_Breakout_Scanner.csv",
+                    "text/csv"
+                )
+
+            else:
+
+                st.info(
+                    "No stocks currently pass all six "
+                    "hourly conditions."
+                )
+
+            with st.expander(
+                "📋 Show all tested stocks"
+            ):
+
+                st.dataframe(
+                    result_df,
+                    width="stretch",
+                    hide_index=True
+                )
+
+
+
+# ============================================================
 # RSI / WMA TIMEFRAME SCANNER
 # ============================================================
 
@@ -5011,8 +5457,8 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             load_nifty_midcap100()
         )
 
-        nifty_smallcap500 = (
-            load_nifty_smallcap500()
+        nifty_smallcap250 = (
+            load_nifty_smallcap250()
         )
 
 
@@ -5036,7 +5482,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "NSE F&O Stocks",
             "Full NSE"
         ]
@@ -5049,7 +5495,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
 
@@ -5585,9 +6031,9 @@ elif module == "📅 Weekly Trend Scanner":
         nifty500=load_nifty500()
         nse_stocks=load_nse_equity_universe()
         nifty_midcap100=load_nifty_midcap100()
-        nifty_smallcap500=load_nifty_smallcap500()
+        nifty_smallcap250=load_nifty_smallcap250()
         nifty_midcap100=load_nifty_midcap100()
-        nifty_smallcap500=load_nifty_smallcap500()
+        nifty_smallcap250=load_nifty_smallcap250()
 
     universe=st.sidebar.selectbox(
         "Stock Universe",
@@ -5596,7 +6042,7 @@ elif module == "📅 Weekly Trend Scanner":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "Full NSE"
         ],
         index=0,
@@ -5609,7 +6055,7 @@ elif module == "📅 Weekly Trend Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     max_stocks=st.sidebar.slider(
@@ -5769,9 +6215,9 @@ elif module == "📈 Daily Trend 50/150/200 Scanner":
         nifty500=load_nifty500()
         nse_stocks=load_nse_equity_universe()
         nifty_midcap100=load_nifty_midcap100()
-        nifty_smallcap500=load_nifty_smallcap500()
+        nifty_smallcap250=load_nifty_smallcap250()
         nifty_midcap100=load_nifty_midcap100()
-        nifty_smallcap500=load_nifty_smallcap500()
+        nifty_smallcap250=load_nifty_smallcap250()
 
     st.sidebar.subheader("📈 Daily Trend Scanner")
 
@@ -5782,7 +6228,7 @@ elif module == "📈 Daily Trend 50/150/200 Scanner":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "Full NSE"
         ],
         index=0,
@@ -5795,7 +6241,7 @@ elif module == "📈 Daily Trend 50/150/200 Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     max_stocks=st.sidebar.slider(
@@ -5989,8 +6435,8 @@ elif module == "🏆 Top 20 Momentum Stocks":
             load_nifty_midcap100()
         )
 
-        nifty_smallcap500 = (
-            load_nifty_smallcap500()
+        nifty_smallcap250 = (
+            load_nifty_smallcap250()
         )
 
     st.sidebar.subheader(
@@ -6004,7 +6450,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "Full NSE"
         ],
         index=0
@@ -6016,7 +6462,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     if not stocks:
@@ -7213,7 +7659,7 @@ elif module == "📊 Backtest & Performance":
         nifty500 = load_nifty500()
         nse_stocks = load_nse_equity_universe()
         nifty_midcap100 = load_nifty_midcap100()
-        nifty_smallcap500 = load_nifty_smallcap500()
+        nifty_smallcap250 = load_nifty_smallcap250()
 
     universe = st.sidebar.selectbox(
         "Stock Universe",
@@ -7222,7 +7668,7 @@ elif module == "📊 Backtest & Performance":
             "Nifty 50",
             "Nifty 500",
             "Nifty Midcap 100",
-            "Nifty Smallcap 500",
+            "Nifty Smallcap 250",
             "Full NSE"
         ],
         index=0,
@@ -7235,7 +7681,7 @@ elif module == "📊 Backtest & Performance":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap500
+        nifty_smallcap250
     )
 
     if not stocks:
@@ -7250,6 +7696,7 @@ elif module == "📊 Backtest & Performance":
         [
             "Smart Breakout",
             "120-Day High Breakout",
+            "Hourly Donchian Breakout",
             "Daily RSI(9)/WMA(21)",
             "Weekly RSI(9)/WMA(21)",
             "Hourly RSI(9)/WMA(21)",
@@ -7379,6 +7826,8 @@ elif module == "📊 Backtest & Performance":
             "Only C1–C5 + Smart Breakout confirmations are tested.",
         "120-Day High Breakout":
             "Only the four supplied 120-day breakout/liquidity conditions are tested.",
+        "Hourly Donchian Breakout":
+            "Only the six supplied hourly Donchian/SMA200/RSI(9) conditions are tested.",
         "Daily RSI(9)/WMA(21)":
             "Only Daily RSI(9) cross + RSI(9) > 55 are tested.",
         "Weekly RSI(9)/WMA(21)":
@@ -7407,9 +7856,13 @@ elif module == "📊 Backtest & Performance":
 
     if strategy in [
         "Hourly RSI(9)/WMA(21)",
+        "Hourly Donchian Breakout",
         "Multi-Timeframe RSI/WMA"
     ] and (
-        strategy == "Hourly RSI(9)/WMA(21)"
+        strategy in [
+            "Hourly RSI(9)/WMA(21)",
+            "Hourly Donchian Breakout"
+        ]
         or mtf_hourly_confirmation
     ):
 
@@ -7447,6 +7900,19 @@ elif module == "📊 Backtest & Performance":
               4. Daily Close > 1 day ago Close × 1.03
             - No Smart Breakout, RSI/WMA, Weekly Trend, or Daily Trend
               condition is added.
+
+            **Hourly Donchian Breakout**
+            - ONLY these six hourly conditions are tested:
+              1. [0] 1-hour Close > [-1] 1-hour High
+              2. [-1] 1-hour High < [-2] 1-hour High
+              3. [0] 1-hour Close > [0] 1-hour SMA(Close, 200)
+              4. [-1] 1-hour Low > [0] 1-hour Donchian Lower Band(5)
+              5. [-1] 1-hour High < [0] 1-hour Donchian Upper Band(5)
+              6. [0] 1-hour RSI(9) >= 55
+            - No Smart Breakout, Daily RSI, Weekly Trend, or Daily Trend
+              condition is added.
+            - Because 60-minute history is limited, historical testing
+              is limited to the available recent intraday dataset.
 
             **Daily RSI(9)/WMA(21)**
             - ONLY Daily RSI(9) crossed above WMA(Close,21).
@@ -7531,7 +7997,10 @@ elif module == "📊 Backtest & Performance":
             # backtests fast and prevents unrelated data from entering
             # their calculations.
             needs_hourly = (
-                strategy == "Hourly RSI(9)/WMA(21)"
+                strategy in [
+                    "Hourly RSI(9)/WMA(21)",
+                    "Hourly Donchian Breakout"
+                ]
                 or (
                     strategy == "Multi-Timeframe RSI/WMA"
                     and mtf_hourly_confirmation
@@ -7634,6 +8103,7 @@ elif module == "📊 Backtest & Performance":
                     mtf_hourly = None
                     top20_model = None
                     breakout_120_result = None
+                    hourly_breakout = None
 
                     # --------------------------------------------
                     # 1. SMART BREAKOUT ONLY
@@ -7672,7 +8142,24 @@ elif module == "📊 Backtest & Performance":
                         )
 
                     # --------------------------------------------
-                    # 3. DAILY RSI/WMA ONLY
+                    # 3. HOURLY DONCHIAN BREAKOUT ONLY
+                    # --------------------------------------------
+                    elif strategy == "Hourly Donchian Breakout":
+
+                        hourly_breakout = (
+                            hourly_donchian_breakout_asof(
+                                hourly_history.get(symbol),
+                                signal_date
+                            )
+                        )
+
+                        signal = (
+                            hourly_breakout is not None
+                            and hourly_breakout["Pass"]
+                        )
+
+                    # --------------------------------------------
+                    # 4. DAILY RSI/WMA ONLY
                     # --------------------------------------------
                     elif strategy == "Daily RSI(9)/WMA(21)":
 
@@ -8049,6 +8536,10 @@ elif module == "📊 Backtest & Performance":
 
                         grade = "120-Day Breakout Qualified"
 
+                    elif strategy == "Hourly Donchian Breakout":
+
+                        grade = "Hourly Donchian Breakout Qualified"
+
                     elif strategy == "Daily RSI(9)/WMA(21)":
 
                         grade = "Daily RSI Qualified"
@@ -8205,6 +8696,79 @@ elif module == "📊 Backtest & Performance":
                                     and breakout_120_result is not None
                                 )
                                 else np.nan
+                            ),
+
+                        "Hourly Breakout RSI9":
+                            (
+                                round(
+                                    hourly_breakout["RSI9"],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly Donchian Breakout"
+                                    and hourly_breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Hourly SMA200":
+                            (
+                                round(
+                                    hourly_breakout["SMA200"],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly Donchian Breakout"
+                                    and hourly_breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Hourly Donchian Upper5":
+                            (
+                                round(
+                                    hourly_breakout[
+                                        "Donchian Upper5"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly Donchian Breakout"
+                                    and hourly_breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Hourly Donchian Lower5":
+                            (
+                                round(
+                                    hourly_breakout[
+                                        "Donchian Lower5"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly Donchian Breakout"
+                                    and hourly_breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Hourly Signal Time":
+                            (
+                                str(
+                                    hourly_breakout["Date"]
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly Donchian Breakout"
+                                    and hourly_breakout is not None
+                                )
+                                else ""
                             ),
 
                         "Weekly RSI9":
