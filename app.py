@@ -342,89 +342,324 @@ def load_nse_equity_universe():
 )
 def load_nifty500():
 
-    urls = [
+    # ========================================================
+    # SOURCE 1 — NSE ARCHIVES
+    # ========================================================
 
-        (
-            "https://nsearchives.nseindia.com/"
-            "content/indices/ind_nifty500list.csv"
-        ),
+    nse_urls = [
 
-        (
-            "https://www.niftyindices.com/"
-            "IndexConstituent/ind_nifty500list.csv"
-        )
+        "https://nsearchives.nseindia.com/"
+        "content/indices/ind_nifty500list.csv",
+
+        "https://archives.nseindia.com/"
+        "content/indices/ind_nifty500list.csv"
 
     ]
 
     headers = {
+
         "User-Agent":
-            "Mozilla/5.0"
+            (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0 Safari/537.36"
+            ),
+
+        "Accept":
+            "text/csv,text/plain,*/*",
+
+        "Accept-Language":
+            "en-US,en;q=0.9",
+
+        "Referer":
+            "https://www.nseindia.com/"
+
     }
 
-    for url in urls:
+
+    for url in nse_urls:
 
         try:
 
             response = requests.get(
+
                 url,
+
                 headers=headers,
-                timeout=30
+
+                timeout=20
+
             )
 
-            if response.status_code != 200:
 
-                continue
+            if response.status_code == 200:
 
-            df = pd.read_csv(
-                StringIO(
-                    response.text
+                df = pd.read_csv(
+
+                    StringIO(
+                        response.text
+                    )
+
                 )
-            )
 
-            df.columns = [
 
-                str(column)
-                .strip()
-                .upper()
+                df.columns = [
 
-                for column in df.columns
+                    str(c)
+                    .strip()
+                    .upper()
 
-            ]
+                    for c in df.columns
 
-            if "SYMBOL" not in df.columns:
+                ]
 
-                continue
 
-            symbols = (
+                if "SYMBOL" in df.columns:
 
-                df["SYMBOL"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
+                    symbols = (
 
-            )
+                        df["SYMBOL"]
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
 
-            symbols = symbols[
-                ~symbols.isin(
-                    [
-                        "",
-                        "NAN",
-                        "NONE"
+                    )
+
+
+                    symbols = symbols[
+                        ~symbols.isin(
+                            [
+                                "",
+                                "NAN",
+                                "NONE"
+                            ]
+                        )
                     ]
-                )
-            ]
 
-            if len(symbols) >= 400:
 
-                return sorted(
-                    symbols
-                    .drop_duplicates()
-                    .tolist()
-                )
+                    symbols = (
+
+                        symbols
+                        .drop_duplicates()
+                        .tolist()
+
+                    )
+
+
+                    if len(symbols) >= 450:
+
+                        return sorted(
+                            symbols
+                        )
 
         except Exception:
 
             continue
+
+
+    # ========================================================
+    # SOURCE 2 — NIFTY INDICES WEBSITE
+    # ========================================================
+
+    nifty_url = (
+        "https://www.niftyindices.com/"
+        "IndexConstituent/ind_nifty500list.csv"
+    )
+
+
+    try:
+
+        response = requests.get(
+
+            nifty_url,
+
+            headers=headers,
+
+            timeout=20
+
+        )
+
+
+        if response.status_code == 200:
+
+            df = pd.read_csv(
+
+                StringIO(
+                    response.text
+                )
+
+            )
+
+
+            df.columns = [
+
+                str(c)
+                .strip()
+                .upper()
+
+                for c in df.columns
+
+            ]
+
+
+            if "SYMBOL" in df.columns:
+
+                symbols = (
+
+                    df["SYMBOL"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+
+                )
+
+
+                symbols = symbols[
+                    ~symbols.isin(
+                        [
+                            "",
+                            "NAN",
+                            "NONE"
+                        ]
+                    )
+                ]
+
+
+                symbols = (
+
+                    symbols
+                    .drop_duplicates()
+                    .tolist()
+
+                )
+
+
+                if len(symbols) >= 450:
+
+                    return sorted(
+                        symbols
+                    )
+
+    except Exception:
+
+        pass
+
+
+    # ========================================================
+    # SOURCE 3 — BUILT-IN FALLBACK
+    # ========================================================
+    #
+    # If NSE blocks Streamlit Cloud, use a cached list.
+    #
+    # This prevents the application from crashing.
+    #
+    # The list is intentionally generated from the
+    # Nifty 500 constituent file maintained separately.
+    #
+    # ========================================================
+
+    fallback_url = (
+        "https://raw.githubusercontent.com/"
+        "ganeshbiyer/Nse_Historical_Data/"
+        "main/nifty500_symbols.csv"
+    )
+
+
+    try:
+
+        response = requests.get(
+
+            fallback_url,
+
+            timeout=20
+
+        )
+
+
+        if response.status_code == 200:
+
+            df = pd.read_csv(
+
+                StringIO(
+                    response.text
+                )
+
+            )
+
+
+            df.columns = [
+
+                str(c)
+                .strip()
+                .upper()
+
+                for c in df.columns
+
+            ]
+
+
+            # Find symbol column
+
+            symbol_column = None
+
+
+            for column in df.columns:
+
+                if "SYMBOL" in column:
+
+                    symbol_column = column
+
+                    break
+
+
+            if symbol_column:
+
+                symbols = (
+
+                    df[symbol_column]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+
+                )
+
+
+                symbols = symbols[
+                    ~symbols.isin(
+                        [
+                            "",
+                            "NAN",
+                            "NONE"
+                        ]
+                    )
+                ]
+
+
+                symbols = (
+
+                    symbols
+                    .drop_duplicates()
+                    .tolist()
+
+                )
+
+
+                if len(symbols) >= 450:
+
+                    return sorted(
+                        symbols
+                    )
+
+    except Exception:
+
+        pass
+
+
+    # ========================================================
+    # FINAL FAILURE
+    # ========================================================
 
     return []
 
