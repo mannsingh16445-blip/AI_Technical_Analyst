@@ -5,11 +5,15 @@ import pandas as pd
 import numpy as np
 import requests
 import time
+import os
+
 from io import StringIO
+from openai import OpenAI
+from dotenv import load_dotenv
 
 
 # ============================================================
-# PAGE CONFIG
+# CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -18,28 +22,89 @@ st.set_page_config(
     layout="wide"
 )
 
+load_dotenv()
+
+
+# ============================================================
+# OPENAI
+# ============================================================
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if OPENAI_API_KEY:
+    client = OpenAI(
+        api_key=OPENAI_API_KEY
+    )
+else:
+    client = None
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("📈 AI Technical Analyst")
+
+st.caption(
+    "Technical charts • Smart NSE scanner • AI analysis"
+)
+
 
 # ============================================================
 # NIFTY 50
 # ============================================================
 
 NIFTY50 = [
-    "ADANIENT", "ADANIPORTS", "APOLLOHOSP",
-    "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO",
-    "BAJFINANCE", "BAJAJFINSV", "BEL",
-    "BHARTIARTL", "CIPLA", "COALINDIA",
-    "DRREDDY", "EICHERMOT", "ETERNAL",
-    "GRASIM", "HCLTECH", "HDFCBANK",
-    "HDFCLIFE", "HEROMOTOCO", "HINDALCO",
-    "HINDUNILVR", "ICICIBANK", "INDUSINDBK",
-    "INFY", "ITC", "JIOFIN", "JSWSTEEL",
-    "KOTAKBANK", "LT", "M&M", "MARUTI",
-    "MAXHEALTH", "NESTLEIND", "NTPC",
-    "ONGC", "POWERGRID", "RELIANCE",
-    "SBILIFE", "SBIN", "SHRIRAMFIN",
-    "SUNPHARMA", "TATACONSUM", "TATAMOTORS",
-    "TATASTEEL", "TCS", "TECHM",
-    "TITAN", "TRENT", "ULTRACEMCO"
+    "ADANIENT",
+    "ADANIPORTS",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJFINANCE",
+    "BAJAJFINSV",
+    "BEL",
+    "BHARTIARTL",
+    "CIPLA",
+    "COALINDIA",
+    "DRREDDY",
+    "EICHERMOT",
+    "ETERNAL",
+    "GRASIM",
+    "HCLTECH",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HEROMOTOCO",
+    "HINDALCO",
+    "HINDUNILVR",
+    "ICICIBANK",
+    "INDUSINDBK",
+    "INFY",
+    "ITC",
+    "JIOFIN",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LT",
+    "M&M",
+    "MARUTI",
+    "MAXHEALTH",
+    "NESTLEIND",
+    "NTPC",
+    "ONGC",
+    "POWERGRID",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SHRIRAMFIN",
+    "SUNPHARMA",
+    "TATACONSUM",
+    "TATAMOTORS",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TITAN",
+    "TRENT",
+    "ULTRACEMCO"
 ]
 
 
@@ -47,7 +112,10 @@ NIFTY50 = [
 # LOAD NSE EQUITY UNIVERSE
 # ============================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(
+    ttl=86400,
+    show_spinner=False
+)
 def load_nse_equity_universe():
 
     url = (
@@ -57,7 +125,8 @@ def load_nse_equity_universe():
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
             "Chrome/120.0 Safari/537.36"
@@ -87,10 +156,6 @@ def load_nse_equity_universe():
 
         if "SYMBOL" not in df.columns:
 
-            st.warning(
-                "NSE returned an unexpected file format."
-            )
-
             return []
 
         symbols = (
@@ -101,11 +166,13 @@ def load_nse_equity_universe():
         )
 
         symbols = symbols[
-            ~symbols.isin([
-                "",
-                "NAN",
-                "NONE"
-            ])
+            ~symbols.isin(
+                [
+                    "",
+                    "NAN",
+                    "NONE"
+                ]
+            )
         ]
 
         symbols = sorted(
@@ -114,11 +181,7 @@ def load_nse_equity_universe():
 
         return symbols
 
-    except Exception as e:
-
-        st.warning(
-            f"NSE stock list could not be downloaded: {e}"
-        )
+    except Exception:
 
         return []
 
@@ -127,7 +190,10 @@ def load_nse_equity_universe():
 # LOAD NIFTY 500
 # ============================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(
+    ttl=86400,
+    show_spinner=False
+)
 def load_nifty500():
 
     urls = [
@@ -137,6 +203,7 @@ def load_nifty500():
 
         "https://www.niftyindices.com/"
         "IndexConstituent/ind_nifty500list.csv"
+
     ]
 
     headers = {
@@ -177,11 +244,13 @@ def load_nifty500():
             )
 
             symbols = symbols[
-                ~symbols.isin([
-                    "",
-                    "NAN",
-                    "NONE"
-                ])
+                ~symbols.isin(
+                    [
+                        "",
+                        "NAN",
+                        "NONE"
+                    ]
+                )
             ]
 
             if len(symbols) >= 400:
@@ -191,16 +260,20 @@ def load_nifty500():
                 )
 
         except Exception:
+
             continue
 
-    return NIFTY50
+    return []
 
 
 # ============================================================
-# BATCH DOWNLOAD
+# DOWNLOAD MARKET DATA
 # ============================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(
+    ttl=300,
+    show_spinner=False
+)
 def download_batches(
     tickers,
     period="1y",
@@ -209,7 +282,9 @@ def download_batches(
 
     all_data = {}
 
-    ticker_list = list(tickers)
+    ticker_list = list(
+        dict.fromkeys(tickers)
+    )
 
     for start in range(
         0,
@@ -239,12 +314,11 @@ def download_batches(
                 timeout=30
             )
 
-            if data is None or data.empty:
+            if data is None:
                 continue
 
-            # ==================================================
-            # PROCESS EACH STOCK
-            # ==================================================
+            if data.empty:
+                continue
 
             for ticker in batch:
 
@@ -252,21 +326,26 @@ def download_batches(
 
                 try:
 
-                    # ------------------------------------------
-                    # SINGLE STOCK
-                    # ------------------------------------------
-
                     if len(batch) == 1:
 
                         stock = data.copy()
 
-                    # ------------------------------------------
-                    # MULTIPLE STOCKS
-                    # ------------------------------------------
-
                     else:
 
-                        if yahoo_symbol not in data.columns.get_level_values(0):
+                        if not isinstance(
+                            data.columns,
+                            pd.MultiIndex
+                        ):
+
+                            continue
+
+                        level_zero = (
+                            data.columns
+                            .get_level_values(0)
+                            .unique()
+                        )
+
+                        if yahoo_symbol not in level_zero:
 
                             continue
 
@@ -274,9 +353,7 @@ def download_batches(
                             yahoo_symbol
                         ].copy()
 
-                    # ------------------------------------------
-                    # FIX MULTIINDEX COLUMNS
-                    # ------------------------------------------
+                    # Fix MultiIndex
 
                     if isinstance(
                         stock.columns,
@@ -285,17 +362,20 @@ def download_batches(
 
                         stock.columns = [
                             col[0]
-                            if isinstance(col, tuple)
+                            if isinstance(
+                                col,
+                                tuple
+                            )
                             else col
                             for col in stock.columns
                         ]
 
-                    # ------------------------------------------
-                    # NORMALIZE COLUMN NAMES
-                    # ------------------------------------------
+                    # Normalize names
 
                     stock.columns = [
-                        str(col).strip().title()
+                        str(col)
+                        .strip()
+                        .title()
                         for col in stock.columns
                     ]
 
@@ -307,20 +387,12 @@ def download_batches(
                         "Volume"
                     ]
 
-                    # ------------------------------------------
-                    # CHECK REQUIRED COLUMNS
-                    # ------------------------------------------
-
                     if not all(
-                        col in stock.columns
-                        for col in required
+                        column in stock.columns
+                        for column in required
                     ):
 
                         continue
-
-                    # ------------------------------------------
-                    # CLEAN DATA
-                    # ------------------------------------------
 
                     stock = stock[
                         required
@@ -330,7 +402,7 @@ def download_batches(
                         subset=required
                     )
 
-                    if len(stock) > 0:
+                    if not stock.empty:
 
                         all_data[ticker] = stock
 
@@ -342,12 +414,13 @@ def download_batches(
 
             continue
 
-        time.sleep(0.25)
+        time.sleep(0.20)
 
     return all_data
 
+
 # ============================================================
-# INDICATORS
+# TECHNICAL INDICATORS
 # ============================================================
 
 def calculate_indicators(data):
@@ -410,9 +483,14 @@ def calculate_indicators(data):
         14
     ).mean()
 
+    avg_loss = avg_loss.replace(
+        0,
+        np.nan
+    )
+
     rs = (
         avg_gain /
-        avg_loss.replace(0, np.nan)
+        avg_loss
     )
 
     data["RSI14"] = (
@@ -459,7 +537,8 @@ def calculate_indicators(data):
     )
 
     data["MACD_HIST"] = (
-        data["MACD"] -
+        data["MACD"]
+        -
         data["MACD_SIGNAL"]
     )
 
@@ -474,12 +553,18 @@ def calculate_indicators(data):
     )
 
     data["VOLUME_RATIO"] = (
-        data["Volume"] /
+        data["Volume"]
+        /
         data["AVG_VOLUME20"]
     )
 
+    # --------------------------------------------------------
+    # TURNOVER
+    # --------------------------------------------------------
+
     data["TURNOVER"] = (
-        data["Close"] *
+        data["Close"]
+        *
         data["Volume"]
     )
 
@@ -490,7 +575,7 @@ def calculate_indicators(data):
     )
 
     # --------------------------------------------------------
-    # DONCHIAN
+    # DONCHIAN CHANNEL
     # --------------------------------------------------------
 
     data["DONCHIAN_UPPER"] = (
@@ -511,54 +596,55 @@ def calculate_indicators(data):
 
 
 # ============================================================
-# STAGE 1
-# LIQUIDITY + TREND FILTER
+# STAGE 1 FILTER
 # ============================================================
 
 def stage_one_filter(
     data,
     min_price,
-    min_avg_volume,
-    min_turnover_crore
+    min_volume,
+    min_turnover
 ):
 
     if len(data) < 210:
+
         return False
 
     latest = data.iloc[-1]
 
-    if pd.isna(
-        latest["SMA200"]
-    ):
-        return False
-
-    if pd.isna(
-        latest["AVG_VOLUME20"]
-    ):
-        return False
-
-    if pd.isna(
+    values = [
+        latest["Close"],
+        latest["SMA200"],
+        latest["AVG_VOLUME20"],
         latest["AVG_TURNOVER20"]
+    ]
+
+    if any(
+        pd.isna(value)
+        for value in values
     ):
+
         return False
 
-    # Price filter
+    # Price
 
     if (
         latest["Close"]
         < min_price
     ):
+
         return False
 
-    # Average volume
+    # Volume
 
     if (
         latest["AVG_VOLUME20"]
-        < min_avg_volume
+        < min_volume
     ):
+
         return False
 
-    # Average turnover
+    # Turnover
 
     turnover_crore = (
         latest["AVG_TURNOVER20"]
@@ -567,8 +653,9 @@ def stage_one_filter(
 
     if (
         turnover_crore
-        < min_turnover_crore
+        < min_turnover
     ):
+
         return False
 
     # Long-term trend
@@ -577,19 +664,20 @@ def stage_one_filter(
         latest["Close"]
         <= latest["SMA200"]
     ):
+
         return False
 
     return True
 
 
 # ============================================================
-# STAGE 2
-# BREAKOUT ENGINE
+# STAGE 2 TECHNICAL ANALYSIS
 # ============================================================
 
 def stage_two_analysis(data):
 
     if len(data) < 210:
+
         return None
 
     latest = data.iloc[-1]
@@ -599,34 +687,34 @@ def stage_two_analysis(data):
     n_minus_2 = data.iloc[-3]
 
     # --------------------------------------------------------
-    # CORE CONDITIONS
+    # YOUR FIVE CORE CONDITIONS
     # --------------------------------------------------------
 
-    c1 = (
+    condition_1 = (
         latest["Close"]
         >
         previous["High"]
     )
 
-    c2 = (
+    condition_2 = (
         previous["High"]
         <
         n_minus_2["High"]
     )
 
-    c3 = (
+    condition_3 = (
         latest["Close"]
         <
         latest["DONCHIAN_UPPER"]
     )
 
-    c4 = (
+    condition_4 = (
         latest["Low"]
         >
         latest["DONCHIAN_LOWER"]
     )
 
-    c5 = (
+    condition_5 = (
         latest["Close"]
         >
         latest["SMA200"]
@@ -658,19 +746,19 @@ def stage_two_analysis(data):
 
     score = 0
 
-    if c1:
+    if condition_1:
         score += 2
 
-    if c2:
+    if condition_2:
         score += 1
 
-    if c3:
+    if condition_3:
         score += 1
 
-    if c4:
+    if condition_4:
         score += 1
 
-    if c5:
+    if condition_5:
         score += 2
 
     if volume_confirm:
@@ -684,11 +772,15 @@ def stage_two_analysis(data):
 
     return {
 
-        "C1": c1,
-        "C2": c2,
-        "C3": c3,
-        "C4": c4,
-        "C5": c5,
+        "C1": condition_1,
+
+        "C2": condition_2,
+
+        "C3": condition_3,
+
+        "C4": condition_4,
+
+        "C5": condition_5,
 
         "Volume Confirm":
             volume_confirm,
@@ -714,13 +806,13 @@ def stage_two_analysis(data):
         "MACD":
             latest["MACD"],
 
-        "Signal":
+        "MACD Signal":
             latest["MACD_SIGNAL"],
 
         "Volume Ratio":
             latest["VOLUME_RATIO"],
 
-        "Avg Turnover":
+        "Turnover":
             latest["AVG_TURNOVER20"]
             / 10000000,
 
@@ -737,14 +829,15 @@ def stage_two_analysis(data):
 # ============================================================
 
 st.sidebar.title(
-    "📈 AI Technical Analyst"
+    "⚙️ Control Panel"
 )
 
-page = st.sidebar.radio(
-    "Module",
+module = st.sidebar.radio(
+    "Select Module",
     [
-        "Technical Chart",
-        "Smart Breakout Scanner"
+        "📊 Technical Chart",
+        "🚀 Smart Breakout Scanner",
+        "🤖 AI Analyst"
     ]
 )
 
@@ -753,19 +846,29 @@ page = st.sidebar.radio(
 # TECHNICAL CHART
 # ============================================================
 
-if page == "Technical Chart":
+if module == "📊 Technical Chart":
 
-    st.title(
-        "📈 Technical Analysis"
+    st.header(
+        "📊 Technical Chart"
+    )
+
+    st.write(
+        "Enter any NSE-listed stock symbol."
     )
 
     symbol = st.sidebar.text_input(
         "NSE Symbol",
-        "RELIANCE"
-    ).strip().upper()
+        value="RELIANCE"
+    )
+
+    symbol = (
+        symbol
+        .strip()
+        .upper()
+    )
 
     period = st.sidebar.selectbox(
-        "Period",
+        "Chart Period",
         [
             "6mo",
             "1y",
@@ -775,235 +878,236 @@ if page == "Technical Chart":
         index=1
     )
 
-    st.info(
-        f"Loading {symbol}.NS..."
-    )
+    if st.sidebar.button(
+        "📈 Load Chart",
+        type="primary"
+    ):
 
-    market = download_batches(
-        [symbol],
-        period,
-        1
-    )
+        with st.spinner(
+            f"Loading {symbol}..."
+        ):
 
-    if not market:
+            market = download_batches(
+                [symbol],
+                period,
+                1
+            )
 
-        st.error(
-            f"""
-            Unable to retrieve **{symbol}.NS**
+        if symbol not in market:
 
-            Please check:
-            1. The NSE symbol is correct.
-            2. The stock is listed on NSE.
-            3. Yahoo Finance is currently returning data.
-            """
+            st.error(
+                f"""
+                Could not retrieve data for
+                **{symbol}.NS**
+
+                Check that the NSE symbol is correct.
+                """
+            )
+
+            st.stop()
+
+        data = market[
+            symbol
+        ].copy()
+
+        data = calculate_indicators(
+            data
         )
 
-        st.stop()
+        if data.empty:
 
-    if symbol not in market:
+            st.error(
+                "No usable market data found."
+            )
 
-        st.error(
-            f"No Yahoo Finance data available for {symbol}.NS"
+            st.stop()
+
+        # ----------------------------------------------------
+        # CHART
+        # ----------------------------------------------------
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Candlestick(
+                x=data.index,
+                open=data["Open"],
+                high=data["High"],
+                low=data["Low"],
+                close=data["Close"],
+                name=symbol
+            )
         )
 
-        st.stop()
-
-    data = market[symbol].copy()
-
-    # ========================================================
-    # SAFETY CHECK
-    # ========================================================
-
-    required_columns = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume"
-    ]
-
-    missing = [
-        col
-        for col in required_columns
-        if col not in data.columns
-    ]
-
-    if missing:
-
-        st.error(
-            f"Missing columns: {missing}"
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA20"],
+                mode="lines",
+                name="SMA 20"
+            )
         )
 
-        st.stop()
-
-    # ========================================================
-    # INDICATORS
-    # ========================================================
-
-    data = calculate_indicators(
-        data
-    )
-
-    if data.empty:
-
-        st.error(
-            "No usable historical data after processing."
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA50"],
+                mode="lines",
+                name="SMA 50"
+            )
         )
 
-        st.stop()
-
-    # ========================================================
-    # CHART
-    # ========================================================
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
-            name=symbol
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA200"],
+                mode="lines",
+                name="SMA 200"
+            )
         )
-    )
 
-    # ========================================================
-    # SMA 20
-    # ========================================================
-
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["SMA20"],
-            mode="lines",
-            name="SMA 20"
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["DONCHIAN_UPPER"],
+                mode="lines",
+                name="Donchian Upper"
+            )
         )
-    )
 
-    # ========================================================
-    # SMA 50
-    # ========================================================
-
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["SMA50"],
-            mode="lines",
-            name="SMA 50"
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["DONCHIAN_LOWER"],
+                mode="lines",
+                name="Donchian Lower"
+            )
         )
-    )
 
-    # ========================================================
-    # SMA 200
-    # ========================================================
-
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["SMA200"],
-            mode="lines",
-            name="SMA 200"
+        fig.update_layout(
+            title=(
+                f"{symbol} — Technical Analysis"
+            ),
+            height=700,
+            xaxis_rangeslider_visible=False,
+            hovermode="x unified"
         )
-    )
 
-    # ========================================================
-    # DONCHIAN UPPER
-    # ========================================================
-
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["DONCHIAN_UPPER"],
-            mode="lines",
-            name="Donchian Upper"
+        st.plotly_chart(
+            fig,
+            width="stretch"
         )
-    )
 
-    # ========================================================
-    # DONCHIAN LOWER
-    # ========================================================
+        # ----------------------------------------------------
+        # CURRENT VALUES
+        # ----------------------------------------------------
 
-    fig.add_trace(
-        go.Scatter(
-            x=data.index,
-            y=data["DONCHIAN_LOWER"],
-            mode="lines",
-            name="Donchian Lower"
+        latest = data.iloc[-1]
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        col1.metric(
+            "Close",
+            f"₹{latest['Close']:.2f}"
         )
-    )
 
-    fig.update_layout(
-        title=f"{symbol} — Technical Analysis",
-        height=700,
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified"
-    )
+        col2.metric(
+            "SMA 20",
+            f"₹{latest['SMA20']:.2f}"
+        )
 
-    st.plotly_chart(
-        fig,
-        width="stretch"
-    )
+        col3.metric(
+            "SMA 50",
+            f"₹{latest['SMA50']:.2f}"
+        )
 
-    # ========================================================
-    # CURRENT DATA
-    # ========================================================
+        col4.metric(
+            "SMA 200",
+            f"₹{latest['SMA200']:.2f}"
+        )
 
-    latest = data.iloc[-1]
+        col5.metric(
+            "RSI",
+            f"{latest['RSI14']:.1f}"
+        )
 
-    col1, col2, col3, col4 = st.columns(4)
+        # ----------------------------------------------------
+        # SIGNAL
+        # ----------------------------------------------------
 
-    col1.metric(
-        "Close",
-        f"₹{latest['Close']:.2f}"
-    )
+        analysis = stage_two_analysis(
+            data
+        )
 
-    col2.metric(
-        "RSI",
-        f"{latest['RSI14']:.1f}"
-    )
+        if analysis:
 
-    col3.metric(
-        "200 SMA",
-        f"₹{latest['SMA200']:.2f}"
-    )
+            st.subheader(
+                "Technical Setup"
+            )
 
-    col4.metric(
-        "Volume Ratio",
-        f"{latest['VOLUME_RATIO']:.2f}x"
-    )
+            if analysis["Score"] >= 8:
+
+                st.success(
+                    f"🔥 Strong technical setup — "
+                    f"Score {analysis['Score']}/10"
+                )
+
+            elif analysis["Score"] >= 5:
+
+                st.warning(
+                    f"⚠️ Moderate technical setup — "
+                    f"Score {analysis['Score']}/10"
+                )
+
+            else:
+
+                st.info(
+                    f"Technical setup score: "
+                    f"{analysis['Score']}/10"
+                )
 
 
 # ============================================================
-# SMART SCANNER
+# SMART BREAKOUT SCANNER
 # ============================================================
 
-else:
+elif module == "🚀 Smart Breakout Scanner":
 
-    st.title(
+    st.header(
         "🚀 Smart Two-Stage Breakout Scanner"
     )
 
-    st.caption(
-        "Stage 1: Liquidity + trend → "
-        "Stage 2: breakout + momentum confirmation"
+    st.write(
+        """
+        **Stage 1:** Liquidity + price + 200 SMA filter
+
+        **Stage 2:** Early breakout + Donchian +
+        RSI + MACD + volume analysis
+        """
     )
+
+    # --------------------------------------------------------
+    # LOAD UNIVERSES
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Loading NSE stock universe..."
+    ):
+
+        nse_stocks = (
+            load_nse_equity_universe()
+        )
+
+        nifty500 = (
+            load_nifty500()
+        )
 
     # --------------------------------------------------------
     # UNIVERSE
     # --------------------------------------------------------
 
-    nse_stocks = (
-        load_nse_equity_universe()
-    )
-
-    nifty500 = (
-        load_nifty500()
-    )
-
     st.sidebar.subheader(
-        "Universe"
+        "Stock Universe"
     )
 
     universe = st.sidebar.selectbox(
@@ -1015,7 +1119,7 @@ else:
         ]
     )
 
-if universe == "Nifty 50":
+    if universe == "Nifty 50":
 
         stocks = NIFTY50
 
@@ -1031,26 +1135,46 @@ if universe == "Nifty 50":
 
         stocks = []
 
-
-    if universe == "Full NSE" and not stocks:
+    if (
+        universe == "Nifty 500"
+        and not stocks
+    ):
 
         st.error(
             """
-            Full NSE stock list could not be loaded.
+            Nifty 500 list could not be loaded.
 
-            Please try again later or select Nifty 500.
+            Please select Nifty 50 or try again later.
             """
         )
 
         st.stop()
 
+    if (
+        universe == "Full NSE"
+        and not stocks
+    ):
+
+        st.error(
+            """
+            Full NSE equity list could not be loaded.
+
+            The NSE data server may temporarily reject
+            automated requests.
+
+            Please try again later.
+            """
+        )
+
+        st.stop()
 
     st.info(
-        f"Universe selected: **{universe} — {len(stocks)} stocks**"
+        f"Universe: **{universe}** | "
+        f"Stocks: **{len(stocks)}**"
     )
 
     # --------------------------------------------------------
-    # STAGE 1 FILTERS
+    # STAGE 1
     # --------------------------------------------------------
 
     st.sidebar.subheader(
@@ -1087,63 +1211,109 @@ if universe == "Nifty 50":
     )
 
     min_score = st.sidebar.slider(
-        "Minimum Score",
-        0,
-        10,
-        5
+        "Minimum Technical Score",
+        min_value=0,
+        max_value=10,
+        value=5
     )
 
     require_volume = st.sidebar.checkbox(
         "Require Volume Confirmation",
-        False
+        value=False
     )
 
     require_rsi = st.sidebar.checkbox(
         "Require RSI > 50",
-        False
+        value=False
     )
 
     require_macd = st.sidebar.checkbox(
         "Require MACD > Signal",
-        False
+        value=False
     )
 
     batch_size = st.sidebar.slider(
         "Download Batch Size",
-        25,
-        100,
-        50,
+        min_value=25,
+        max_value=100,
+        value=50,
         step=25
-    )
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
-
-    st.info(
-        f"Universe selected: **{len(stocks)} stocks**"
-    )
-
-    st.write(
-        """
-        **Stage 1** removes stocks with insufficient
-        price, liquidity or long-term trend.
-
-        **Stage 2** applies your complete early-breakout
-        strategy to the survivors.
-        """
     )
 
     # --------------------------------------------------------
     # RUN
     # --------------------------------------------------------
 
-    run = st.sidebar.button(
+    run_scanner = st.sidebar.button(
         "🚀 RUN SMART SCANNER",
         type="primary"
     )
 
-    if run:
+    # --------------------------------------------------------
+    # CONDITIONS
+    # --------------------------------------------------------
+
+    with st.expander(
+        "📋 View Scanner Conditions"
+    ):
+
+        st.markdown(
+            """
+### Core Conditions
+
+**C1:** Recent Close > Previous Day High
+
+**C2:** Previous Day High < High of N-2
+
+**C3:** Recent Close < 3-Day Donchian Upper
+
+**C4:** Recent Low > 3-Day Donchian Lower
+
+**C5:** Recent Close > 200 SMA
+
+### Confirmations
+
+**Volume:** Current Volume ≥ 1.5 × 20-day average
+
+**RSI:** RSI > 50
+
+**MACD:** MACD > Signal
+
+### Score
+
+C1 = 2 points
+
+C2 = 1 point
+
+C3 = 1 point
+
+C4 = 1 point
+
+C5 = 2 points
+
+Volume = 1 point
+
+RSI = 1 point
+
+MACD = 1 point
+
+**Maximum = 10 points**
+            """
+        )
+
+    # --------------------------------------------------------
+    # RUN SCANNER
+    # --------------------------------------------------------
+
+    if run_scanner:
+
+        if not stocks:
+
+            st.error(
+                "No stocks available to scan."
+            )
+
+            st.stop()
 
         # ====================================================
         # STAGE 1 DOWNLOAD
@@ -1151,7 +1321,7 @@ if universe == "Nifty 50":
 
         progress = st.progress(
             0,
-            text="Stage 1: downloading market data..."
+            text="Downloading market data..."
         )
 
         market = download_batches(
@@ -1161,20 +1331,23 @@ if universe == "Nifty 50":
         )
 
         progress.progress(
-            40,
-            text="Stage 1: applying liquidity filters..."
+            35,
+            text=(
+                "Applying Stage 1 filters..."
+            )
         )
 
-        stage1 = []
+        stage1_stocks = []
+
+        processed = 0
 
         total = len(market)
 
-        for i, (
-            symbol,
-            raw_data
-        ) in enumerate(
-            market.items()
-        ):
+        # ====================================================
+        # STAGE 1
+        # ====================================================
+
+        for symbol, raw_data in market.items():
 
             try:
 
@@ -1189,7 +1362,7 @@ if universe == "Nifty 50":
                     min_turnover
                 ):
 
-                    stage1.append(
+                    stage1_stocks.append(
                         symbol
                     )
 
@@ -1197,54 +1370,61 @@ if universe == "Nifty 50":
 
                 pass
 
+            processed += 1
+
             if total > 0:
 
                 progress.progress(
-                    40 +
+                    35 +
                     int(
-                        20 *
-                        (i + 1)
-                        / total
+                        25 *
+                        processed /
+                        total
                     ),
                     text=(
                         f"Stage 1: "
-                        f"{symbol}"
+                        f"{processed}/{total}"
                     )
                 )
 
         # ====================================================
-        # STAGE 1 RESULT
+        # STAGE 1 SUMMARY
         # ====================================================
 
-        progress.progress(
-            65,
-            text="Stage 1 completed..."
+        st.subheader(
+            "🔎 Stage 1 Results"
         )
 
-        col1, col2, col3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
 
-        col1.metric(
+        c1.metric(
             "Universe",
             len(stocks)
         )
 
-        col2.metric(
+        c2.metric(
             "Data Retrieved",
             len(market)
         )
 
-        col3.metric(
+        c3.metric(
             "Stage 1 Survivors",
-            len(stage1)
+            len(stage1_stocks)
         )
 
-        if not stage1:
+        if not stage1_stocks:
 
             progress.empty()
 
             st.warning(
-                "No stocks survived Stage 1. "
-                "Try reducing the liquidity thresholds."
+                """
+                No stocks survived Stage 1.
+
+                Try lowering:
+                • Minimum price
+                • Minimum average volume
+                • Minimum turnover
+                """
             )
 
             st.stop()
@@ -1254,14 +1434,18 @@ if universe == "Nifty 50":
         # ====================================================
 
         progress.progress(
-            70,
-            text="Stage 2: running breakout analysis..."
+            65,
+            text="Running Stage 2 technical analysis..."
         )
 
         results = []
 
+        total_stage2 = len(
+            stage1_stocks
+        )
+
         for i, symbol in enumerate(
-            stage1
+            stage1_stocks
         ):
 
             try:
@@ -1346,7 +1530,7 @@ if universe == "Nifty 50":
                     "Avg Turnover ₹Cr":
                         round(
                             analysis[
-                                "Avg Turnover"
+                                "Turnover"
                             ],
                             2
                         ),
@@ -1399,7 +1583,6 @@ if universe == "Nifty 50":
 
                     "Technical Score":
                         analysis["Score"]
-
                 })
 
             except Exception:
@@ -1407,15 +1590,15 @@ if universe == "Nifty 50":
                 pass
 
             progress.progress(
-                70 +
+                65 +
                 int(
-                    30 *
+                    35 *
                     (i + 1)
-                    / len(stage1)
+                    / total_stage2
                 ),
                 text=(
                     f"Stage 2: "
-                    f"{symbol}"
+                    f"{i + 1}/{total_stage2}"
                 )
             )
 
@@ -1428,8 +1611,12 @@ if universe == "Nifty 50":
         if not results:
 
             st.warning(
-                "No stocks satisfied the Stage 2 "
-                "technical conditions."
+                """
+                No stocks passed the Stage 2
+                technical conditions.
+
+                Try reducing the minimum score.
+                """
             )
 
         else:
@@ -1444,7 +1631,9 @@ if universe == "Nifty 50":
                     "Technical Score",
                     ascending=False
                 )
-                .reset_index(drop=True)
+                .reset_index(
+                    drop=True
+                )
             )
 
             st.success(
@@ -1453,34 +1642,56 @@ if universe == "Nifty 50":
             )
 
             # ------------------------------------------------
-            # TOP PICKS
+            # TOP STOCKS
             # ------------------------------------------------
 
             st.subheader(
                 "🏆 Top Early Breakout Candidates"
             )
 
+            top = results_df[
+                [
+                    "Stock",
+                    "Close",
+                    "200 SMA",
+                    "RSI",
+                    "Volume Ratio",
+                    "Technical Score"
+                ]
+            ].head(20)
+
             st.dataframe(
-                results_df[
-                    [
-                        "Stock",
-                        "Close",
-                        "200 SMA",
-                        "RSI",
-                        "Volume Ratio",
-                        "Technical Score"
-                    ]
-                ].head(20),
+                top,
                 width="stretch",
                 hide_index=True
             )
 
             # ------------------------------------------------
-            # COMPLETE RESULTS
+            # SCORE DISTRIBUTION
             # ------------------------------------------------
 
             st.subheader(
-                "📊 Detailed Results"
+                "📊 Score Distribution"
+            )
+
+            score_counts = (
+                results_df[
+                    "Technical Score"
+                ]
+                .value_counts()
+                .sort_index()
+            )
+
+            st.bar_chart(
+                score_counts
+            )
+
+            # ------------------------------------------------
+            # FULL RESULTS
+            # ------------------------------------------------
+
+            st.subheader(
+                "📋 Detailed Results"
             )
 
             st.dataframe(
@@ -1498,38 +1709,20 @@ if universe == "Nifty 50":
             )
 
             st.download_button(
-                "⬇️ Download Results",
-                csv,
-                "smart_breakout_results.csv",
-                "text/csv"
+                label="⬇️ Download Scanner Results",
+                data=csv,
+                file_name=(
+                    "NSE_Smart_Breakout_Scanner.csv"
+                ),
+                mime="text/csv"
             )
 
             # ------------------------------------------------
-            # SCORE DISTRIBUTION
-            # ------------------------------------------------
-
-            st.subheader(
-                "📈 Score Distribution"
-            )
-
-            score_counts = (
-                results_df[
-                    "Technical Score"
-                ]
-                .value_counts()
-                .sort_index()
-            )
-
-            st.bar_chart(
-                score_counts
-            )
-
-            # ------------------------------------------------
-            # STAGE SUMMARY
+            # SUMMARY
             # ------------------------------------------------
 
             st.subheader(
-                "🔎 Two-Stage Summary"
+                "📈 Scanner Summary"
             )
 
             c1, c2, c3, c4 = st.columns(4)
@@ -1541,7 +1734,7 @@ if universe == "Nifty 50":
 
             c2.metric(
                 "Stage 1",
-                len(stage1)
+                len(stage1_stocks)
             )
 
             c3.metric(
@@ -1550,7 +1743,7 @@ if universe == "Nifty 50":
             )
 
             c4.metric(
-                "High Score ≥ 8",
+                "Score ≥ 8",
                 len(
                     results_df[
                         results_df[
@@ -1559,3 +1752,117 @@ if universe == "Nifty 50":
                     ]
                 )
             )
+
+
+# ============================================================
+# AI ANALYST
+# ============================================================
+
+else:
+
+    st.header(
+        "🤖 AI Technical Analyst"
+    )
+
+    st.write(
+        """
+        Ask questions about technical analysis,
+        chart patterns, indicators and trading setups.
+        """
+    )
+
+    if client is None:
+
+        st.warning(
+            """
+            OpenAI API key is not configured.
+
+            Add your key to Streamlit Cloud:
+
+            Settings → Secrets
+            """
+        )
+
+    question = st.chat_input(
+        "Ask your technical-analysis question..."
+    )
+
+    if question:
+
+        st.chat_message(
+            "user"
+        ).write(
+            question
+        )
+
+        with st.chat_message(
+            "assistant"
+        ):
+
+            if client is None:
+
+                st.error(
+                    "OpenAI API key is missing."
+                )
+
+            else:
+
+                try:
+
+                    response = (
+                        client.responses.create(
+                            model="gpt-5.6-luna",
+
+                            instructions="""
+You are an educational technical-analysis
+assistant for Indian equity markets.
+
+Explain technical-analysis concepts clearly.
+
+You may discuss:
+- Candlestick patterns
+- Support and resistance
+- Moving averages
+- RSI
+- MACD
+- Bollinger Bands
+- Donchian channels
+- Volume
+- Breakouts
+- Trend structure
+- Elliott Wave concepts
+- Risk management
+- Position sizing
+
+Do not invent live market prices,
+technical indicator values or company data.
+
+If the application has not supplied
+actual market data, clearly state that
+you cannot verify the current value.
+
+Do not present predictions as certainty.
+
+Use clear sections:
+1. Interpretation
+2. Technical reasoning
+3. Risk
+4. What to monitor
+
+This is educational information,
+not personalized financial advice.
+""",
+
+                            input=question
+                        )
+                    )
+
+                    st.write(
+                        response.output_text
+                    )
+
+                except Exception as e:
+
+                    st.error(
+                        f"AI error: {e}"
+                    )
