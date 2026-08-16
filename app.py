@@ -1818,6 +1818,213 @@ def calculate_weekly_trend_screen(
 
 
 # ============================================================
+# 120-DAY HIGH BREAKOUT / LIQUIDITY SCANNER
+# ============================================================
+
+def calculate_120day_breakout_screen(data):
+    """
+    Exact implementation of the four conditions supplied
+    in the user's scanner screenshot:
+
+    1. Daily Close >
+       1 day ago Max(120, Daily High)
+
+    2. 1 day ago Close <
+       2 days ago Max(120, Daily High)
+
+    3. NSE Value in lakhs > 50
+
+    4. Daily Close >
+       1 day ago Close * 1.03
+
+    NSE Value in lakhs is calculated as:
+        Close * Volume / 100000
+
+    This converts traded value from rupees to lakh rupees.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df = data.copy()
+
+    if isinstance(
+        df.columns,
+        pd.MultiIndex
+    ):
+        df.columns = (
+            df.columns
+            .get_level_values(0)
+        )
+
+    required = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+    ]
+
+    if any(
+        c not in df.columns
+        for c in required
+    ):
+        return None
+
+    df = df.dropna(
+        subset=required
+    ).copy()
+
+    if len(df) < 123:
+        return None
+
+    close = pd.to_numeric(
+        df["Close"],
+        errors="coerce"
+    )
+
+    high = pd.to_numeric(
+        df["High"],
+        errors="coerce"
+    )
+
+    volume = pd.to_numeric(
+        df["Volume"],
+        errors="coerce"
+    )
+
+    # "1 day ago Max(120, Daily High)"
+    # = previous 120 completed daily highs.
+    max120_1d_ago = (
+        high
+        .rolling(120)
+        .max()
+        .shift(1)
+    )
+
+    # "2 days ago Max(120, Daily High)"
+    # = 120-day high available two sessions before
+    # the current signal day.
+    max120_2d_ago = (
+        high
+        .rolling(120)
+        .max()
+        .shift(2)
+    )
+
+    current_close = float(
+        close.iloc[-1]
+    )
+
+    previous_close = float(
+        close.iloc[-2]
+    )
+
+    previous_120_high = float(
+        max120_1d_ago.iloc[-1]
+    )
+
+    two_days_ago_120_high = float(
+        max120_2d_ago.iloc[-1]
+    )
+
+    current_volume = float(
+        volume.iloc[-1]
+    )
+
+    # NSE traded value in lakh rupees.
+    nse_value_lakhs = (
+        current_close
+        * current_volume
+        / 100000.0
+    )
+
+    conditions = {
+
+        "Close > 1D Ago Max(120, High)":
+            current_close
+            > previous_120_high,
+
+        "1D Ago Close < 2D Ago Max(120, High)":
+            previous_close
+            < two_days_ago_120_high,
+
+        "NSE Value in lakhs > 50":
+            nse_value_lakhs
+            > 50.0,
+
+        "Close > 1D Ago Close × 1.03":
+            current_close
+            > previous_close * 1.03
+    }
+
+    return {
+
+        "Pass":
+            all(
+                conditions.values()
+            ),
+
+        "Conditions":
+            conditions,
+
+        "Close":
+            current_close,
+
+        "Previous Close":
+            previous_close,
+
+        "120D High 1D Ago":
+            previous_120_high,
+
+        "120D High 2D Ago":
+            two_days_ago_120_high,
+
+        "Volume":
+            current_volume,
+
+        "NSE Value Lakhs":
+            nse_value_lakhs
+    }
+
+
+def calculate_120day_breakout_asof(
+    data,
+    as_of
+):
+    """
+    Historical, look-ahead-safe version of the exact
+    four-condition 120-day breakout scanner.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df = data.copy()
+
+    if not isinstance(
+        df.index,
+        pd.DatetimeIndex
+    ):
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+    as_of = pd.Timestamp(
+        as_of
+    )
+
+    df = df.loc[
+        df.index <= as_of
+    ]
+
+    return calculate_120day_breakout_screen(
+        df
+    )
+
+
+
+# ============================================================
 # DAILY TREND / 50-150-200 SMA SCREEN
 # ============================================================
 
@@ -3396,6 +3603,7 @@ module = st.sidebar.radio(
     [
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
+        "📈 120-Day High Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -4398,6 +4606,357 @@ MACD = 1 point
 # ============================================================
 # AI ANALYST
 # ============================================================
+
+
+# ============================================================
+# 120-DAY HIGH BREAKOUT SCANNER
+# ============================================================
+
+elif module == "📈 120-Day High Breakout Scanner":
+
+    st.header(
+        "📈 120-Day High Breakout + Liquidity Scanner"
+    )
+
+    st.write(
+        """
+        Exact implementation of the four conditions supplied
+        in your Chartink screenshot.
+        """
+    )
+
+    with st.expander(
+        "📐 Exact Scanner Conditions",
+        expanded=True
+    ):
+
+        st.markdown(
+            """
+            **C1:** Daily Close > 1 day ago Max(120, Daily High)
+
+            **C2:** 1 day ago Close <
+            2 days ago Max(120, Daily High)
+
+            **C3:** NSE Value in lakhs > 50
+
+            **C4:** Daily Close >
+            1 day ago Close × 1.03
+
+            **NSE Value in lakhs** =
+            Daily Close × Daily Volume ÷ 100,000
+            """
+        )
+
+    with st.spinner(
+        "Loading NSE stock universes..."
+    ):
+
+        nse_stocks = (
+            load_nse_equity_universe()
+        )
+
+        nifty500 = (
+            load_nifty500()
+        )
+
+        fno_stocks = (
+            load_fno_stocks()
+        )
+
+        nifty_midcap100 = (
+            load_nifty_midcap100()
+        )
+
+        nifty_smallcap500 = (
+            load_nifty_smallcap500()
+        )
+
+    st.sidebar.subheader(
+        "📈 120-Day Breakout Scanner"
+    )
+
+    universe = st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "NSE F&O Stocks",
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
+            "Full NSE"
+        ],
+        index=0,
+        key="120d_breakout_universe"
+    )
+
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
+
+    max_stocks = st.sidebar.slider(
+        "Maximum Stocks to Scan",
+        min_value=10,
+        max_value=min(
+            500,
+            max(
+                10,
+                len(stocks)
+            )
+        ),
+        value=min(
+            100,
+            max(
+                10,
+                len(stocks)
+            )
+        ),
+        step=10,
+        key="120d_breakout_max_stocks"
+    )
+
+    period = st.sidebar.selectbox(
+        "Historical Data",
+        [
+            "1y",
+            "2y",
+            "3y",
+            "5y",
+            "10y"
+        ],
+        index=1,
+        key="120d_breakout_period"
+    )
+
+    run_scan = st.sidebar.button(
+        "🔎 RUN 120-DAY BREAKOUT SCAN",
+        type="primary",
+        key="120d_breakout_run"
+    )
+
+    if not stocks:
+
+        st.error(
+            f"No stocks are available for **{universe}**."
+        )
+
+        st.stop()
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Available stocks: **{len(stocks)}**"
+    )
+
+    if run_scan:
+
+        selected = stocks[
+            :max_stocks
+        ]
+
+        progress = st.progress(
+            0,
+            text=(
+                "Downloading daily data..."
+            )
+        )
+
+        try:
+
+            market = download_batches(
+                selected,
+                period,
+                50
+            )
+
+            rows = []
+
+            for n, symbol in enumerate(
+                selected
+            ):
+
+                data = market.get(
+                    symbol
+                )
+
+                if (
+                    data is None
+                    or data.empty
+                ):
+                    continue
+
+                result = (
+                    calculate_120day_breakout_screen(
+                        data
+                    )
+                )
+
+                if result is None:
+                    continue
+
+                passed_count = sum(
+                    bool(v)
+                    for v in
+                    result[
+                        "Conditions"
+                    ].values()
+                )
+
+                rows.append(
+                    {
+                        "Stock":
+                            symbol,
+
+                        "Status":
+                            (
+                                "🟢 PASS"
+                                if result["Pass"]
+                                else "—"
+                            ),
+
+                        "Conditions Passed":
+                            f"{passed_count}/4",
+
+                        "Close":
+                            round(
+                                result["Close"],
+                                2
+                            ),
+
+                        "Previous Close":
+                            round(
+                                result[
+                                    "Previous Close"
+                                ],
+                                2
+                            ),
+
+                        "120D High 1D Ago":
+                            round(
+                                result[
+                                    "120D High 1D Ago"
+                                ],
+                                2
+                            ),
+
+                        "120D High 2D Ago":
+                            round(
+                                result[
+                                    "120D High 2D Ago"
+                                ],
+                                2
+                            ),
+
+                        "NSE Value (₹ Lakhs)":
+                            round(
+                                result[
+                                    "NSE Value Lakhs"
+                                ],
+                                2
+                            ),
+
+                        "Volume":
+                            int(
+                                result[
+                                    "Volume"
+                                ]
+                            )
+                    }
+                )
+
+                progress.progress(
+                    int(
+                        100
+                        * (n + 1)
+                        / max(
+                            1,
+                            len(selected)
+                        )
+                    ),
+                    text=(
+                        f"Scanning {symbol}..."
+                    )
+                )
+
+            progress.empty()
+
+            result_df = pd.DataFrame(
+                rows
+            )
+
+            if result_df.empty:
+
+                st.warning(
+                    "No usable daily data was returned."
+                )
+
+            else:
+
+                passed_df = (
+                    result_df[
+                        result_df[
+                            "Status"
+                        ]
+                        == "🟢 PASS"
+                    ]
+                    .copy()
+                )
+
+                st.success(
+                    f"**{len(passed_df)} stocks passed "
+                    f"all 4 conditions** out of "
+                    f"**{len(result_df)} tested.**"
+                )
+
+                if not passed_df.empty:
+
+                    st.subheader(
+                        "🟢 Stocks Passing All 4 Conditions"
+                    )
+
+                    st.dataframe(
+                        passed_df,
+                        width="stretch",
+                        hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download 120-Day Breakout Results",
+                        passed_df.to_csv(
+                            index=False
+                        ),
+                        "120_Day_High_Breakout_Scanner.csv",
+                        "text/csv"
+                    )
+
+                else:
+
+                    st.info(
+                        "No stocks currently pass all "
+                        "4 conditions."
+                    )
+
+                with st.expander(
+                    "📋 Show all tested stocks"
+                ):
+
+                    st.dataframe(
+                        result_df,
+                        width="stretch",
+                        hide_index=True
+                    )
+
+        except Exception as e:
+
+            progress.empty()
+
+            st.error(
+                f"120-day breakout scanner error: {e}"
+            )
+
 
 
 # ============================================================
@@ -6690,6 +7249,7 @@ elif module == "📊 Backtest & Performance":
         "Strategy to Backtest",
         [
             "Smart Breakout",
+            "120-Day High Breakout",
             "Daily RSI(9)/WMA(21)",
             "Weekly RSI(9)/WMA(21)",
             "Hourly RSI(9)/WMA(21)",
@@ -6817,6 +7377,8 @@ elif module == "📊 Backtest & Performance":
     strategy_condition_note = {
         "Smart Breakout":
             "Only C1–C5 + Smart Breakout confirmations are tested.",
+        "120-Day High Breakout":
+            "Only the four supplied 120-day breakout/liquidity conditions are tested.",
         "Daily RSI(9)/WMA(21)":
             "Only Daily RSI(9) cross + RSI(9) > 55 are tested.",
         "Weekly RSI(9)/WMA(21)":
@@ -6876,6 +7438,15 @@ elif module == "📊 Backtest & Performance":
             - ONLY the existing Smart Breakout C1–C5 rules and its
               built-in confirmations/score are used.
             - Daily/Weekly/Hourly RSI scanners are NOT added.
+
+            **120-Day High Breakout**
+            - ONLY these four supplied conditions are tested:
+              1. Daily Close > 1 day ago Max(120, Daily High)
+              2. 1 day ago Close < 2 days ago Max(120, Daily High)
+              3. NSE Value in lakhs > 50
+              4. Daily Close > 1 day ago Close × 1.03
+            - No Smart Breakout, RSI/WMA, Weekly Trend, or Daily Trend
+              condition is added.
 
             **Daily RSI(9)/WMA(21)**
             - ONLY Daily RSI(9) crossed above WMA(Close,21).
@@ -7062,6 +7633,7 @@ elif module == "📊 Backtest & Performance":
                     mtf_weekly = None
                     mtf_hourly = None
                     top20_model = None
+                    breakout_120_result = None
 
                     # --------------------------------------------
                     # 1. SMART BREAKOUT ONLY
@@ -7081,7 +7653,26 @@ elif module == "📊 Backtest & Performance":
                         signal = breakout_pass
 
                     # --------------------------------------------
-                    # 2. DAILY RSI/WMA ONLY
+                    # 2. 120-DAY HIGH BREAKOUT ONLY
+                    # --------------------------------------------
+                    elif strategy == "120-Day High Breakout":
+
+                        breakout_120_result = (
+                            calculate_120day_breakout_asof(
+                                data,
+                                signal_date
+                            )
+                        )
+
+                        signal = (
+                            breakout_120_result is not None
+                            and breakout_120_result[
+                                "Pass"
+                            ]
+                        )
+
+                    # --------------------------------------------
+                    # 3. DAILY RSI/WMA ONLY
                     # --------------------------------------------
                     elif strategy == "Daily RSI(9)/WMA(21)":
 
@@ -7454,6 +8045,10 @@ elif module == "📊 Backtest & Performance":
                             else "B"
                         )
 
+                    elif strategy == "120-Day High Breakout":
+
+                        grade = "120-Day Breakout Qualified"
+
                     elif strategy == "Daily RSI(9)/WMA(21)":
 
                         grade = "Daily RSI Qualified"
@@ -7541,6 +8136,73 @@ elif module == "📊 Backtest & Performance":
                                         "Combined Breakout + Daily RSI(9)"
                                     ]
                                     and breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "120D Breakout Close":
+                            (
+                                round(
+                                    breakout_120_result[
+                                        "Close"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "120-Day High Breakout"
+                                    and breakout_120_result is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "120D Prior High":
+                            (
+                                round(
+                                    breakout_120_result[
+                                        "120D High 1D Ago"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "120-Day High Breakout"
+                                    and breakout_120_result is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "NSE Value Lakhs":
+                            (
+                                round(
+                                    breakout_120_result[
+                                        "NSE Value Lakhs"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "120-Day High Breakout"
+                                    and breakout_120_result is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "120D Breakout 3pct":
+                            (
+                                (
+                                    breakout_120_result[
+                                        "Close"
+                                    ]
+                                    >
+                                    breakout_120_result[
+                                        "Previous Close"
+                                    ] * 1.03
+                                )
+                                if (
+                                    strategy
+                                    == "120-Day High Breakout"
+                                    and breakout_120_result is not None
                                 )
                                 else np.nan
                             ),
