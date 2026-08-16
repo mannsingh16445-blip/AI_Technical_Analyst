@@ -493,6 +493,184 @@ def load_nifty500():
 
 
 # ============================================================
+# ADDITIONAL NIFTY INDEX UNIVERSES
+# ============================================================
+
+@st.cache_data(
+    ttl=86400,
+    show_spinner=False
+)
+def load_nifty_index_constituents(
+    index_key,
+    minimum_count=1
+):
+    """
+    Load current constituents from official NSE/Nifty Indices
+    CSV endpoints.
+
+    Supported:
+      NIFTY_MIDCAP_100  -> 100 constituents
+      NIFTY_SMALLCAP_500 -> 500 constituents
+
+    A small fallback set of official endpoint variants is used
+    because NSE/Nifty Indices occasionally changes archive hosts.
+    """
+
+    url_map = {
+
+        "NIFTY_MIDCAP_100": [
+            "https://www.nsearchives.nseindia.com/"
+            "content/indices/ind_niftymidcap100list.csv",
+
+            "https://archives.nseindia.com/"
+            "content/indices/ind_niftymidcap100list.csv",
+
+            "https://www.niftyindices.com/"
+            "IndexConstituent/ind_niftymidcap100list.csv"
+        ],
+
+        "NIFTY_SMALLCAP_500": [
+            "https://www.nsearchives.nseindia.com/"
+            "content/indices/ind_niftysmallcap500list.csv",
+
+            "https://archives.nseindia.com/"
+            "content/indices/ind_niftysmallcap500list.csv",
+
+            "https://www.niftyindices.com/"
+            "IndexConstituent/ind_niftysmallcap500list.csv"
+        ]
+    }
+
+    urls = url_map.get(
+        index_key,
+        []
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Referer":
+            "https://www.niftyindices.com/",
+        "Accept":
+            "text/csv,text/plain,*/*"
+    }
+
+    for url in urls:
+
+        try:
+
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                continue
+
+            df = pd.read_csv(
+                StringIO(
+                    response.text
+                )
+            )
+
+            df.columns = [
+                str(c).strip().upper()
+                for c in df.columns
+            ]
+
+            if "SYMBOL" not in df.columns:
+                continue
+
+            symbols = (
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+
+            symbols = symbols[
+                ~symbols.isin([
+                    "",
+                    "NAN",
+                    "NONE",
+                    "NULL"
+                ])
+            ]
+
+            symbols = sorted(
+                symbols.drop_duplicates().tolist()
+            )
+
+            if len(symbols) >= minimum_count:
+
+                return symbols
+
+        except Exception:
+            continue
+
+    return []
+
+
+def load_nifty_midcap100():
+    """
+    Current Nifty Midcap 100 constituents.
+    """
+    return load_nifty_index_constituents(
+        "NIFTY_MIDCAP_100",
+        80
+    )
+
+
+def load_nifty_smallcap500():
+    """
+    Current Nifty Smallcap 500 constituents.
+    """
+    return load_nifty_index_constituents(
+        "NIFTY_SMALLCAP_500",
+        400
+    )
+
+
+def resolve_stock_universe(
+    universe,
+    nse_stocks,
+    nifty500,
+    fno_stocks,
+    nifty_midcap100,
+    nifty_smallcap500
+):
+    """
+    Central universe resolver used by scanners and backtester.
+    """
+
+    if universe == "Nifty 50":
+        return list(NIFTY50)
+
+    if universe == "Nifty 500":
+        return list(nifty500)[:500]
+
+    if universe == "Nifty Midcap 100":
+        return list(nifty_midcap100)[:100]
+
+    if universe == "Nifty Smallcap 500":
+        return list(nifty_smallcap500)[:500]
+
+    if universe == "NSE F&O Stocks":
+        return list(fno_stocks)
+
+    if universe == "Full NSE":
+        return list(nse_stocks)
+
+    return []
+
+
+# ============================================================
 # LOAD NSE F&O STOCK UNIVERSE
 # ============================================================
 
@@ -3505,30 +3683,21 @@ elif module == "🚀 Smart Breakout Scanner":
         [
             "Nifty 50",
             "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
             "NSE F&O Stocks",
             "Full NSE"
         ]
     )
 
-    if universe == "Nifty 50":
-
-        stocks = NIFTY50
-
-    elif universe == "Nifty 500":
-
-        stocks = nifty500
-
-    elif universe == "NSE F&O Stocks":
-
-        stocks = fno_stocks
-
-    elif universe == "Full NSE":
-
-        stocks = nse_stocks
-
-    else:
-
-        stocks = []
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
 
     if (
         universe == "Nifty 500"
@@ -3563,6 +3732,36 @@ elif module == "🚀 Smart Breakout Scanner":
 
 
     if (
+        universe == "Nifty Midcap 100"
+        and not stocks
+    ):
+
+        st.error(
+            """
+            Nifty Midcap 100 list could not be loaded.
+
+            Please try again later.
+            """
+        )
+
+        st.stop()
+
+    if (
+        universe == "Nifty Smallcap 500"
+        and not stocks
+    ):
+
+        st.error(
+            """
+            Nifty Smallcap 500 list could not be loaded.
+
+            Please try again later.
+            """
+        )
+
+        st.stop()
+
+    if (
         universe == "Full NSE"
         and not stocks
     ):
@@ -3591,6 +3790,20 @@ elif module == "🚀 Smart Breakout Scanner":
             "NSE F&O Stocks = individual stocks with "
             "current equity-derivatives underlyings on NSE. "
             "Index derivatives are excluded."
+        )
+
+    if universe == "Nifty Midcap 100":
+
+        st.caption(
+            "Nifty Midcap 100 = 100 tradable NSE stocks in "
+            "the midcap segment, sourced from Nifty Indices."
+        )
+
+    if universe == "Nifty Smallcap 500":
+
+        st.caption(
+            "Nifty Smallcap 500 = 500 small-cap NSE stocks, "
+            "sourced from Nifty Indices."
         )
 
     # --------------------------------------------------------
@@ -4247,39 +4460,22 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
         [
             "Nifty 50",
             "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
             "NSE F&O Stocks",
             "Full NSE"
         ]
     )
 
 
-    if universe == "Nifty 50":
-
-        stocks = list(
-            NIFTY50
-        )
-
-    elif universe == "Nifty 500":
-
-        stocks = list(
-            nifty500
-        )[:500]
-
-    elif universe == "NSE F&O Stocks":
-
-        stocks = list(
-            fno_stocks
-        )
-
-    elif universe == "Full NSE":
-
-        stocks = list(
-            nse_stocks
-        )
-
-    else:
-
-        stocks = []
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
 
 
     if not stocks:
@@ -4813,22 +5009,31 @@ elif module == "📅 Weekly Trend Scanner":
         fno_stocks=load_fno_stocks()
         nifty500=load_nifty500()
         nse_stocks=load_nse_equity_universe()
+        nifty_midcap100=load_nifty_midcap100()
+        nifty_smallcap500=load_nifty_smallcap500()
 
     universe=st.sidebar.selectbox(
         "Stock Universe",
-        ["NSE F&O Stocks","Nifty 50","Nifty 500","Full NSE"],
+        [
+            "NSE F&O Stocks",
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
+            "Full NSE"
+        ],
         index=0,
         key="weekly_trend_universe"
     )
 
-    if universe=="NSE F&O Stocks":
-        stocks=list(fno_stocks)
-    elif universe=="Nifty 50":
-        stocks=list(NIFTY50)
-    elif universe=="Nifty 500":
-        stocks=list(nifty500)[:500]
-    else:
-        stocks=list(nse_stocks)
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
 
     max_stocks=st.sidebar.slider(
         "Maximum Stocks",
@@ -4986,24 +5191,33 @@ elif module == "📈 Daily Trend 50/150/200 Scanner":
         fno_stocks=load_fno_stocks()
         nifty500=load_nifty500()
         nse_stocks=load_nse_equity_universe()
+        nifty_midcap100=load_nifty_midcap100()
+        nifty_smallcap500=load_nifty_smallcap500()
 
     st.sidebar.subheader("📈 Daily Trend Scanner")
 
     universe=st.sidebar.selectbox(
         "Stock Universe",
-        ["NSE F&O Stocks","Nifty 50","Nifty 500","Full NSE"],
+        [
+            "NSE F&O Stocks",
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
+            "Full NSE"
+        ],
         index=0,
         key="daily_trend_universe"
     )
 
-    if universe=="NSE F&O Stocks":
-        stocks=list(fno_stocks)
-    elif universe=="Nifty 50":
-        stocks=list(NIFTY50)
-    elif universe=="Nifty 500":
-        stocks=list(nifty500)[:500]
-    else:
-        stocks=list(nse_stocks)
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
 
     max_stocks=st.sidebar.slider(
         "Maximum Stocks to Scan",
@@ -5202,34 +5416,21 @@ elif module == "🏆 Top 20 Momentum Stocks":
             "NSE F&O Stocks",
             "Nifty 50",
             "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
             "Full NSE"
         ],
         index=0
     )
 
-    if universe == "NSE F&O Stocks":
-
-        stocks = list(
-            fno_stocks
-        )
-
-    elif universe == "Nifty 50":
-
-        stocks = list(
-            NIFTY50
-        )
-
-    elif universe == "Nifty 500":
-
-        stocks = list(
-            nifty500
-        )[:500]
-
-    else:
-
-        stocks = list(
-            nse_stocks
-        )
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
 
     if not stocks:
 
@@ -6424,6 +6625,8 @@ elif module == "📊 Backtest & Performance":
         fno_stocks = load_fno_stocks()
         nifty500 = load_nifty500()
         nse_stocks = load_nse_equity_universe()
+        nifty_midcap100 = load_nifty_midcap100()
+        nifty_smallcap500 = load_nifty_smallcap500()
 
     universe = st.sidebar.selectbox(
         "Stock Universe",
@@ -6431,19 +6634,29 @@ elif module == "📊 Backtest & Performance":
             "NSE F&O Stocks",
             "Nifty 50",
             "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 500",
             "Full NSE"
         ],
-        index=0
+        index=0,
+        key="backtest_universe"
     )
 
-    if universe == "NSE F&O Stocks":
-        stocks = list(fno_stocks)
-    elif universe == "Nifty 50":
-        stocks = list(NIFTY50)
-    elif universe == "Nifty 500":
-        stocks = list(nifty500)[:500]
-    else:
-        stocks = list(nse_stocks)
+    stocks = resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap500
+    )
+
+    if not stocks:
+        st.error(
+            f"No stocks are available for **{universe}**. "
+            "Please try again later."
+        )
+        st.stop()
 
     strategy = st.sidebar.selectbox(
         "Strategy to Backtest",
