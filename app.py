@@ -1842,26 +1842,169 @@ MACD = 1 point
             # TOP STOCKS
             # ------------------------------------------------
 
-            st.subheader(
-                "🏆 Top Early Breakout Candidates"
-            )
+          st.subheader(
+    "🏆 Top Early Breakout Candidates"
+)
 
-            top = results_df[
-                [
-                    "Stock",
-                    "Close",
-                    "200 SMA",
-                    "RSI",
-                    "Volume Ratio",
-                    "Technical Score"
-                ]
-            ].head(20)
+top = results_df[
+    [
+        "Stock",
+        "Close",
+        "200 SMA",
+        "RSI",
+        "Volume Ratio",
+        "Technical Score"
+    ]
+].head(20)
 
-            st.dataframe(
-                top,
-                width="stretch",
-                hide_index=True
-            )
+
+# ============================================================
+# DESKTOP TABLE
+# ============================================================
+
+st.markdown(
+    """
+    <div class="desktop-scanner">
+    """,
+    unsafe_allow_html=True
+)
+
+st.dataframe(
+    top,
+    width="stretch",
+    hide_index=True
+)
+
+st.markdown(
+    "</div>",
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# MOBILE STOCK CARDS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .mobile-scanner {
+        display: none;
+    }
+
+    @media only screen and (max-width: 768px) {
+
+        .desktop-scanner {
+            display: none !important;
+        }
+
+        .mobile-scanner {
+            display: block !important;
+        }
+
+        .stock-card {
+            border: 1px solid rgba(128,128,128,0.35);
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+
+        .stock-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .stock-score {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .stock-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            font-size: 0.9rem;
+        }
+
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+st.markdown(
+    '<div class="mobile-scanner">',
+    unsafe_allow_html=True
+)
+
+
+for _, row in top.iterrows():
+
+    score = int(
+        row["Technical Score"]
+    )
+
+    if score >= 8:
+
+        badge = "🔥 STRONG"
+
+    elif score >= 6:
+
+        badge = "🟢 POSITIVE"
+
+    else:
+
+        badge = "🟡 WATCH"
+
+    card = f"""
+    <div class="stock-card">
+
+        <div class="stock-title">
+            📈 {row['Stock']}
+        </div>
+
+        <div class="stock-score">
+            {badge} — Score {score}/10
+        </div>
+
+        <div class="stock-row">
+            <span>Close</span>
+            <strong>₹{row['Close']:.2f}</strong>
+        </div>
+
+        <div class="stock-row">
+            <span>200 SMA</span>
+            <strong>₹{row['200 SMA']:.2f}</strong>
+        </div>
+
+        <div class="stock-row">
+            <span>RSI</span>
+            <strong>{row['RSI']:.1f}</strong>
+        </div>
+
+        <div class="stock-row">
+            <span>Volume</span>
+            <strong>{row['Volume Ratio']:.2f}x</strong>
+        </div>
+
+    </div>
+    """
+
+    st.markdown(
+        card,
+        unsafe_allow_html=True
+    )
+
+
+st.markdown(
+    "</div>",
+    unsafe_allow_html=True
+)
 
             # ------------------------------------------------
             # SCORE DISTRIBUTION
