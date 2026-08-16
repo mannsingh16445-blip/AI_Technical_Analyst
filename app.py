@@ -4277,7 +4277,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
         value=True
     )
 
-    run_top10 = st.sidebar.button(
+    run_top20 = st.sidebar.button(
         "🏆 FIND TOP 10 STOCKS",
         type="primary"
     )
@@ -4329,7 +4329,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
             """
         )
 
-    if run_top10:
+    if run_top20:
 
         progress = st.progress(
             0,
@@ -4979,7 +4979,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
             ]
 
             st.dataframe(
-                top10[
+                top20[
                     display_columns
                 ],
                 width="stretch",
@@ -5171,7 +5171,7 @@ elif module == "🏆 Top 20 Momentum Stocks":
                     type="secondary"
                 ):
 
-                    compact = top10[
+                    compact = top20[
                         [
                             "Rank",
                             "Stock",
