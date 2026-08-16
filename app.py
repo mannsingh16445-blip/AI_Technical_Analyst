@@ -231,39 +231,109 @@ def download_batches(
             if data is None or data.empty:
                 continue
 
+            # ==================================================
+            # PROCESS EACH STOCK
+            # ==================================================
+
             for ticker in batch:
 
                 yahoo_symbol = ticker + ".NS"
 
                 try:
 
+                    # ------------------------------------------
+                    # SINGLE STOCK
+                    # ------------------------------------------
+
                     if len(batch) == 1:
 
                         stock = data.copy()
 
+                    # ------------------------------------------
+                    # MULTIPLE STOCKS
+                    # ------------------------------------------
+
                     else:
+
+                        if yahoo_symbol not in data.columns.get_level_values(0):
+
+                            continue
 
                         stock = data[
                             yahoo_symbol
                         ].copy()
 
-                    if (
-                        stock is not None
-                        and not stock.empty
+                    # ------------------------------------------
+                    # FIX MULTIINDEX COLUMNS
+                    # ------------------------------------------
+
+                    if isinstance(
+                        stock.columns,
+                        pd.MultiIndex
                     ):
+
+                        stock.columns = [
+                            col[0]
+                            if isinstance(col, tuple)
+                            else col
+                            for col in stock.columns
+                        ]
+
+                    # ------------------------------------------
+                    # NORMALIZE COLUMN NAMES
+                    # ------------------------------------------
+
+                    stock.columns = [
+                        str(col).strip().title()
+                        for col in stock.columns
+                    ]
+
+                    required = [
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                        "Volume"
+                    ]
+
+                    # ------------------------------------------
+                    # CHECK REQUIRED COLUMNS
+                    # ------------------------------------------
+
+                    if not all(
+                        col in stock.columns
+                        for col in required
+                    ):
+
+                        continue
+
+                    # ------------------------------------------
+                    # CLEAN DATA
+                    # ------------------------------------------
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+                    if len(stock) > 0:
 
                         all_data[ticker] = stock
 
                 except Exception:
+
                     continue
 
         except Exception:
+
             continue
 
         time.sleep(0.25)
 
     return all_data
-
 
 # ============================================================
 # INDICATORS
