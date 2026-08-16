@@ -1515,7 +1515,11 @@ def stage_two_analysis(data):
 # WEEKLY TREND / MOMENTUM SCREEN
 # ============================================================
 
-def calculate_weekly_trend_screen(data):
+def calculate_weekly_trend_screen(
+    data,
+    as_of=None,
+    completed_only=False
+):
     """
     User-specified weekly scanner:
     1) Close > SMA20
@@ -1550,6 +1554,15 @@ def calculate_weekly_trend_screen(data):
 
     df.index=pd.to_datetime(df.index)
 
+    # For historical backtesting, never use data after the
+    # signal date. This prevents look-ahead bias.
+    if as_of is not None:
+        as_of = pd.Timestamp(as_of)
+        df = df.loc[df.index <= as_of]
+
+    if df.empty:
+        return None
+
     weekly=df.resample("W-FRI").agg({
         "Open":"first",
         "High":"max",
@@ -1557,6 +1570,23 @@ def calculate_weekly_trend_screen(data):
         "Close":"last",
         "Volume":"sum"
     }).dropna(subset=req)
+
+    # A historical weekly signal must use a completed weekly candle.
+    # We conservatively treat Friday's close as the completion point.
+    if completed_only and as_of is not None:
+        weekday = as_of.weekday()  # Monday=0 ... Friday=4
+
+        if weekday < 4:
+            current_week_end = (
+                as_of
+                + pd.Timedelta(
+                    days=(4 - weekday)
+                )
+            ).normalize()
+
+            weekly = weekly.loc[
+                weekly.index < current_week_end
+            ]
 
     if len(weekly)<60:
         return None
@@ -1684,6 +1714,435 @@ def calculate_daily_trend_screen(data):
         "252D Low": lo,
         "252D High": hi
     }
+
+
+# ============================================================
+# STRATEGY-SPECIFIC HISTORICAL SIGNAL HELPERS
+# ============================================================
+
+def rsi_wma_signal_asof(
+    data,
+    as_of,
+    threshold,
+    timeframe="Daily"
+):
+    """
+    Evaluate ONLY the RSI(9)/WMA(Close,21) rules for one
+    timeframe using information available on or before as_of.
+
+    Daily:
+        RSI(9) crossed above WMA(21)
+        RSI(9) > threshold
+
+    Weekly:
+        The daily data is resampled to W-FRI and only a
+        completed weekly bar is eligible.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df = data.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    as_of = pd.Timestamp(as_of)
+    df = df.loc[df.index <= as_of]
+
+    if timeframe == "Weekly":
+        df = resample_to_weekly(df)
+
+        # W-FRI labels the weekly bar Friday. Therefore a bar
+        # labelled after as_of is not yet completed/available.
+        df = df.loc[df.index <= as_of]
+
+    prepared = prepare_rsi_wma_data(df)
+
+    if prepared.empty or len(prepared) < 30:
+        return None
+
+    latest = prepared.iloc[-1]
+
+    cross = crossed_above_rsi_wma(prepared)
+
+    threshold_pass = (
+        float(latest["RSI9"])
+        > float(threshold)
+    )
+
+    return {
+        "Pass": bool(
+            cross and threshold_pass
+        ),
+        "Cross": bool(cross),
+        "Threshold": bool(threshold_pass),
+        "RSI9": float(latest["RSI9"]),
+        "WMA21": float(latest["WMA21_CLOSE"]),
+        "Date": prepared.index[-1]
+    }
+
+
+@st.cache_data(
+    ttl=900,
+    show_spinner=False
+)
+def download_hourly_backtest_data(
+    tickers
+):
+    """
+    Yahoo Finance currently provides a much shorter history for
+    60-minute data than daily data. This helper therefore downloads
+    the maximum practical recent 60-day 60-minute history.
+
+    It is used ONLY when an hourly condition is selected in the
+    historical backtester.
+    """
+
+    results = {}
+
+    for symbol in list(
+        dict.fromkeys(tickers)
+    ):
+
+        ticker = (
+            symbol
+            if symbol.endswith(".NS")
+            else symbol + ".NS"
+        )
+
+        try:
+
+            df = yf.download(
+                tickers=ticker,
+                period="60d",
+                interval="60m",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="column"
+            )
+
+            if df is None or df.empty:
+                continue
+
+            if isinstance(
+                df.columns,
+                pd.MultiIndex
+            ):
+                # Single ticker downloads can still arrive with
+                # a MultiIndex. Take the first ticker level.
+                try:
+                    df = df.xs(
+                        ticker,
+                        axis=1,
+                        level=1
+                    )
+                except Exception:
+                    df.columns = (
+                        df.columns
+                        .get_level_values(0)
+                    )
+
+            required = [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume"
+            ]
+
+            if any(
+                c not in df.columns
+                for c in required
+            ):
+                continue
+
+            df = df.dropna(
+                subset=required
+            )
+
+            if not df.empty:
+                results[symbol] = df
+
+        except Exception:
+            continue
+
+    return results
+
+
+def hourly_rsi_wma_signal_asof(
+    hourly_data,
+    as_of,
+    threshold
+):
+    """
+    Evaluate the exact Hourly RSI/WMA conditions using only
+    hourly bars available on or before the signal date/time.
+
+    For the daily backtest engine, the latest available hourly
+    bar on the signal date is used. The actual trade is entered
+    only on subsequent daily sessions.
+    """
+
+    if (
+        hourly_data is None
+        or hourly_data.empty
+    ):
+        return None
+
+    df = hourly_data.copy()
+
+    if isinstance(
+        df.columns,
+        pd.MultiIndex
+    ):
+        df.columns = (
+            df.columns
+            .get_level_values(0)
+        )
+
+    if not isinstance(
+        df.index,
+        pd.DatetimeIndex
+    ):
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+    # Work by calendar date so the hourly confirmation belongs
+    # to the same signal day.
+    date = pd.Timestamp(
+        as_of
+    ).date()
+
+    df = df.loc[
+        df.index.date <= date
+    ]
+
+    if df.empty:
+        return None
+
+    # Use only bars on the signal day for the final hourly
+    # confirmation, while the indicator history itself contains
+    # all preceding hourly bars.
+    prepared = prepare_rsi_wma_data(
+        df
+    )
+
+    if prepared.empty or len(prepared) < 30:
+        return None
+
+    latest = prepared.iloc[-1]
+
+    cross = crossed_above_rsi_wma(
+        prepared
+    )
+
+    threshold_pass = (
+        float(latest["RSI9"])
+        > float(threshold)
+    )
+
+    return {
+        "Pass": bool(
+            cross and threshold_pass
+        ),
+        "Cross": bool(cross),
+        "Threshold": bool(
+            threshold_pass
+        ),
+        "RSI9": float(
+            latest["RSI9"]
+        ),
+        "WMA21": float(
+            latest["WMA21_CLOSE"]
+        ),
+        "Date": prepared.index[-1]
+    }
+
+
+def top20_score_asof(
+    data,
+    as_of,
+    hourly_data=None,
+    include_hourly=True
+):
+    """
+    Historical version of the app's Top-20 scoring model.
+
+    It uses ONLY the Top-20 model's own components:
+
+      Smart Breakout          40 points
+      Daily RSI/WMA           25 points
+      Weekly RSI/WMA          20 points
+      Hourly RSI/WMA          15 points
+
+    It does NOT import an unrelated scanner condition.
+
+    The score is returned for research/backtesting. Ranking the
+    whole universe into exactly 20 names is a portfolio-selection
+    problem; the backtest uses a configurable minimum score so
+    that each historical signal can be tested independently.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df = data.copy()
+
+    if not isinstance(
+        df.index,
+        pd.DatetimeIndex
+    ):
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+    df = df.loc[
+        df.index <= pd.Timestamp(as_of)
+    ]
+
+    if len(df) < 210:
+        return None
+
+    breakout = stage_two_analysis(
+        calculate_indicators(df)
+    )
+
+    breakout_score = (
+        40.0
+        if breakout is None
+        else min(
+            float(
+                breakout["Score"]
+            ) / 10.0 * 40.0,
+            40.0
+        )
+    )
+
+    # Preserve the scanner's point-by-point logic rather than
+    # replacing it with a generic RSI score.
+    breakout_score = 0.0
+
+    if breakout is not None:
+
+        breakout_score = (
+            float(
+                breakout["Score"]
+            )
+            / 10.0
+            * 40.0
+        )
+
+    daily = rsi_wma_signal_asof(
+        df,
+        as_of,
+        55,
+        "Daily"
+    )
+
+    daily_score = 0.0
+
+    if daily is not None:
+
+        if daily["Cross"]:
+            daily_score += 15
+
+        if daily["Threshold"]:
+            daily_score += 10
+
+    weekly = rsi_wma_signal_asof(
+        df,
+        as_of,
+        50,
+        "Weekly"
+    )
+
+    weekly_score = 0.0
+
+    if weekly is not None:
+
+        if weekly["Cross"]:
+            weekly_score += 10
+
+        if weekly["Threshold"]:
+            weekly_score += 10
+
+    hourly = None
+    hourly_score = 0.0
+
+    if (
+        include_hourly
+        and hourly_data is not None
+    ):
+
+        hourly = (
+            hourly_rsi_wma_signal_asof(
+                hourly_data,
+                as_of,
+                55
+            )
+        )
+
+        if hourly is not None:
+
+            if hourly["Cross"]:
+                hourly_score += 8
+
+            if hourly["Threshold"]:
+                hourly_score += 7
+
+    total = (
+        breakout_score
+        + daily_score
+        + weekly_score
+        + hourly_score
+    )
+
+    daily_pass = (
+        daily is not None
+        and daily["Pass"]
+    )
+
+    weekly_pass = (
+        weekly is not None
+        and weekly["Pass"]
+    )
+
+    hourly_pass = (
+        hourly is not None
+        and hourly["Pass"]
+    )
+
+    full_mtf = (
+        daily_pass
+        and weekly_pass
+        and (
+            not include_hourly
+            or hourly_pass
+        )
+    )
+
+    return {
+        "Total Score": float(total),
+        "Breakout Score": float(breakout_score),
+        "Daily Score": float(daily_score),
+        "Weekly Score": float(weekly_score),
+        "Hourly Score": float(hourly_score),
+        "Daily Pass": bool(daily_pass),
+        "Weekly Pass": bool(weekly_pass),
+        "Hourly Pass": bool(hourly_pass),
+        "Full MTF": bool(full_mtf),
+        "Breakout": breakout,
+        "Daily": daily,
+        "Weekly": weekly,
+        "Hourly": hourly
+    }
+
 
 
 # ============================================================
@@ -5989,11 +6448,15 @@ elif module == "📊 Backtest & Performance":
     strategy = st.sidebar.selectbox(
         "Strategy to Backtest",
         [
-            "Combined Breakout + Daily RSI(9)",
             "Smart Breakout",
             "Daily RSI(9)/WMA(21)",
+            "Weekly RSI(9)/WMA(21)",
+            "Hourly RSI(9)/WMA(21)",
+            "Multi-Timeframe RSI/WMA",
+            "Combined Breakout + Daily RSI(9)",
             "Weekly Trend — 10 Conditions",
-            "Daily Trend — 10 Conditions"
+            "Daily Trend — 10 Conditions",
+            "Top 20 Momentum Model"
         ]
     )
 
@@ -6017,13 +6480,63 @@ elif module == "📊 Backtest & Performance":
         step=10
     )
 
-    min_breakout_score = st.sidebar.slider(
-        "Minimum Breakout Score",
-        min_value=5,
-        max_value=10,
-        value=7,
-        help="Used for Smart Breakout and Combined strategies."
-    )
+    if strategy in [
+        "Smart Breakout",
+        "Combined Breakout + Daily RSI(9)"
+    ]:
+
+        min_breakout_score = st.sidebar.slider(
+            "Minimum Breakout Score",
+            min_value=5,
+            max_value=10,
+            value=7,
+            help="Used only for Smart Breakout and Combined strategies."
+        )
+
+    else:
+
+        min_breakout_score = None
+
+    if strategy == "Top 20 Momentum Model":
+
+        top20_min_score = st.sidebar.slider(
+            "Minimum Top-20 Model Score",
+            min_value=35,
+            max_value=100,
+            value=65,
+            step=5,
+            help=(
+                "The Top-20 scanner is a ranking model. "
+                "For historical trade testing, this threshold "
+                "defines a qualifying Top-20-model setup."
+            )
+        )
+
+        top20_include_hourly = st.sidebar.checkbox(
+            "Include Hourly component",
+            value=True,
+            help=(
+                "Hourly history is limited by Yahoo Finance; "
+                "when enabled, this backtest is effectively "
+                "limited to the recent hourly-history window."
+            )
+        )
+
+    else:
+
+        top20_min_score = None
+        top20_include_hourly = False
+
+    if strategy == "Multi-Timeframe RSI/WMA":
+
+        mtf_hourly_confirmation = st.sidebar.checkbox(
+            "Require Hourly Confirmation",
+            value=False
+        )
+
+    else:
+
+        mtf_hourly_confirmation = False
 
     holding_days = st.sidebar.slider(
         "Maximum Holding Days",
@@ -6060,40 +6573,128 @@ elif module == "📊 Backtest & Performance":
         f"Strategy: **{strategy}**"
     )
 
+    strategy_condition_note = {
+        "Smart Breakout":
+            "Only C1–C5 + Smart Breakout confirmations are tested.",
+        "Daily RSI(9)/WMA(21)":
+            "Only Daily RSI(9) cross + RSI(9) > 55 are tested.",
+        "Weekly RSI(9)/WMA(21)":
+            "Only Weekly RSI(9) cross + RSI(9) > 50 are tested.",
+        "Hourly RSI(9)/WMA(21)":
+            "Only Hourly RSI(9) cross + RSI(9) > 55 are tested.",
+        "Multi-Timeframe RSI/WMA":
+            "Only Weekly + Daily RSI/WMA conditions are tested, plus optional Hourly confirmation.",
+        "Combined Breakout + Daily RSI(9)":
+            "Only Smart Breakout AND Daily RSI(9)/WMA(21) are required.",
+        "Weekly Trend — 10 Conditions":
+            "Only the 10 Weekly Trend conditions are tested.",
+        "Daily Trend — 10 Conditions":
+            "Only the 10 Daily Trend conditions are tested.",
+        "Top 20 Momentum Model":
+            "Only the Top-20 model's 100-point scoring components are tested."
+    }
+
+    st.caption(
+        "🔒 Active backtest rule set: "
+        + strategy_condition_note.get(
+            strategy,
+            "Selected strategy conditions only."
+        )
+    )
+
+    if strategy in [
+        "Hourly RSI(9)/WMA(21)",
+        "Multi-Timeframe RSI/WMA"
+    ] and (
+        strategy == "Hourly RSI(9)/WMA(21)"
+        or mtf_hourly_confirmation
+    ):
+
+        st.warning(
+            "Hourly historical testing is limited by Yahoo Finance "
+            "to the available recent 60-day 60-minute dataset."
+        )
+
+    if strategy == "Top 20 Momentum Model" and top20_include_hourly:
+
+        st.warning(
+            "The Top-20 model's hourly component uses the available "
+            "recent 60-day hourly history. Disable the hourly component "
+            "for a longer daily/weekly historical test."
+        )
+
     with st.expander(
         "📐 Backtest Rules"
     ):
 
         st.markdown(
             """
-            **Signal is evaluated only after a completed daily bar.**
+            ### 🔒 Strategy-isolated backtesting
 
-            **Smart Breakout:** your existing C1–C5 breakout rules,
-            with a configurable minimum score.
+            **Smart Breakout**
+            - ONLY the existing Smart Breakout C1–C5 rules and its
+              built-in confirmations/score are used.
+            - Daily/Weekly/Hourly RSI scanners are NOT added.
 
-            **Daily RSI strategy:** RSI(9) crosses above WMA(Close,21)
-            and RSI(9) is above 55.
+            **Daily RSI(9)/WMA(21)**
+            - ONLY Daily RSI(9) crossed above WMA(Close,21).
+            - ONLY Daily RSI(9) > 55.
+            - No Smart Breakout or trend-filter conditions.
 
-            **Combined:** both the Smart Breakout score and Daily
-            RSI(9)/WMA(21) confirmation must pass.
+            **Weekly RSI(9)/WMA(21)**
+            - ONLY Weekly RSI(9) crossed above WMA(Close,21).
+            - ONLY Weekly RSI(9) > 50.
+            - Only completed weekly bars are eligible.
 
-            **Weekly Trend — 10 Conditions:** the supplied weekly
-            conditions are evaluated from completed weekly bars. The
-            resulting signal is acted on only using subsequent daily
-            candles.
+            **Hourly RSI(9)/WMA(21)**
+            - ONLY Hourly RSI(9) crossed above WMA(Close,21).
+            - ONLY Hourly RSI(9) > 55.
+            - Yahoo Finance hourly history is limited, so this test uses
+              the available recent 60-day hourly dataset.
 
+            **Multi-Timeframe RSI/WMA**
+            - Weekly RSI/WMA conditions AND Daily RSI/WMA conditions.
+            - Hourly confirmation is optional and is used only if enabled.
+
+            **Combined Breakout + Daily RSI(9)**
+            - Smart Breakout AND Daily RSI(9)/WMA(21).
+            - This combination is intentional and is the ONLY reason those
+              two condition families appear together.
+
+            **Weekly Trend — 10 Conditions**
+            - ONLY the 10 supplied Weekly Trend conditions.
+            - Completed weekly bars only.
+            - No Smart Breakout, RSI/WMA, or Daily Trend conditions.
+
+            **Daily Trend — 10 Conditions**
+            - ONLY the 10 supplied Daily 50/150/200 + 252-day range +
+              volume conditions.
+            - No Smart Breakout, RSI/WMA, or Weekly Trend conditions.
+
+            **Top 20 Momentum Model**
+            - ONLY the Top-20 scanner's own 100-point components:
+              Smart Breakout 40 + Daily RSI/WMA 25 +
+              Weekly RSI/WMA 20 + optional Hourly RSI/WMA 15.
+            - A configurable minimum score is used for historical trade
+              qualification because a "Top 20" ranking is a universe-level
+              portfolio-selection problem rather than a single-stock signal.
+
+            ### Common trade management
             **Entry:** approximately 0.25% above the signal-day close.
-            On the following sessions, a trade is considered filled
-            only when the day's high reaches the entry level.
+            A fill occurs only when a subsequent daily High reaches Entry.
 
             **Stop Loss:** below recent support and volatility-adjusted
-            using ATR(14), consistent with the app's trade-plan logic.
+            using ATR(14), consistent with the app trade-plan logic.
 
-            **Target 1:** 2R. **Target 2:** 3R.
+            **Target 1:** 2R.
+            **Target 2:** 3R.
 
-            If both stop and target appear within the same daily candle,
-            the backtest uses the conservative assumption that the stop
-            was hit first.
+            If both stop and target are reached within the same daily
+            candle, the conservative assumption is that the stop is hit
+            first.
+
+            These common items are trade-management rules, not additional
+            scanner-selection conditions.
             """
         )
 
@@ -6112,6 +6713,42 @@ elif module == "📊 Backtest & Performance":
                 period,
                 50
             )
+
+            # Hourly history is downloaded ONLY when the selected
+            # scanner actually requires it. This keeps other strategy
+            # backtests fast and prevents unrelated data from entering
+            # their calculations.
+            needs_hourly = (
+                strategy == "Hourly RSI(9)/WMA(21)"
+                or (
+                    strategy == "Multi-Timeframe RSI/WMA"
+                    and mtf_hourly_confirmation
+                )
+                or (
+                    strategy == "Top 20 Momentum Model"
+                    and top20_include_hourly
+                )
+            )
+
+            if needs_hourly:
+
+                progress.progress(
+                    20,
+                    text=(
+                        "Downloading recent 60-day "
+                        "hourly history..."
+                    )
+                )
+
+                hourly_history = (
+                    download_hourly_backtest_data(
+                        selected_stocks
+                    )
+                )
+
+            else:
+
+                hourly_history = {}
 
             progress.progress(
                 25,
@@ -6162,78 +6799,295 @@ elif module == "📊 Backtest & Performance":
                     hist = indicators.iloc[:i + 1]
                     signal_date = hist.index[-1]
 
-                    breakout = stage_two_analysis(hist)
+                    # ====================================================
+                    # STRATEGY-ISOLATED HISTORICAL SIGNAL LOGIC
+                    # ====================================================
 
-                    breakout_pass = (
-                        breakout is not None
-                        and breakout["Score"] >= min_breakout_score
-                    )
+                    breakout = None
+                    breakout_pass = False
 
                     rsi_pass = False
                     rsi_value = np.nan
 
-                    # rsi_data uses the same RSI(9)/WMA(21) formula as
-                    # the live scanner. Find the latest bar at/before
-                    # the signal date and its previous bar.
-                    rsi_hist = rsi_data.loc[
-                        rsi_data.index <= signal_date
-                    ]
+                    weekly_result = None
+                    weekly_pass = False
 
-                    if len(rsi_hist) >= 2:
+                    daily_trend_result = None
+                    daily_trend_pass = False
 
-                        prev_r = rsi_hist.iloc[-2]
-                        curr_r = rsi_hist.iloc[-1]
+                    weekly_rsi = None
+                    hourly_rsi = None
+                    mtf_daily = None
+                    mtf_weekly = None
+                    mtf_hourly = None
+                    top20_model = None
 
-                        cross = (
-                            prev_r["RSI9"] <= prev_r["WMA21_CLOSE"]
-                            and curr_r["RSI9"] > curr_r["WMA21_CLOSE"]
-                        )
-
-                        threshold = (
-                            curr_r["RSI9"] > 55
-                        )
-
-                        rsi_pass = (
-                            cross and threshold
-                        )
-
-                        rsi_value = float(
-                            curr_r["RSI9"]
-                        )
-
-                    weekly_result = calculate_weekly_trend_screen(
-                        indicators.iloc[:i + 1]
-                    )
-
-                    weekly_pass = (
-                        weekly_result is not None
-                        and weekly_result["Pass"]
-                    )
-
-                    daily_trend_result = (
-                        calculate_daily_trend_screen(
-                            indicators.iloc[:i + 1]
-                        )
-                    )
-
-                    daily_trend_pass = (
-                        daily_trend_result is not None
-                        and daily_trend_result["Pass"]
-                    )
-
+                    # --------------------------------------------
+                    # 1. SMART BREAKOUT ONLY
+                    # --------------------------------------------
                     if strategy == "Smart Breakout":
+
+                        breakout = stage_two_analysis(
+                            hist
+                        )
+
+                        breakout_pass = (
+                            breakout is not None
+                            and breakout["Score"]
+                            >= min_breakout_score
+                        )
+
                         signal = breakout_pass
+
+                    # --------------------------------------------
+                    # 2. DAILY RSI/WMA ONLY
+                    # --------------------------------------------
                     elif strategy == "Daily RSI(9)/WMA(21)":
+
+                        daily_rsi_result = (
+                            rsi_wma_signal_asof(
+                                data,
+                                signal_date,
+                                55,
+                                "Daily"
+                            )
+                        )
+
+                        if daily_rsi_result:
+
+                            rsi_pass = (
+                                daily_rsi_result["Pass"]
+                            )
+
+                            rsi_value = (
+                                daily_rsi_result["RSI9"]
+                            )
+
                         signal = rsi_pass
+
+                    # --------------------------------------------
+                    # 3. WEEKLY RSI/WMA ONLY
+                    # --------------------------------------------
+                    elif strategy == "Weekly RSI(9)/WMA(21)":
+
+                        weekly_rsi = (
+                            rsi_wma_signal_asof(
+                                data,
+                                signal_date,
+                                50,
+                                "Weekly"
+                            )
+                        )
+
+                        signal = (
+                            weekly_rsi is not None
+                            and weekly_rsi["Pass"]
+                            and weekly_rsi["Date"]
+                            == pd.Timestamp(signal_date)
+                        )
+
+                    # --------------------------------------------
+                    # 4. HOURLY RSI/WMA ONLY
+                    # --------------------------------------------
+                    elif strategy == "Hourly RSI(9)/WMA(21)":
+
+                        hourly_rsi = (
+                            hourly_rsi_wma_signal_asof(
+                                hourly_history.get(
+                                    symbol
+                                ),
+                                signal_date,
+                                55
+                            )
+                            if symbol in hourly_history
+                            else None
+                        )
+
+                        signal = (
+                            hourly_rsi is not None
+                            and hourly_rsi["Pass"]
+                        )
+
+                    # --------------------------------------------
+                    # 5. MULTI-TIMEFRAME RSI/WMA ONLY
+                    # --------------------------------------------
+                    elif strategy == "Multi-Timeframe RSI/WMA":
+
+                        mtf_daily = (
+                            rsi_wma_signal_asof(
+                                data,
+                                signal_date,
+                                55,
+                                "Daily"
+                            )
+                        )
+
+                        mtf_weekly = (
+                            rsi_wma_signal_asof(
+                                data,
+                                signal_date,
+                                50,
+                                "Weekly"
+                            )
+                        )
+
+                        mtf_hourly = None
+
+                        if mtf_hourly_confirmation:
+
+                            mtf_hourly = (
+                                hourly_rsi_wma_signal_asof(
+                                    hourly_history.get(
+                                        symbol
+                                    ),
+                                    signal_date,
+                                    55
+                                )
+                                if symbol in hourly_history
+                                else None
+                            )
+
+                        daily_ok = (
+                            mtf_daily is not None
+                            and mtf_daily["Pass"]
+                        )
+
+                        weekly_ok = (
+                            mtf_weekly is not None
+                            and mtf_weekly["Pass"]
+                            and mtf_weekly["Date"]
+                            == pd.Timestamp(signal_date)
+                        )
+
+                        hourly_ok = (
+                            not mtf_hourly_confirmation
+                            or (
+                                mtf_hourly is not None
+                                and mtf_hourly["Pass"]
+                            )
+                        )
+
+                        signal = (
+                            daily_ok
+                            and weekly_ok
+                            and hourly_ok
+                        )
+
+                    # --------------------------------------------
+                    # 6. INTENTIONAL COMBINED STRATEGY
+                    # --------------------------------------------
+                    elif strategy == "Combined Breakout + Daily RSI(9)":
+
+                        breakout = stage_two_analysis(
+                            hist
+                        )
+
+                        breakout_pass = (
+                            breakout is not None
+                            and breakout["Score"]
+                            >= min_breakout_score
+                        )
+
+                        daily_rsi_result = (
+                            rsi_wma_signal_asof(
+                                data,
+                                signal_date,
+                                55,
+                                "Daily"
+                            )
+                        )
+
+                        if daily_rsi_result:
+
+                            rsi_pass = (
+                                daily_rsi_result["Pass"]
+                            )
+
+                            rsi_value = (
+                                daily_rsi_result["RSI9"]
+                            )
+
+                        signal = (
+                            breakout_pass
+                            and rsi_pass
+                        )
+
+                    # --------------------------------------------
+                    # 7. WEEKLY TREND — ONLY ITS 10 CONDITIONS
+                    # --------------------------------------------
                     elif strategy == "Weekly Trend — 10 Conditions":
+
+                        weekly_result = (
+                            calculate_weekly_trend_screen(
+                                data.iloc[:i + 1],
+                                as_of=signal_date,
+                                completed_only=True
+                            )
+                        )
+
+                        weekly_pass = (
+                            weekly_result is not None
+                            and weekly_result["Pass"]
+                            and weekly_result["WeeklyDate"]
+                            == pd.Timestamp(signal_date)
+                        )
+
                         signal = weekly_pass
+
+                    # --------------------------------------------
+                    # 8. DAILY TREND — ONLY ITS 10 CONDITIONS
+                    # --------------------------------------------
                     elif strategy == "Daily Trend — 10 Conditions":
+
+                        daily_trend_result = (
+                            calculate_daily_trend_screen(
+                                data.iloc[:i + 1]
+                            )
+                        )
+
+                        daily_trend_pass = (
+                            daily_trend_result is not None
+                            and daily_trend_result["Pass"]
+                        )
+
                         signal = daily_trend_pass
+
+                    # --------------------------------------------
+                    # 9. TOP-20 MODEL — ONLY ITS OWN SCORE
+                    # --------------------------------------------
+                    elif strategy == "Top 20 Momentum Model":
+
+                        top20_model = (
+                            top20_score_asof(
+                                data,
+                                signal_date,
+                                hourly_data=(
+                                    hourly_history.get(
+                                        symbol
+                                    )
+                                    if top20_include_hourly
+                                    else None
+                                ),
+                                include_hourly=(
+                                    top20_include_hourly
+                                )
+                            )
+                        )
+
+                        signal = (
+                            top20_model is not None
+                            and top20_model[
+                                "Total Score"
+                            ] >= top20_min_score
+                        )
+
                     else:
-                        signal = breakout_pass and rsi_pass
+
+                        signal = False
 
                     if not signal:
                         continue
+
 
                     signal_close = float(
                         indicators.iloc[i]["Close"]
@@ -6326,22 +7180,82 @@ elif module == "📊 Backtest & Performance":
                             r_multiple = 2.0
                             break
 
-                    grade = "B"
+                    # Strategy-specific label only.
+                    if strategy == "Smart Breakout":
 
-                    if breakout is not None:
+                        score = (
+                            breakout["Score"]
+                            if breakout is not None
+                            else 0
+                        )
 
-                        score = breakout["Score"]
+                        grade = (
+                            "A+"
+                            if score >= 9
+                            else "A"
+                            if score >= 8
+                            else "B"
+                        )
 
-                        if rsi_pass and score >= 9:
-                            grade = "A+"
-                        elif rsi_pass and score >= 8:
-                            grade = "A"
-                        elif score >= 7:
-                            grade = "B"
-                        else:
-                            grade = "C"
-                    elif rsi_pass:
-                        grade = "B"
+                    elif strategy == "Combined Breakout + Daily RSI(9)":
+
+                        score = (
+                            breakout["Score"]
+                            if breakout is not None
+                            else 0
+                        )
+
+                        grade = (
+                            "A+"
+                            if score >= 9
+                            else "A"
+                            if score >= 8
+                            else "B"
+                        )
+
+                    elif strategy == "Daily RSI(9)/WMA(21)":
+
+                        grade = "Daily RSI Qualified"
+
+                    elif strategy == "Weekly RSI(9)/WMA(21)":
+
+                        grade = "Weekly RSI Qualified"
+
+                    elif strategy == "Hourly RSI(9)/WMA(21)":
+
+                        grade = "Hourly RSI Qualified"
+
+                    elif strategy == "Multi-Timeframe RSI/WMA":
+
+                        grade = "MTF RSI Qualified"
+
+                    elif strategy == "Weekly Trend — 10 Conditions":
+
+                        grade = "Weekly Trend Qualified"
+
+                    elif strategy == "Daily Trend — 10 Conditions":
+
+                        grade = "Daily Trend Qualified"
+
+                    elif strategy == "Top 20 Momentum Model":
+
+                        score = (
+                            top20_model["Total Score"]
+                            if top20_model is not None
+                            else 0
+                        )
+
+                        grade = (
+                            "A+"
+                            if score >= 80
+                            else "A"
+                            if score >= 65
+                            else "B"
+                        )
+
+                    else:
+
+                        grade = "Qualified"
 
                     trades.append({
 
@@ -6357,17 +7271,104 @@ elif module == "📊 Backtest & Performance":
                         "Exit Price": round(exit_price, 2),
                         "Outcome": outcome,
                         "R Multiple": round(r_multiple, 2),
-                        "RSI9": round(rsi_value, 2)
-                        if not pd.isna(rsi_value)
-                        else np.nan,
+                        "RSI9":
+                            (
+                                round(
+                                    rsi_value,
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    in [
+                                        "Daily RSI(9)/WMA(21)",
+                                        "Combined Breakout + Daily RSI(9)"
+                                    ]
+                                    and not pd.isna(
+                                        rsi_value
+                                    )
+                                )
+                                else np.nan
+                            ),
+
                         "Breakout Score":
-                            breakout["Score"]
-                            if breakout is not None
-                            else np.nan,
+                            (
+                                breakout["Score"]
+                                if (
+                                    strategy
+                                    in [
+                                        "Smart Breakout",
+                                        "Combined Breakout + Daily RSI(9)"
+                                    ]
+                                    and breakout is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Weekly RSI9":
+                            (
+                                round(
+                                    weekly_rsi["RSI9"],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Weekly RSI(9)/WMA(21)"
+                                    and weekly_rsi is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Hourly RSI9":
+                            (
+                                round(
+                                    hourly_rsi["RSI9"],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Hourly RSI(9)/WMA(21)"
+                                    and hourly_rsi is not None
+                                )
+                                else np.nan
+                            ),
+
+                        "Top20 Score":
+                            (
+                                round(
+                                    top20_model[
+                                        "Total Score"
+                                    ],
+                                    2
+                                )
+                                if (
+                                    strategy
+                                    == "Top 20 Momentum Model"
+                                    and top20_model is not None
+                                )
+                                else np.nan
+                            ),
+
                         "Weekly Trend Pass":
-                            "✓" if weekly_pass else "—",
+                            (
+                                "✓"
+                                if (
+                                    strategy
+                                    == "Weekly Trend — 10 Conditions"
+                                    and weekly_pass
+                                )
+                                else "—"
+                            ),
+
                         "Daily Trend Pass":
-                            "✓" if daily_trend_pass else "—"
+                            (
+                                "✓"
+                                if (
+                                    strategy
+                                    == "Daily Trend — 10 Conditions"
+                                    and daily_trend_pass
+                                )
+                                else "—"
+                            )
                     })
 
                     # Avoid repeatedly entering the same stock while a
