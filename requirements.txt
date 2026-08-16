@@ -3,3 +3,6 @@ yfinance
 plotly
 pandas
 numpy
+requests
+openai
+python-dotenv
