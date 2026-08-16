@@ -223,10 +223,35 @@ NIFTY50 = [
 )
 def load_nse_equity_universe():
 
-    url = (
+    # ========================================================
+    # NSE FULL EQUITY UNIVERSE
+    # ========================================================
+    #
+    # Primary source:
+    # NSE official EQUITY_L.csv
+    #
+    # We first visit NSE homepage to establish cookies.
+    # This is more reliable than making a direct CSV request.
+    #
+    # ========================================================
+
+    EQUITY_URLS = [
+
         "https://nsearchives.nseindia.com/"
+        "content/equities/EQUITY_L.csv",
+
+        "https://archives.nseindia.com/"
         "content/equities/EQUITY_L.csv"
-    )
+
+    ]
+
+    HOME_URLS = [
+
+        "https://www.nseindia.com",
+
+        "https://nseindia.com"
+
+    ]
 
     headers = {
 
@@ -240,68 +265,426 @@ def load_nse_equity_universe():
             ),
 
         "Accept":
-            "text/csv,*/*",
+            (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,"
+                "text/csv;q=0.8,*/*;q=0.7"
+            ),
+
+        "Accept-Language":
+            "en-US,en;q=0.9",
+
+        "Connection":
+            "keep-alive",
 
         "Referer":
             "https://www.nseindia.com/"
 
     }
 
-    try:
 
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=30
-        )
+    # ========================================================
+    # CREATE SESSION
+    # ========================================================
 
-        response.raise_for_status()
+    session = requests.Session()
 
-        df = pd.read_csv(
-            StringIO(
-                response.text
+    session.headers.update(
+        headers
+    )
+
+
+    # ========================================================
+    # VISIT NSE HOMEPAGE FIRST
+    # ========================================================
+
+    for home_url in HOME_URLS:
+
+        try:
+
+            home_response = session.get(
+
+                home_url,
+
+                timeout=20
+
             )
-        )
 
-        df.columns = [
-            str(column)
-            .strip()
-            .upper()
-            for column in df.columns
-        ]
+            if home_response.status_code == 200:
 
-        if "SYMBOL" not in df.columns:
+                break
 
-            return []
+        except Exception:
 
-        symbols = (
-            df["SYMBOL"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
+            continue
 
-        symbols = symbols[
-            ~symbols.isin(
-                [
-                    "",
-                    "NAN",
-                    "NONE"
+
+    # Small delay to allow NSE session/cookies
+
+    time.sleep(1)
+
+
+    # ========================================================
+    # TRY OFFICIAL NSE EQUITY FILE
+    # ========================================================
+
+    for equity_url in EQUITY_URLS:
+
+        try:
+
+            response = session.get(
+
+                equity_url,
+
+                headers={
+
+                    **headers,
+
+                    "Referer":
+                        "https://www.nseindia.com/"
+
+                },
+
+                timeout=30
+
+            )
+
+
+            if response.status_code != 200:
+
+                continue
+
+
+            # ------------------------------------------------
+            # Check that NSE actually returned CSV
+            # ------------------------------------------------
+
+            content = response.text.strip()
+
+
+            if not content:
+
+                continue
+
+
+            # NSE CSV should contain SYMBOL
+            # in its header
+
+            if "SYMBOL" not in content[:500].upper():
+
+                continue
+
+
+            df = pd.read_csv(
+
+                StringIO(
+                    content
+                )
+
+            )
+
+
+            # ------------------------------------------------
+            # Normalize columns
+            # ------------------------------------------------
+
+            df.columns = [
+
+                str(column)
+                .strip()
+                .upper()
+
+                for column in df.columns
+
+            ]
+
+
+            if "SYMBOL" not in df.columns:
+
+                continue
+
+
+            # ------------------------------------------------
+            # Get symbols
+            # ------------------------------------------------
+
+            symbols = (
+
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+
+            )
+
+
+            # ------------------------------------------------
+            # Get SERIES if available
+            # ------------------------------------------------
+
+            if "SERIES" in df.columns:
+
+                series = (
+
+                    df["SERIES"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+
+                )
+
+                # Keep normal equity securities.
+                #
+                # EQ = Equity
+                # BE = Book Entry
+                #
+                # Some NSE securities may have
+                # other valid series, so if filtering
+                # leaves too few symbols we fall back
+                # to the complete symbol column.
+
+                equity_mask = series.isin(
+
+                    [
+                        "EQ",
+                        "BE"
+                    ]
+
+                )
+
+
+                filtered_symbols = symbols[
+                    equity_mask
                 ]
-            )
-        ]
 
-        symbols = sorted(
-            symbols
-            .drop_duplicates()
-            .tolist()
+
+                if len(filtered_symbols) >= 1000:
+
+                    symbols = filtered_symbols
+
+
+            # ------------------------------------------------
+            # Remove invalid symbols
+            # ------------------------------------------------
+
+            symbols = symbols[
+
+                ~symbols.isin(
+
+                    [
+
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL",
+                        "SYMBOL"
+
+                    ]
+
+                )
+
+            ]
+
+
+            # ------------------------------------------------
+            # Remove duplicates
+            # ------------------------------------------------
+
+            symbols = (
+
+                symbols
+                .drop_duplicates()
+                .tolist()
+
+            )
+
+
+            # ------------------------------------------------
+            # Sort
+            # ------------------------------------------------
+
+            symbols = sorted(
+                symbols
+            )
+
+
+            # ------------------------------------------------
+            # Success
+            # ------------------------------------------------
+
+            if len(symbols) > 1000:
+
+                return symbols
+
+
+        except Exception:
+
+            continue
+
+
+    # ========================================================
+    # FALLBACK 1 — GITHUB MIRROR
+    # ========================================================
+    #
+    # Used only when NSE blocks Streamlit Cloud.
+    #
+    # This is a historical mirror and therefore should
+    # be treated as a backup, not the authoritative source.
+    #
+    # ========================================================
+
+    fallback_urls = [
+
+        (
+            "https://raw.githubusercontent.com/"
+            "smeet-kothari/SM-Portfolio-Manager/"
+            "master/EQUITY_L.csv"
         )
 
-        return symbols
+    ]
 
-    except Exception:
 
-        return []
+    for fallback_url in fallback_urls:
+
+        try:
+
+            response = requests.get(
+
+                fallback_url,
+
+                timeout=30
+
+            )
+
+
+            if response.status_code != 200:
+
+                continue
+
+
+            content = response.text.strip()
+
+
+            if not content:
+
+                continue
+
+
+            df = pd.read_csv(
+
+                StringIO(
+                    content
+                )
+
+            )
+
+
+            df.columns = [
+
+                str(column)
+                .strip()
+                .upper()
+
+                for column in df.columns
+
+            ]
+
+
+            if "SYMBOL" not in df.columns:
+
+                continue
+
+
+            symbols = (
+
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+
+            )
+
+
+            if "SERIES" in df.columns:
+
+                series = (
+
+                    df["SERIES"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+
+                )
+
+
+                equity_mask = series.isin(
+
+                    [
+                        "EQ",
+                        "BE"
+                    ]
+
+                )
+
+
+                filtered_symbols = symbols[
+                    equity_mask
+                ]
+
+
+                if len(filtered_symbols) >= 1000:
+
+                    symbols = filtered_symbols
+
+
+            symbols = symbols[
+
+                ~symbols.isin(
+
+                    [
+
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL",
+                        "SYMBOL"
+
+                    ]
+
+                )
+
+            ]
+
+
+            symbols = (
+
+                symbols
+                .drop_duplicates()
+                .tolist()
+
+            )
+
+
+            symbols = sorted(
+                symbols
+            )
+
+
+            if len(symbols) > 1000:
+
+                return symbols
+
+
+        except Exception:
+
+            continue
+
+
+    # ========================================================
+    # FINAL FAILURE
+    # ========================================================
+
+    return []
 
 
 # ============================================================
