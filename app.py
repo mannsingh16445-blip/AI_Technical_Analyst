@@ -7,7 +7,8 @@ import requests
 import time
 import os
 
-from io import StringIO
+from io import StringIO, BytesIO
+import zipfile
 try:
     from openai import OpenAI
 except ImportError:
@@ -502,27 +503,130 @@ def load_nifty500():
 def load_fno_stocks():
 
     """
-    Load current NSE equity-derivatives stock underlyings.
+    Load NSE individual-stock F&O underlyings.
 
-    Primary source:
-        NSE /api/underlying-information
+    Source priority:
+    1. Current NFO symbol master
+    2. NSE underlying-information page
+    3. NSE API
+    4. Built-in fallback list
 
-    Only individual-stock underlyings are returned.
-    Index derivatives such as NIFTY and BANKNIFTY are excluded.
+    Index derivatives are excluded.
     """
 
-    api_url = (
-        "https://www.nseindia.com/"
-        "api/underlying-information"
-    )
+    # --------------------------------------------------------
+    # 1. CURRENT NFO SYMBOL MASTER
+    # --------------------------------------------------------
 
-    page_url = (
-        "https://www.nseindia.com/"
-        "static/products-services/"
-        "equity-derivatives-list-underlyings-information"
-    )
+    for url in [
+        "https://api.shoonya.com/NFO_symbols.txt.zip",
+        "https://shoonya.finvasia.com/NFO_symbols.txt.zip"
+    ]:
 
-    headers = {
+        try:
+
+            response = requests.get(
+                url,
+                timeout=30,
+                headers={
+                    "User-Agent":
+                        "Mozilla/5.0"
+                }
+            )
+
+            if response.status_code != 200:
+                continue
+
+            with zipfile.ZipFile(
+                BytesIO(response.content)
+            ) as z:
+
+                names = z.namelist()
+
+                if not names:
+                    continue
+
+                with z.open(names[0]) as f:
+                    raw = f.read()
+
+            df = pd.read_csv(
+                BytesIO(raw),
+                sep="|",
+                dtype=str
+            )
+
+            df.columns = [
+                str(c).strip().upper()
+                for c in df.columns
+            ]
+
+            # The symbol master normally has a clean
+            # underlying/SymbolName field.
+            underlying_col = None
+
+            for candidate in [
+                "SYMBOLNAME",
+                "UNDERLYING",
+                "BASE_SYMBOL"
+            ]:
+
+                if candidate in df.columns:
+                    underlying_col = candidate
+                    break
+
+            if underlying_col:
+
+                if "INSTRUMENT" in df.columns:
+
+                    instrument = (
+                        df["INSTRUMENT"]
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    df = df[
+                        instrument.isin([
+                            "FUTSTK",
+                            "OPTSTK"
+                        ])
+                    ]
+
+                symbols = (
+                    df[underlying_col]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                symbols = symbols[
+                    ~symbols.isin([
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL",
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "NIFTYNXT50"
+                    ])
+                ]
+
+                symbols = sorted(
+                    symbols.drop_duplicates().tolist()
+                )
+
+                if len(symbols) >= 100:
+                    return symbols
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # 2. NSE UNDERLYING INFORMATION PAGE
+    # --------------------------------------------------------
+
+    nse_headers = {
         "User-Agent": (
             "Mozilla/5.0 "
             "(Windows NT 10.0; Win64; x64) "
@@ -530,30 +634,104 @@ def load_fno_stocks():
             "(KHTML, like Gecko) "
             "Chrome/131.0 Safari/537.36"
         ),
-        "Accept": "application/json,text/plain,*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": page_url,
-        "Connection": "keep-alive"
+        "Accept":
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language":
+            "en-US,en;q=0.9",
+        "Referer":
+            "https://www.nseindia.com/"
     }
 
+    for page_url in [
+        "https://www.nseindia.com/products-services/"
+        "equity-derivatives-list-underlyings-information",
+
+        "https://www.nseindia.com/static/products-services/"
+        "equity-derivatives-list-underlyings-information"
+    ]:
+
+        try:
+
+            session = requests.Session()
+            session.headers.update(nse_headers)
+
+            session.get(
+                "https://www.nseindia.com/",
+                timeout=20
+            )
+
+            response = session.get(
+                page_url,
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                continue
+
+            tables = pd.read_html(
+                StringIO(response.text)
+            )
+
+            for table in tables:
+
+                table.columns = [
+                    str(c).strip().upper()
+                    for c in table.columns
+                ]
+
+                if "SYMBOL" not in table.columns:
+                    continue
+
+                symbols = (
+                    table["SYMBOL"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                symbols = symbols[
+                    ~symbols.isin([
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL",
+                        "SYMBOL",
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "NIFTYNXT50"
+                    ])
+                ]
+
+                symbols = sorted(
+                    symbols.drop_duplicates().tolist()
+                )
+
+                if len(symbols) >= 100:
+                    return symbols
+
+        except Exception:
+            continue
+
     # --------------------------------------------------------
-    # PRIMARY: NSE JSON endpoint
+    # 3. NSE API
     # --------------------------------------------------------
 
     try:
 
         session = requests.Session()
-        session.headers.update(headers)
+        session.headers.update(nse_headers)
 
-        # Establish NSE cookies/session first.
         session.get(
             "https://www.nseindia.com/",
             timeout=20
         )
 
         response = session.get(
-            api_url,
-            headers=headers,
+            "https://www.nseindia.com/"
+            "api/underlying-information",
             timeout=30
         )
 
@@ -566,14 +744,14 @@ def load_fno_stocks():
                 {}
             )
 
-            underlying_list = data_block.get(
+            rows = data_block.get(
                 "UnderlyingList",
                 []
             )
 
             symbols = []
 
-            for item in underlying_list:
+            for item in rows:
 
                 if isinstance(item, dict):
 
@@ -595,112 +773,72 @@ def load_fno_stocks():
                         .upper()
                     )
 
-                    if symbol not in [
+                    if symbol not in {
                         "",
                         "NAN",
                         "NONE",
-                        "NULL"
-                    ]:
+                        "NULL",
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "NIFTYNXT50"
+                    }:
 
-                        symbols.append(
-                            symbol
-                        )
+                        symbols.append(symbol)
 
             symbols = sorted(
                 set(symbols)
             )
 
-            # Reject incomplete NSE responses.
             if len(symbols) >= 100:
-
                 return symbols
 
     except Exception:
-
         pass
 
     # --------------------------------------------------------
-    # FALLBACK: NSE underlying information page
+    # 4. BUILT-IN FALLBACK
+    # --------------------------------------------------------
+    #
+    # Based on NSE's published individual-security list,
+    # with six securities introduced for F&O from 01-Apr-2026.
+    # This prevents the scanner from failing when NSE blocks
+    # automated requests from Streamlit Cloud.
     # --------------------------------------------------------
 
-    try:
+    fallback = """
+AARTIIND ABB ABBOTINDIA ACC ADANIENT ADANIPORTS ABCAPITAL ABFRL
+ALKEM AMBUJACEM APOLLOHOSP APOLLOTYRE ASHOKLEY ASIANPAINT ASTRAL ATUL
+AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJFINANCE BAJAJFINSV BALKRISIND
+BALRAMCHIN BANDHANBNK BANKBARODA BATAINDIA BERGEPAINT BEL BHARATFORG
+BHEL BPCL BHARTIARTL BIOCON BSOFT BOSCHLTD BRITANNIA CANFINHOME CANBK
+CHAMBLFERT CHOLAFIN CIPLA CUB COALINDIA COFORGE COLPAL CONCOR COROMANDEL
+CROMPTON CUMMINSIND DABUR DALBHARAT DEEPAKNTR DELTACORP DIVISLAB DIXON
+DLF LALPATHLAB DRREDDY EICHERMOT ESCORTS EXIDEIND GAIL GLENMARK GMRINFRA
+GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD GNFC HAVELLS HCLTECH HDFCAMC
+HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HAL HINDCOPPER HINDPETRO HINDUNILVR
+HDFC ICICIBANK ICICIGI ICICIPRULI IDFCFIRSTB IDFC IBULHSGFIN INDIAMART IEX
+IOC IRCTC IGL INDUSTOWER INDUSINDBK NAUKRI INFY INTELLECT INDIGO IPCALAB ITC
+JINDALSTEL JKCEMENT JSWSTEEL JUBLFOOD KOTAKBANK L&TFH LTTS LTIM LT LAURUSLABS
+LICHSGFIN LUPIN MGL M&MFIN M&M MANAPPURAM MARICO MARUTI MFSL METROPOLIS
+MOTHERSON MPHASIS MRF MCX MUTHOOTFIN NATIONALUM NAVINFLUOR NESTLEIND NMDC NTPC
+OBEROIRLTY ONGC OFSS PAGEIND PERSISTENT PETRONET PIIND PIDILITIND PEL POLYCAB
+PFC POWERGRID PNB PVRINOX RAIN RBLBANK RECLTD RELIANCE SBICARD SBILIFE
+SHREECEM SHRIRAMFIN SIEMENS SRF SBIN SAIL SUNPHARMA SUNTV SYNGENE TATACHEM
+TATACOMM TCS TATACONSUM TATAMOTORS TATAPOWER TATASTEEL TECHM FEDERALBNK
+INDIACEM INDHOTEL RAMCOCEM TITAN TORNTPHARM TRENT TVSMOTOR ULTRACEMCO UBL
+MCDOWELL-N UPL VEDL IDEA VOLTAS WHIRLPOOL WIPRO ZEEL ZYDUSLIFE
+ADANIPOWER COCHINSHIP HYUNDAI MOTILALOFS NAM-INDIA VMM
+"""
 
-        session = requests.Session()
-
-        session.headers.update({
-            "User-Agent":
-                headers["User-Agent"],
-            "Accept":
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language":
-                "en-US,en;q=0.9",
-            "Referer":
-                "https://www.nseindia.com/"
-        })
-
-        session.get(
-            "https://www.nseindia.com/",
-            timeout=20
+    return sorted(
+        set(
+            x.strip().upper()
+            for x in fallback.split()
+            if x.strip()
         )
-
-        response = session.get(
-            page_url,
-            timeout=30
-        )
-
-        if response.status_code == 200:
-
-            tables = pd.read_html(
-                StringIO(
-                    response.text
-                )
-            )
-
-            for table in tables:
-
-                table.columns = [
-                    str(column)
-                    .strip()
-                    .upper()
-                    for column in table.columns
-                ]
-
-                if "SYMBOL" not in table.columns:
-                    continue
-
-                symbols = (
-                    table["SYMBOL"]
-                    .astype(str)
-                    .str.strip()
-                    .str.upper()
-                )
-
-                symbols = symbols[
-                    ~symbols.isin([
-                        "",
-                        "NAN",
-                        "NONE",
-                        "NULL",
-                        "SYMBOL"
-                    ])
-                ]
-
-                symbols = sorted(
-                    symbols
-                    .drop_duplicates()
-                    .tolist()
-                )
-
-                if len(symbols) >= 100:
-
-                    return symbols
-
-    except Exception:
-
-        pass
-
-    return []
+    )
 
 
 # ============================================================
@@ -3195,7 +3333,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
     # --------------------------------------------------------
 
     with st.spinner(
-        "Loading NSE stock universe..."
+        "Loading NSE stock universes..."
     ):
 
         nse_stocks = (
@@ -3205,6 +3343,11 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
         nifty500 = (
             load_nifty500()
         )
+
+        fno_stocks = (
+            load_fno_stocks()
+        )
+
 
     st.sidebar.subheader(
         "RSI/WMA Scanner"
@@ -3225,9 +3368,11 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
         [
             "Nifty 50",
             "Nifty 500",
+            "NSE F&O Stocks",
             "Full NSE"
         ]
     )
+
 
     if universe == "Nifty 50":
 
@@ -3241,6 +3386,12 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             nifty500
         )[:500]
 
+    elif universe == "NSE F&O Stocks":
+
+        stocks = list(
+            fno_stocks
+        )
+
     elif universe == "Full NSE":
 
         stocks = list(
@@ -3250,6 +3401,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
     else:
 
         stocks = []
+
 
     if not stocks:
 
@@ -3269,6 +3421,14 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
         f"Stocks: **{len(stocks)}** | "
         f"Timeframe: **{scan_mode}**"
     )
+
+    if universe == "NSE F&O Stocks":
+
+        st.caption(
+            "NSE F&O Stocks = individual stocks with "
+            "current equity-derivative contracts. "
+            "Index derivatives are excluded."
+        )
 
     # --------------------------------------------------------
     # TIMEFRAME CONDITIONS
