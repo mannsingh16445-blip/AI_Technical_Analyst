@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+import time
 
 st.set_page_config(
     page_title="AI Technical Analyst",
@@ -16,7 +17,7 @@ st.sidebar.header("Stock Settings")
 symbol = st.sidebar.text_input(
     "Enter NSE Stock Symbol",
     value="RELIANCE"
-)
+).strip().upper()
 
 period = st.sidebar.selectbox(
     "Chart Period",
@@ -24,26 +25,91 @@ period = st.sidebar.selectbox(
     index=2
 )
 
-ticker = symbol.upper().strip() + ".NS"
+ticker = symbol + ".NS"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_stock_data(ticker, period):
+
+    for attempt in range(3):
+
+        try:
+
+            data = yf.download(
+                ticker,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                timeout=20
+            )
+
+            if data is not None and not data.empty:
+                return data
+
+        except Exception:
+            pass
+
+        time.sleep(1)
+
+    return None
+
 
 try:
 
-    data = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=False,
-        progress=False
+    with st.spinner(f"Loading {symbol} market data..."):
+
+        data = get_stock_data(ticker, period)
+
+    if data is None or data.empty:
+
+        st.error(
+            f"Unable to retrieve data for {symbol}. "
+            "Please try again in a few seconds."
+        )
+
+        st.stop()
+
+    # Handle Yahoo Finance MultiIndex
+    if hasattr(data.columns, "nlevels"):
+
+        if data.columns.nlevels > 1:
+
+            data.columns = data.columns.get_level_values(0)
+
+    # Make sure required columns exist
+    required_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close"
+    ]
+
+    missing = [
+        col for col in required_columns
+        if col not in data.columns
+    ]
+
+    if missing:
+
+        st.error(
+            f"Market data is missing: {', '.join(missing)}"
+        )
+
+        st.stop()
+
+    # Remove rows without price data
+    data = data.dropna(
+        subset=["Open", "High", "Low", "Close"]
     )
 
     if data.empty:
-        st.error("No data found. Check the stock symbol.")
+
+        st.error("No usable price data was returned.")
+
         st.stop()
 
-    # Handle Yahoo Finance columns
-    if hasattr(data.columns, "nlevels") and data.columns.nlevels > 1:
-        data.columns = data.columns.get_level_values(0)
-
+    # Create chart
     fig = go.Figure()
 
     fig.add_trace(
@@ -53,16 +119,17 @@ try:
             high=data["High"],
             low=data["Low"],
             close=data["Close"],
-            name=symbol.upper()
+            name=symbol
         )
     )
 
     fig.update_layout(
-        title=f"{symbol.upper()} Price Chart",
+        title=f"{symbol} Price Chart",
         xaxis_title="Date",
         yaxis_title="Price",
         height=650,
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified"
     )
 
     st.plotly_chart(
@@ -70,9 +137,12 @@ try:
         width="stretch"
     )
 
-    latest_close = float(data["Close"].iloc[-1])
-    latest_high = float(data["High"].iloc[-1])
-    latest_low = float(data["Low"].iloc[-1])
+    # Latest values
+    latest = data.iloc[-1]
+
+    latest_close = float(latest["Close"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
 
     col1, col2, col3 = st.columns(3)
 
@@ -91,8 +161,12 @@ try:
         f"₹{latest_low:.2f}"
     )
 
-    st.success("✅ Market data and chart are working!")
+    st.success(
+        f"✅ {symbol} chart loaded successfully"
+    )
 
 except Exception as e:
 
-    st.error(f"Error: {e}")
+    st.error(
+        f"Unexpected error: {e}"
+    )
