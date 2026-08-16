@@ -1026,7 +1026,7 @@ else:
     else:
 
         stocks = nse_stocks
-        if universe == "Full NSE" and not nse_stocks:
+       if universe == "Full NSE" and not nse_stocks:
 
     st.error(
         """
