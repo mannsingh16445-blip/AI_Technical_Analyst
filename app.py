@@ -25,6 +25,225 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# ============================================================
+# MOBILE RESPONSIVE CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    /* ---------- GLOBAL ---------- */
+
+    .main .block-container {
+        padding-top: 1.5rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+        max-width: 100%;
+    }
+
+    /* Keep Plotly charts responsive */
+    .js-plotly-plot,
+    .plotly,
+    .plot-container {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    /* Prevent long stock names / messages from overflowing */
+    .stMarkdown,
+    .stText,
+    p,
+    h1, h2, h3, h4, h5, h6 {
+        overflow-wrap: anywhere;
+        word-break: normal;
+    }
+
+    /* Dataframes should remain usable on small screens */
+    [data-testid="stDataFrame"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    /* Buttons */
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 42px;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    /* Chat input */
+    [data-testid="stChatInput"] {
+        width: 100%;
+    }
+
+    /* ---------- MOBILE ---------- */
+
+    @media only screen and (max-width: 768px) {
+
+        /* Main page */
+        .main .block-container {
+            padding-top: 0.75rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-bottom: 1rem !important;
+        }
+
+        /* Titles */
+        h1 {
+            font-size: 1.65rem !important;
+            line-height: 1.2 !important;
+        }
+
+        h2 {
+            font-size: 1.35rem !important;
+            line-height: 1.25 !important;
+        }
+
+        h3 {
+            font-size: 1.15rem !important;
+            line-height: 1.3 !important;
+        }
+
+        /* Sidebar */
+        [data-testid="stSidebar"] {
+            min-width: 280px !important;
+            max-width: 85vw !important;
+        }
+
+        [data-testid="stSidebar"] .block-container {
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
+        }
+
+        /* Make Streamlit column layouts stack naturally */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.5rem !important;
+        }
+
+        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            min-width: min(100%, 300px) !important;
+            flex: 1 1 100% !important;
+        }
+
+        /* Metric cards */
+        [data-testid="stMetric"] {
+            padding: 0.45rem !important;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.78rem !important;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.25rem !important;
+        }
+
+        /* Inputs */
+        input,
+        textarea,
+        [data-baseweb="select"] {
+            font-size: 16px !important;
+        }
+
+        /* Buttons become easy to tap */
+        .stButton > button,
+        .stDownloadButton > button {
+            width: 100% !important;
+            min-height: 46px !important;
+            font-size: 0.95rem !important;
+        }
+
+        /* Select boxes / number inputs */
+        [data-testid="stSelectbox"],
+        [data-testid="stNumberInput"],
+        [data-testid="stTextInput"],
+        [data-testid="stSlider"],
+        [data-testid="stCheckbox"] {
+            width: 100% !important;
+        }
+
+        /* Plotly chart */
+        .js-plotly-plot,
+        .plotly,
+        .plot-container {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+
+        /* Tables */
+        [data-testid="stDataFrame"] {
+            width: 100% !important;
+            overflow-x: auto !important;
+        }
+
+        /* Expander */
+        [data-testid="stExpander"] {
+            width: 100% !important;
+        }
+
+        /* Alerts */
+        [data-testid="stAlert"] {
+            font-size: 0.9rem !important;
+        }
+
+        /* Progress bar */
+        [data-testid="stProgress"] {
+            width: 100% !important;
+        }
+
+        /* Chat messages */
+        [data-testid="stChatMessage"] {
+            padding-left: 0.4rem !important;
+            padding-right: 0.4rem !important;
+        }
+
+        /* Reduce excessive vertical spacing */
+        .element-container {
+            margin-bottom: 0.25rem !important;
+        }
+
+    }
+
+    /* ---------- VERY SMALL PHONES ---------- */
+
+    @media only screen and (max-width: 480px) {
+
+        .main .block-container {
+            padding-left: 0.5rem !important;
+            padding-right: 0.5rem !important;
+        }
+
+        h1 {
+            font-size: 1.45rem !important;
+        }
+
+        h2 {
+            font-size: 1.2rem !important;
+        }
+
+        h3 {
+            font-size: 1.05rem !important;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.1rem !important;
+        }
+
+        [data-testid="stSidebar"] {
+            min-width: 260px !important;
+        }
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
 load_dotenv()
 
 
@@ -276,10 +495,6 @@ def load_nifty500():
 # DOWNLOAD MARKET DATA
 # ============================================================
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False
-)
 @st.cache_data(ttl=300, show_spinner=False)
 def download_batches(
     tickers,
