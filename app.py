@@ -1160,6 +1160,826 @@ def stage_two_analysis(data):
     }
 
 
+
+# ============================================================
+# RSI / WMA MULTI-TIMEFRAME SCANNER
+# ============================================================
+
+def calculate_rsi_wilder(series, period=14):
+    """Calculate RSI using Wilder-style exponential smoothing."""
+    series = pd.to_numeric(series, errors="coerce")
+    delta = series.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
+
+
+def calculate_wma(series, period=21):
+    """Weighted moving average of a price series."""
+    weights = np.arange(1, period + 1, dtype=float)
+
+    return series.rolling(
+        period
+    ).apply(
+        lambda values: np.dot(values, weights) / weights.sum(),
+        raw=True
+    )
+
+
+def prepare_rsi_wma_data(data):
+    """
+    Prepare the exact indicators represented by the
+    supplied scanner conditions:
+
+    RSI(9)
+    WMA(Close, 21)
+    """
+    data = data.copy()
+
+    required = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+    ]
+
+    missing = [
+        column for column in required
+        if column not in data.columns
+    ]
+
+    if missing:
+        return pd.DataFrame()
+
+    data = data.dropna(
+        subset=required
+    )
+
+    if data.empty:
+        return data
+
+    data["RSI9"] = calculate_rsi_wilder(
+        data["Close"],
+        9
+    )
+
+    data["WMA21_CLOSE"] = calculate_wma(
+        data["Close"],
+        21
+    )
+
+    return data.dropna(
+        subset=[
+            "RSI9",
+            "WMA21_CLOSE"
+        ]
+    )
+
+
+def crossed_above_rsi_wma(data):
+    """
+    Exact interpretation of:
+    RSI(9) Crossed above WMA(Close,21)
+
+    The comparison is intentionally kept exactly as
+    written in the supplied scanner screenshot.
+    """
+    if len(data) < 2:
+        return False
+
+    previous = data.iloc[-2]
+    latest = data.iloc[-1]
+
+    values = [
+        previous["RSI9"],
+        previous["WMA21_CLOSE"],
+        latest["RSI9"],
+        latest["WMA21_CLOSE"]
+    ]
+
+    if any(pd.isna(value) for value in values):
+        return False
+
+    return (
+        previous["RSI9"] <= previous["WMA21_CLOSE"]
+        and
+        latest["RSI9"] > latest["WMA21_CLOSE"]
+    )
+
+
+def rsi_wma_scan_result(
+    data,
+    rsi9_threshold
+):
+    """
+    Scan one timeframe using:
+
+    1. RSI(9) crossed above WMA(Close,21)
+    2. RSI(9) > threshold
+    """
+    prepared = prepare_rsi_wma_data(data)
+
+    if prepared.empty or len(prepared) < 30:
+        return None
+
+    latest = prepared.iloc[-1]
+
+    cross_condition = crossed_above_rsi_wma(
+        prepared
+    )
+
+    rsi_condition = (
+        latest["RSI9"] > rsi9_threshold
+    )
+
+    return {
+        "Cross": cross_condition,
+        "RSI9 > Threshold": rsi_condition,
+        "RSI9": float(latest["RSI9"]),
+        "WMA21 Close": float(latest["WMA21_CLOSE"]),
+        "Close": float(latest["Close"]),
+        "Volume": float(latest["Volume"]),
+        "Date": prepared.index[-1]
+    }
+
+
+def resample_to_weekly(data):
+    """
+    Convert daily OHLCV data into completed weekly bars.
+    Friday is used as the weekly anchor.
+    """
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    data = data.copy()
+
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(
+            data.index
+        )
+
+    weekly = data.resample(
+        "W-FRI"
+    ).agg(
+        {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum"
+        }
+    )
+
+    return weekly.dropna(
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close"
+        ]
+    )
+
+
+@st.cache_data(
+    ttl=900,
+    show_spinner=False
+)
+def download_rsi_wma_batches(
+    tickers,
+    timeframe,
+    batch_size=50
+):
+    """
+    Download data for the RSI/WMA scanner.
+
+    Daily:
+        1 year / 1 day
+
+    Weekly:
+        3 years daily data, then resampled to
+        completed weekly bars
+
+    Hourly:
+        60 days / 60 minute bars
+    """
+    all_data = {}
+
+    ticker_list = list(
+        dict.fromkeys(tickers)
+    )
+
+    if timeframe == "Daily":
+        period = "1y"
+        interval = "1d"
+
+    elif timeframe == "Weekly":
+        period = "3y"
+        interval = "1d"
+
+    else:
+        period = "60d"
+        interval = "60m"
+
+    for start in range(
+        0,
+        len(ticker_list),
+        batch_size
+    ):
+
+        batch = ticker_list[
+            start:start + batch_size
+        ]
+
+        yahoo_tickers = [
+            symbol + ".NS"
+            for symbol in batch
+        ]
+
+        try:
+
+            data = yf.download(
+                tickers=yahoo_tickers,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+                group_by="ticker"
+            )
+
+            if data is None or data.empty:
+                continue
+
+            # ------------------------------------------------
+            # Single stock
+            # ------------------------------------------------
+
+            if len(batch) == 1:
+
+                symbol = batch[0]
+
+                stock = data.copy()
+
+                if isinstance(
+                    stock.columns,
+                    pd.MultiIndex
+                ):
+
+                    level0 = (
+                        stock.columns
+                        .get_level_values(0)
+                        .tolist()
+                    )
+
+                    level1 = (
+                        stock.columns
+                        .get_level_values(1)
+                        .tolist()
+                    )
+
+                    if "Open" in level0:
+
+                        stock.columns = [
+                            col[0]
+                            for col in stock.columns
+                        ]
+
+                    elif "Open" in level1:
+
+                        stock.columns = [
+                            col[1]
+                            for col in stock.columns
+                        ]
+
+                stock.columns = [
+                    str(col)
+                    .strip()
+                    .title()
+                    for col in stock.columns
+                ]
+
+                required = [
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume"
+                ]
+
+                if all(
+                    column in stock.columns
+                    for column in required
+                ):
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+                    if timeframe == "Weekly":
+
+                        stock = resample_to_weekly(
+                            stock
+                        )
+
+                    if not stock.empty:
+
+                        all_data[symbol] = stock
+
+                continue
+
+            # ------------------------------------------------
+            # Multiple stocks
+            # ------------------------------------------------
+
+            if not isinstance(
+                data.columns,
+                pd.MultiIndex
+            ):
+                continue
+
+            level0 = (
+                data.columns
+                .get_level_values(0)
+                .unique()
+                .tolist()
+            )
+
+            level1 = (
+                data.columns
+                .get_level_values(1)
+                .unique()
+                .tolist()
+            )
+
+            for symbol in batch:
+
+                yahoo_symbol = (
+                    symbol + ".NS"
+                )
+
+                try:
+
+                    if yahoo_symbol in level0:
+
+                        stock = data[
+                            yahoo_symbol
+                        ].copy()
+
+                    elif yahoo_symbol in level1:
+
+                        stock = data[
+                            :,
+                            yahoo_symbol
+                        ].copy()
+
+                    else:
+
+                        continue
+
+                    if isinstance(
+                        stock.columns,
+                        pd.MultiIndex
+                    ):
+
+                        stock.columns = [
+                            col[0]
+                            if isinstance(
+                                col,
+                                tuple
+                            )
+                            else col
+                            for col in stock.columns
+                        ]
+
+                    stock.columns = [
+                        str(col)
+                        .strip()
+                        .title()
+                        for col in stock.columns
+                    ]
+
+                    required = [
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                        "Volume"
+                    ]
+
+                    if not all(
+                        column in stock.columns
+                        for column in required
+                    ):
+                        continue
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+                    if timeframe == "Weekly":
+
+                        stock = resample_to_weekly(
+                            stock
+                        )
+
+                    if not stock.empty:
+
+                        all_data[symbol] = stock
+
+                except Exception:
+
+                    continue
+
+        except Exception:
+
+            continue
+
+        time.sleep(0.15)
+
+    return all_data
+
+
+def run_rsi_wma_scanner(
+    stocks,
+    mode,
+    batch_size=50,
+    hourly_confirmation=False
+):
+    """
+    Run the scanner.
+
+    Daily:
+        Daily RSI9 cross above Daily WMA(Close,21)
+        Daily RSI9 > 55
+
+    Weekly:
+        Weekly RSI9 cross above Weekly WMA(Close,21)
+        Weekly RSI9 > 50
+
+    Hourly:
+        Hourly RSI9 cross above Hourly WMA(Close,21)
+        Hourly RSI9 > 55
+
+    Multi-Timeframe:
+        Weekly conditions AND Daily conditions.
+        Optional hourly confirmation can be enabled.
+    """
+
+    if mode == "Daily":
+
+        market = download_rsi_wma_batches(
+            stocks,
+            "Daily",
+            batch_size
+        )
+
+        results = []
+
+        for symbol, data in market.items():
+
+            analysis = rsi_wma_scan_result(
+                data,
+                55
+            )
+
+            if analysis is None:
+                continue
+
+            if (
+                analysis["Cross"]
+                and
+                analysis["RSI9 > Threshold"]
+            ):
+
+                results.append(
+                    {
+                        "Stock": symbol,
+                        "Close": round(
+                            analysis["Close"],
+                            2
+                        ),
+                        "RSI 9": round(
+                            analysis["RSI9"],
+                            2
+                        ),
+                        "WMA 21 Close": round(
+                            analysis["WMA21 Close"],
+                            2
+                        ),
+                        "RSI 9 Threshold": 55,
+                        "RSI9 Cross": "✓",
+                        "Signal": "Daily Bullish RSI/WMA"
+                    }
+                )
+
+        return results, {
+            "Data Retrieved": len(market)
+        }
+
+
+    if mode == "Weekly":
+
+        market = download_rsi_wma_batches(
+            stocks,
+            "Weekly",
+            batch_size
+        )
+
+        results = []
+
+        for symbol, data in market.items():
+
+            analysis = rsi_wma_scan_result(
+                data,
+                50
+            )
+
+            if analysis is None:
+                continue
+
+            if (
+                analysis["Cross"]
+                and
+                analysis["RSI9 > Threshold"]
+            ):
+
+                results.append(
+                    {
+                        "Stock": symbol,
+                        "Close": round(
+                            analysis["Close"],
+                            2
+                        ),
+                        "RSI 9": round(
+                            analysis["RSI9"],
+                            2
+                        ),
+                        "WMA 21 Close": round(
+                            analysis["WMA21 Close"],
+                            2
+                        ),
+                        "RSI 9 Threshold": 50,
+                        "RSI9 Cross": "✓",
+                        "Signal": "Weekly Bullish RSI/WMA"
+                    }
+                )
+
+        return results, {
+            "Data Retrieved": len(market)
+        }
+
+
+    if mode == "Hourly":
+
+        market = download_rsi_wma_batches(
+            stocks,
+            "Hourly",
+            batch_size
+        )
+
+        results = []
+
+        for symbol, data in market.items():
+
+            analysis = rsi_wma_scan_result(
+                data,
+                55
+            )
+
+            if analysis is None:
+                continue
+
+            if (
+                analysis["Cross"]
+                and
+                analysis["RSI9 > Threshold"]
+            ):
+
+                results.append(
+                    {
+                        "Stock": symbol,
+                        "Close": round(
+                            analysis["Close"],
+                            2
+                        ),
+                        "RSI 9": round(
+                            analysis["RSI9"],
+                            2
+                        ),
+                        "WMA 21 Close": round(
+                            analysis["WMA21 Close"],
+                            2
+                        ),
+                        "RSI 9 Threshold": 55,
+                        "RSI9 Cross": "✓",
+                        "Signal": "Hourly Bullish RSI/WMA"
+                    }
+                )
+
+        return results, {
+            "Data Retrieved": len(market)
+        }
+
+
+    # ========================================================
+    # MULTI-TIMEFRAME
+    # ========================================================
+
+    daily_market = download_rsi_wma_batches(
+        stocks,
+        "Daily",
+        batch_size
+    )
+
+    weekly_market = download_rsi_wma_batches(
+        stocks,
+        "Weekly",
+        batch_size
+    )
+
+    hourly_market = {}
+
+    if hourly_confirmation:
+
+        hourly_market = download_rsi_wma_batches(
+            stocks,
+            "Hourly",
+            batch_size
+        )
+
+    results = []
+
+    for symbol in stocks:
+
+        daily_analysis = None
+        weekly_analysis = None
+        hourly_analysis = None
+
+        if symbol in daily_market:
+
+            daily_analysis = (
+                rsi_wma_scan_result(
+                    daily_market[symbol],
+                    55
+                )
+            )
+
+        if symbol in weekly_market:
+
+            weekly_analysis = (
+                rsi_wma_scan_result(
+                    weekly_market[symbol],
+                    50
+                )
+            )
+
+        if hourly_confirmation and symbol in hourly_market:
+
+            hourly_analysis = (
+                rsi_wma_scan_result(
+                    hourly_market[symbol],
+                    55
+                )
+            )
+
+        if (
+            daily_analysis is None
+            or
+            weekly_analysis is None
+        ):
+            continue
+
+        daily_pass = (
+            daily_analysis["Cross"]
+            and
+            daily_analysis[
+                "RSI14 > Threshold"
+            ]
+        )
+
+        weekly_pass = (
+            weekly_analysis["Cross"]
+            and
+            weekly_analysis[
+                "RSI14 > Threshold"
+            ]
+        )
+
+        hourly_pass = True
+
+        if hourly_confirmation:
+
+            hourly_pass = (
+                hourly_analysis is not None
+                and
+                hourly_analysis["Cross"]
+                and
+                hourly_analysis[
+                    "RSI14 > Threshold"
+                ]
+            )
+
+        if (
+            daily_pass
+            and
+            weekly_pass
+            and
+            hourly_pass
+        ):
+
+            results.append(
+                {
+                    "Stock": symbol,
+
+                    "Daily Close": round(
+                        daily_analysis["Close"],
+                        2
+                    ),
+
+                    "Daily RSI9": round(
+                        daily_analysis["RSI9"],
+                        2
+                    ),
+
+                    "Daily WMA21": round(
+                        daily_analysis["WMA21 Close"],
+                        2
+                    ),
+
+                    "Daily RSI9 Threshold": 55,
+
+                    "Weekly Close": round(
+                        weekly_analysis["Close"],
+                        2
+                    ),
+
+                    "Weekly RSI9": round(
+                        weekly_analysis["RSI9"],
+                        2
+                    ),
+
+                    "Weekly WMA21": round(
+                        weekly_analysis["WMA21 Close"],
+                        2
+                    ),
+
+                    "Weekly RSI9 Threshold": 50,
+
+                    "Daily RSI9 Cross": "✓",
+
+                    "Weekly RSI9 Cross": "✓",
+
+                    "Hourly RSI9 Cross":
+                        "✓"
+                        if hourly_confirmation
+                        else "—",
+
+                    "Signal":
+                        "Multi-Timeframe Bullish"
+                }
+            )
+
+    return results, {
+        "Daily Data Retrieved":
+            len(daily_market),
+
+        "Weekly Data Retrieved":
+            len(weekly_market),
+
+        "Hourly Data Retrieved":
+            len(hourly_market)
+            if hourly_confirmation
+            else 0
+    }
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -1173,6 +1993,7 @@ module = st.sidebar.radio(
     [
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
+        "📡 RSI/WMA Timeframe Scanner",
         "🤖 AI Analyst"
     ]
 )
@@ -2093,6 +2914,606 @@ MACD = 1 point
 # ============================================================
 # AI ANALYST
 # ============================================================
+
+
+# ============================================================
+# RSI / WMA TIMEFRAME SCANNER
+# ============================================================
+
+elif module == "📡 RSI/WMA Timeframe Scanner":
+
+    st.header(
+        "📡 RSI / WMA Multi-Timeframe Scanner"
+    )
+
+    st.write(
+        """
+        Scanner based on the conditions shown in your
+        Chartink screenshot. You can scan **Daily, Weekly,
+        Hourly**, or use **Multi-Timeframe confirmation**.
+        """
+    )
+
+    st.info(
+        """
+        **Important:** The screenshot specifies
+        **RSI(9) crossed above WMA(Close, 21)**.
+        The program therefore compares RSI(9) directly with
+        WMA of Close(21), exactly as written in the supplied
+        conditions.
+        """
+    )
+
+    # --------------------------------------------------------
+    # UNIVERSE
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Loading NSE stock universe..."
+    ):
+
+        nse_stocks = (
+            load_nse_equity_universe()
+        )
+
+        nifty500 = (
+            load_nifty500()
+        )
+
+    st.sidebar.subheader(
+        "RSI/WMA Scanner"
+    )
+
+    scan_mode = st.sidebar.selectbox(
+        "Scan Timeframe",
+        [
+            "Daily",
+            "Weekly",
+            "Hourly",
+            "Multi-Timeframe"
+        ]
+    )
+
+    universe = st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Full NSE"
+        ]
+    )
+
+    if universe == "Nifty 50":
+
+        stocks = list(
+            NIFTY50
+        )
+
+    elif universe == "Nifty 500":
+
+        stocks = list(
+            nifty500
+        )[:500]
+
+    elif universe == "Full NSE":
+
+        stocks = list(
+            nse_stocks
+        )
+
+    else:
+
+        stocks = []
+
+    if not stocks:
+
+        st.error(
+            f"""
+            No stocks are available for the selected
+            universe: **{universe}**.
+
+            Please check the NSE/Nifty list connection.
+            """
+        )
+
+        st.stop()
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks: **{len(stocks)}** | "
+        f"Timeframe: **{scan_mode}**"
+    )
+
+    # --------------------------------------------------------
+    # TIMEFRAME CONDITIONS
+    # --------------------------------------------------------
+
+    if scan_mode == "Daily":
+
+        st.markdown(
+            """
+            ### Daily Conditions
+
+            **D1:** Daily RSI(9) crossed above
+            Daily WMA(Daily Close, 21)
+
+            **D2:** Daily RSI(14) > **55**
+            """
+        )
+
+        st.success(
+            "Daily scan = D1 + D2"
+        )
+
+    elif scan_mode == "Weekly":
+
+        st.markdown(
+            """
+            ### Weekly Conditions
+
+            **W1:** Weekly RSI(9) crossed above
+            Weekly WMA(Weekly Close, 21)
+
+            **W2:** Weekly RSI(14) > **50**
+            """
+        )
+
+        st.success(
+            "Weekly scan = W1 + W2"
+        )
+
+    elif scan_mode == "Hourly":
+
+        st.markdown(
+            """
+            ### Hourly Conditions
+
+            **H1:** Hourly RSI(9) crossed above
+            Hourly WMA(Hourly Close, 21)
+
+            **H2:** Hourly RSI(14) > **55**
+            """
+        )
+
+        st.success(
+            "Hourly scan = H1 + H2"
+        )
+
+        st.warning(
+            """
+            Yahoo Finance intraday data is limited compared
+            with daily data. The hourly scanner therefore
+            uses the recent 60-day 60-minute dataset.
+            """
+        )
+
+    else:
+
+        st.markdown(
+            """
+            ### Multi-Timeframe Conditions
+
+            **Weekly**
+
+            **W1:** Weekly RSI(9) crossed above
+            Weekly WMA(Weekly Close, 21)
+
+            **W2:** Weekly RSI(14) > **50**
+
+            **Daily**
+
+            **D1:** Daily RSI(9) crossed above
+            Daily WMA(Daily Close, 21)
+
+            **D2:** Daily RSI(14) > **55**
+            """
+        )
+
+        hourly_confirmation = st.sidebar.checkbox(
+            "Require Hourly Confirmation",
+            value=False
+        )
+
+        if hourly_confirmation:
+
+            st.markdown(
+                """
+                **Hourly confirmation**
+
+                **H1:** Hourly RSI(9) crossed above
+                Hourly WMA(Hourly Close, 21)
+
+                **H2:** Hourly RSI(14) > **55**
+                """
+            )
+
+        else:
+
+            st.caption(
+                "Hourly confirmation is optional."
+            )
+
+    # --------------------------------------------------------
+    # BATCH SIZE
+    # --------------------------------------------------------
+
+    batch_size = st.sidebar.slider(
+        "Download Batch Size",
+        min_value=25,
+        max_value=100,
+        value=50,
+        step=25
+    )
+
+    # --------------------------------------------------------
+    # RUN
+    # --------------------------------------------------------
+
+    run_rsi_scanner = st.sidebar.button(
+        "📡 RUN RSI/WMA SCANNER",
+        type="primary"
+    )
+
+    # --------------------------------------------------------
+    # CONDITIONS EXPANDER
+    # --------------------------------------------------------
+
+    with st.expander(
+        "📋 View Exact Scanner Conditions"
+    ):
+
+        st.markdown(
+            """
+            ### Conditions from your supplied screenshot
+
+            **1. Weekly RSI(9) crossed above Weekly
+            WMA(Weekly Close, 21)**
+
+            **2. Daily RSI(9) crossed above Daily
+            WMA(Daily Close, 21)**
+
+            **3. Daily RSI(14) > 55**
+
+            **4. Weekly RSI(14) > 50**
+
+            ### Timeframe adaptation
+
+            **Daily Scan**
+
+            • RSI(9) crossed above WMA(Close,21)  
+            • RSI(14) > 55
+
+            **Weekly Scan**
+
+            • RSI(9) crossed above WMA(Close,21)  
+            • RSI(14) > 50
+
+            **Hourly Scan**
+
+            • RSI(9) crossed above WMA(Close,21)  
+            • RSI(14) > 55
+
+            **Multi-Timeframe Scan**
+
+            • Weekly conditions  
+            **AND**  
+            • Daily conditions  
+            • Optional Hourly confirmation
+            """
+        )
+
+    # --------------------------------------------------------
+    # RUN SCANNER
+    # --------------------------------------------------------
+
+    if run_rsi_scanner:
+
+        progress = st.progress(
+            0,
+            text="Starting RSI/WMA scanner..."
+        )
+
+        try:
+
+            if scan_mode == "Multi-Timeframe":
+
+                progress.progress(
+                    10,
+                    text="Preparing multi-timeframe scan..."
+                )
+
+            else:
+
+                progress.progress(
+                    10,
+                    text=f"Downloading {scan_mode} data..."
+                )
+
+            results, stats = (
+                run_rsi_wma_scanner(
+                    stocks,
+                    scan_mode,
+                    batch_size,
+                    (
+                        hourly_confirmation
+                        if scan_mode ==
+                        "Multi-Timeframe"
+                        else False
+                    )
+                )
+            )
+
+            progress.progress(
+                100,
+                text="Scan completed."
+            )
+
+            time.sleep(0.2)
+
+            progress.empty()
+
+        except Exception as e:
+
+            progress.empty()
+
+            st.error(
+                f"Scanner error: {e}"
+            )
+
+            st.stop()
+
+        # ----------------------------------------------------
+        # DOWNLOAD SUMMARY
+        # ----------------------------------------------------
+
+        st.subheader(
+            "📊 Scan Summary"
+        )
+
+        if scan_mode == "Multi-Timeframe":
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Universe",
+                len(stocks)
+            )
+
+            c2.metric(
+                "Daily Data",
+                stats.get(
+                    "Daily Data Retrieved",
+                    0
+                )
+            )
+
+            c3.metric(
+                "Weekly Data",
+                stats.get(
+                    "Weekly Data Retrieved",
+                    0
+                )
+            )
+
+            c4.metric(
+                "Stocks Passing",
+                len(results)
+            )
+
+        else:
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric(
+                "Universe",
+                len(stocks)
+            )
+
+            c2.metric(
+                "Data Retrieved",
+                stats.get(
+                    "Data Retrieved",
+                    0
+                )
+            )
+
+            c3.metric(
+                "Stocks Passing",
+                len(results)
+            )
+
+        # ----------------------------------------------------
+        # RESULTS
+        # ----------------------------------------------------
+
+        if not results:
+
+            st.warning(
+                f"""
+                No stocks passed all the selected
+                **{scan_mode}** conditions.
+
+                This is not necessarily an error.
+                Cross-over conditions are intentionally selective.
+                """
+            )
+
+        else:
+
+            results_df = pd.DataFrame(
+                results
+            )
+
+            st.success(
+                f"🎯 {len(results_df)} stocks passed "
+                f"the {scan_mode} RSI/WMA scan."
+            )
+
+            # ------------------------------------------------
+            # TOP RESULTS
+            # ------------------------------------------------
+
+            st.subheader(
+                "🏆 Stocks Passing the Scanner"
+            )
+
+            st.dataframe(
+                results_df,
+                width="stretch",
+                hide_index=True
+            )
+
+            # ------------------------------------------------
+            # DOWNLOAD
+            # ------------------------------------------------
+
+            csv = results_df.to_csv(
+                index=False
+            )
+
+            st.download_button(
+                label="⬇️ Download RSI/WMA Results",
+                data=csv,
+                file_name=(
+                    f"RSI_WMA_{scan_mode.replace(' ', '_')}"
+                    "_Scanner.csv"
+                ),
+                mime="text/csv"
+            )
+
+            # ------------------------------------------------
+            # MOBILE STOCK CARDS
+            # ------------------------------------------------
+
+            st.subheader(
+                "📱 Mobile-Friendly Results"
+            )
+
+            for _, row in results_df.head(20).iterrows():
+
+                stock_name = row["Stock"]
+
+                with st.expander(
+                    f"📈 {stock_name}"
+                ):
+
+                    if scan_mode == "Multi-Timeframe":
+
+                        c1, c2 = st.columns(2)
+
+                        c1.metric(
+                            "Daily RSI9 Threshold",
+                            f"{row['Daily RSI9 Threshold']:.2f}"
+                        )
+
+                        c2.metric(
+                            "Weekly RSI9 Threshold",
+                            f"{row['Weekly RSI9 Threshold']:.2f}"
+                        )
+
+                        st.write(
+                            f"Daily RSI9: "
+                            f"**{row['Daily RSI9']:.2f}**"
+                        )
+
+                        st.write(
+                            f"Daily WMA21: "
+                            f"**{row['Daily WMA21']:.2f}**"
+                        )
+
+                        st.write(
+                            f"Weekly RSI9: "
+                            f"**{row['Weekly RSI9']:.2f}**"
+                        )
+
+                        st.write(
+                            f"Weekly WMA21: "
+                            f"**{row['Weekly WMA21']:.2f}**"
+                        )
+
+                        st.success(
+                            "✓ Daily + Weekly conditions passed"
+                        )
+
+                    else:
+
+                        c1, c2 = st.columns(2)
+
+                        c1.metric(
+                            "RSI 9",
+                            f"{row['RSI 9']:.2f}"
+                        )
+
+                        c2.metric(
+                            "RSI 9 Threshold",
+                            f"{row['RSI 9 Threshold']}"
+                        )
+
+                        st.write(
+                            f"Close: "
+                            f"**₹{row['Close']:.2f}**"
+                        )
+
+                        st.write(
+                            f"WMA 21 Close: "
+                            f"**₹{row['WMA 21 Close']:.2f}**"
+                        )
+
+                        st.success(
+                            "✓ RSI9 crossed above WMA21"
+                        )
+
+            # ------------------------------------------------
+            # EXPLANATION
+            # ------------------------------------------------
+
+            st.subheader(
+                "ℹ️ Scanner Interpretation"
+            )
+
+            if scan_mode == "Daily":
+
+                st.write(
+                    """
+                    These stocks have a fresh Daily RSI(9)
+                    cross above WMA(Close,21) and Daily
+                    RSI(9) above 55 on the latest available
+                    daily bar.
+                    """
+                )
+
+            elif scan_mode == "Weekly":
+
+                st.write(
+                    """
+                    These stocks have a fresh Weekly RSI(9)
+                    cross above WMA(Weekly Close,21) and
+                    Weekly RSI(9) above 50 on the latest
+                    available completed weekly bar.
+                    """
+                )
+
+            elif scan_mode == "Hourly":
+
+                st.write(
+                    """
+                    These stocks have a fresh Hourly RSI(9)
+                    cross above WMA(Hourly Close,21) and
+                    Hourly RSI(9) above 55 on the latest
+                    available hourly bar.
+                    """
+                )
+
+            else:
+
+                st.write(
+                    """
+                    These stocks satisfy the Weekly and Daily
+                    conditions simultaneously. If Hourly
+                    confirmation was enabled, the latest hourly
+                    RSI/WMA conditions must also pass.
+                    """
+                )
 
 else:
 
