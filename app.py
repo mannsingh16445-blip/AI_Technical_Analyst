@@ -2344,6 +2344,7 @@ module = st.sidebar.radio(
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
+        "🏆 Top 10 Momentum Stocks",
         "🤖 AI Analyst"
     ]
 )
@@ -3920,6 +3921,960 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
                     RSI/WMA conditions must also pass.
                     """
                 )
+
+elif module == "🏆 Top 10 Momentum Stocks":
+
+    st.header(
+        "🏆 Top 10 Momentum Stocks"
+    )
+
+    st.write(
+        """
+        A combined ranking model using your existing
+        **Smart Breakout conditions + RSI(9)/WMA(21)
+        Daily + Weekly + Hourly confirmation**.
+
+        The scanner ranks stocks by technical strength;
+        it does not guarantee future returns.
+        """
+    )
+
+    # --------------------------------------------------------
+    # UNIVERSE
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Loading stock universes..."
+    ):
+
+        nse_stocks = (
+            load_nse_equity_universe()
+        )
+
+        nifty500 = (
+            load_nifty500()
+        )
+
+        fno_stocks = (
+            load_fno_stocks()
+        )
+
+    st.sidebar.subheader(
+        "🏆 Top 10 Scanner"
+    )
+
+    universe = st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "NSE F&O Stocks",
+            "Nifty 50",
+            "Nifty 500",
+            "Full NSE"
+        ],
+        index=0
+    )
+
+    if universe == "NSE F&O Stocks":
+
+        stocks = list(
+            fno_stocks
+        )
+
+    elif universe == "Nifty 50":
+
+        stocks = list(
+            NIFTY50
+        )
+
+    elif universe == "Nifty 500":
+
+        stocks = list(
+            nifty500
+        )[:500]
+
+    else:
+
+        stocks = list(
+            nse_stocks
+        )
+
+    if not stocks:
+
+        st.error(
+            f"No stocks are available for **{universe}**."
+        )
+
+        st.stop()
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks: **{len(stocks)}**"
+    )
+
+    if universe == "NSE F&O Stocks":
+
+        st.caption(
+            "Recommended universe: individual NSE F&O "
+            "stocks. Index derivatives are excluded."
+        )
+
+    batch_size = st.sidebar.slider(
+        "Download Batch Size",
+        min_value=25,
+        max_value=100,
+        value=50,
+        step=25
+    )
+
+    only_full_mtf = st.sidebar.checkbox(
+        "Only show stocks passing Daily + Weekly",
+        value=False
+    )
+
+    include_hourly = st.sidebar.checkbox(
+        "Include Hourly RSI(9) in ranking",
+        value=True
+    )
+
+    run_top10 = st.sidebar.button(
+        "🏆 FIND TOP 10 STOCKS",
+        type="primary"
+    )
+
+    with st.expander(
+        "📐 View Ranking Method"
+    ):
+
+        st.markdown(
+            """
+            ### Combined Score — 100 points
+
+            **Smart Breakout — 40 points**
+
+            • Your existing C1–C5 conditions  
+            • Volume confirmation  
+            • RSI confirmation  
+            • MACD confirmation  
+
+            **Daily RSI/WMA — 25 points**
+
+            • RSI(9) crossed above WMA(Close,21): 15  
+            • RSI(9) > 55: 10  
+
+            **Weekly RSI/WMA — 20 points**
+
+            • RSI(9) crossed above WMA(Close,21): 10  
+            • RSI(9) > 50: 10  
+
+            **Hourly RSI/WMA — 15 points**
+
+            • RSI(9) crossed above WMA(Close,21): 8  
+            • RSI(9) > 55: 7  
+
+            The ranking is a **technical-strength ranking**, not
+            an investment recommendation.
+            """
+        )
+
+    if run_top10:
+
+        progress = st.progress(
+            0,
+            text="Starting Top-10 scan..."
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # DAILY DATA — BREAKOUT + DAILY RSI/WMA
+            # ------------------------------------------------
+
+            progress.progress(
+                10,
+                text="Downloading daily market data..."
+            )
+
+            daily_market = download_batches(
+                stocks,
+                "1y",
+                batch_size
+            )
+
+            daily_rsi_market = (
+                download_rsi_wma_batches(
+                    stocks,
+                    "Daily",
+                    batch_size
+                )
+            )
+
+            # ------------------------------------------------
+            # WEEKLY
+            # ------------------------------------------------
+
+            progress.progress(
+                40,
+                text="Calculating weekly RSI(9) signals..."
+            )
+
+            weekly_market = (
+                download_rsi_wma_batches(
+                    stocks,
+                    "Weekly",
+                    batch_size
+                )
+            )
+
+            # ------------------------------------------------
+            # HOURLY
+            # ------------------------------------------------
+
+            hourly_market = {}
+
+            if include_hourly:
+
+                progress.progress(
+                    60,
+                    text="Calculating hourly RSI(9) signals..."
+                )
+
+                hourly_market = (
+                    download_rsi_wma_batches(
+                        stocks,
+                        "Hourly",
+                        batch_size
+                    )
+                )
+
+            # ------------------------------------------------
+            # BUILD RANKING
+            # ------------------------------------------------
+
+            progress.progress(
+                75,
+                text="Building combined technical scores..."
+            )
+
+            rows = []
+
+            for symbol in stocks:
+
+                # --------------------------------------------
+                # SMART BREAKOUT
+                # --------------------------------------------
+
+                breakout_score = 0
+                breakout = None
+                daily_data = daily_market.get(
+                    symbol
+                )
+
+                if (
+                    daily_data is not None
+                    and not daily_data.empty
+                ):
+
+                    try:
+
+                        daily_indicators = (
+                            calculate_indicators(
+                                daily_data
+                            )
+                        )
+
+                        breakout = (
+                            stage_two_analysis(
+                                daily_indicators
+                            )
+                        )
+
+                        if breakout:
+
+                            breakout_score = (
+                                breakout["Score"]
+                                / 10
+                                * 40
+                            )
+
+                    except Exception:
+
+                        breakout = None
+
+                # --------------------------------------------
+                # DAILY RSI/WMA
+                # --------------------------------------------
+
+                daily_signal = None
+                daily_score = 0
+
+                if symbol in daily_rsi_market:
+
+                    try:
+
+                        daily_signal = (
+                            rsi_wma_scan_result(
+                                daily_rsi_market[
+                                    symbol
+                                ],
+                                55
+                            )
+                        )
+
+                        if daily_signal:
+
+                            if daily_signal["Cross"]:
+                                daily_score += 15
+
+                            if daily_signal[
+                                "RSI9 > Threshold"
+                            ]:
+                                daily_score += 10
+
+                    except Exception:
+
+                        daily_signal = None
+
+                # --------------------------------------------
+                # WEEKLY RSI/WMA
+                # --------------------------------------------
+
+                weekly_signal = None
+                weekly_score = 0
+
+                if symbol in weekly_market:
+
+                    try:
+
+                        weekly_signal = (
+                            rsi_wma_scan_result(
+                                weekly_market[
+                                    symbol
+                                ],
+                                50
+                            )
+                        )
+
+                        if weekly_signal:
+
+                            if weekly_signal["Cross"]:
+                                weekly_score += 10
+
+                            if weekly_signal[
+                                "RSI9 > Threshold"
+                            ]:
+                                weekly_score += 10
+
+                    except Exception:
+
+                        weekly_signal = None
+
+                # --------------------------------------------
+                # HOURLY RSI/WMA
+                # --------------------------------------------
+
+                hourly_signal = None
+                hourly_score = 0
+
+                if include_hourly and symbol in hourly_market:
+
+                    try:
+
+                        hourly_signal = (
+                            rsi_wma_scan_result(
+                                hourly_market[
+                                    symbol
+                                ],
+                                55
+                            )
+                        )
+
+                        if hourly_signal:
+
+                            if hourly_signal["Cross"]:
+                                hourly_score += 8
+
+                            if hourly_signal[
+                                "RSI9 > Threshold"
+                            ]:
+                                hourly_score += 7
+
+                    except Exception:
+
+                        hourly_signal = None
+
+                # --------------------------------------------
+                # TOTAL SCORE
+                # --------------------------------------------
+
+                total_score = (
+                    breakout_score
+                    + daily_score
+                    + weekly_score
+                    + hourly_score
+                )
+
+                daily_pass = (
+                    daily_signal is not None
+                    and daily_signal["Cross"]
+                    and daily_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                weekly_pass = (
+                    weekly_signal is not None
+                    and weekly_signal["Cross"]
+                    and weekly_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                hourly_pass = (
+                    hourly_signal is not None
+                    and hourly_signal["Cross"]
+                    and hourly_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                full_mtf = (
+                    daily_pass
+                    and weekly_pass
+                    and (
+                        not include_hourly
+                        or hourly_pass
+                    )
+                )
+
+                # --------------------------------------------
+                # FILTER
+                # --------------------------------------------
+
+                if only_full_mtf and not full_mtf:
+                    continue
+
+                close = np.nan
+                breakout_rsi = np.nan
+                volume_ratio = np.nan
+                breakout_score_display = round(
+                    breakout_score,
+                    1
+                )
+
+                if breakout:
+
+                    close = breakout["Close"]
+                    breakout_rsi = breakout["RSI"]
+                    volume_ratio = breakout[
+                        "Volume Ratio"
+                    ]
+
+                daily_rsi = (
+                    daily_signal["RSI9"]
+                    if daily_signal
+                    else np.nan
+                )
+
+                weekly_rsi = (
+                    weekly_signal["RSI9"]
+                    if weekly_signal
+                    else np.nan
+                )
+
+                hourly_rsi = (
+                    hourly_signal["RSI9"]
+                    if hourly_signal
+                    else np.nan
+                )
+
+                rows.append({
+
+                    "Rank": 0,
+
+                    "Stock": symbol,
+
+                    "Total Score":
+                        round(
+                            total_score,
+                            1
+                        ),
+
+                    "Breakout Score":
+                        breakout_score_display,
+
+                    "Daily Score":
+                        daily_score,
+
+                    "Weekly Score":
+                        weekly_score,
+
+                    "Hourly Score":
+                        hourly_score,
+
+                    "Daily RSI9":
+                        round(
+                            daily_rsi,
+                            2
+                        )
+                        if not pd.isna(
+                            daily_rsi
+                        )
+                        else np.nan,
+
+                    "Weekly RSI9":
+                        round(
+                            weekly_rsi,
+                            2
+                        )
+                        if not pd.isna(
+                            weekly_rsi
+                        )
+                        else np.nan,
+
+                    "Hourly RSI9":
+                        round(
+                            hourly_rsi,
+                            2
+                        )
+                        if not pd.isna(
+                            hourly_rsi
+                        )
+                        else np.nan,
+
+                    "Breakout RSI14":
+                        round(
+                            breakout_rsi,
+                            2
+                        )
+                        if not pd.isna(
+                            breakout_rsi
+                        )
+                        else np.nan,
+
+                    "Volume Ratio":
+                        round(
+                            volume_ratio,
+                            2
+                        )
+                        if not pd.isna(
+                            volume_ratio
+                        )
+                        else np.nan,
+
+                    "Close":
+                        round(
+                            close,
+                            2
+                        )
+                        if not pd.isna(
+                            close
+                        )
+                        else np.nan,
+
+                    "Daily Pass":
+                        "✓"
+                        if daily_pass
+                        else "—",
+
+                    "Weekly Pass":
+                        "✓"
+                        if weekly_pass
+                        else "—",
+
+                    "Hourly Pass":
+                        "✓"
+                        if hourly_pass
+                        else "—",
+
+                    "Full MTF":
+                        "🔥"
+                        if full_mtf
+                        else "—"
+                })
+
+            results_df = pd.DataFrame(
+                rows
+            )
+
+            if not results_df.empty:
+
+                results_df = (
+                    results_df
+                    .sort_values(
+                        [
+                            "Total Score",
+                            "Weekly Score",
+                            "Daily Score",
+                            "Breakout Score"
+                        ],
+                        ascending=False
+                    )
+                    .reset_index(
+                        drop=True
+                    )
+                )
+
+                results_df["Rank"] = (
+                    results_df.index + 1
+                )
+
+            progress.progress(
+                100,
+                text="Top-10 scan completed."
+            )
+
+            time.sleep(0.2)
+            progress.empty()
+
+        except Exception as e:
+
+            progress.empty()
+
+            st.error(
+                f"Top-10 scanner error: {e}"
+            )
+
+            st.stop()
+
+        # ----------------------------------------------------
+        # RESULTS
+        # ----------------------------------------------------
+
+        if results_df.empty:
+
+            st.warning(
+                """
+                No stocks satisfied the selected filters.
+
+                Try disabling "Only show stocks passing
+                Daily + Weekly" or select a broader universe.
+                """
+            )
+
+        else:
+
+            top10 = results_df.head(10).copy()
+
+            st.success(
+                f"🏆 Top {len(top10)} stocks ranked from "
+                f"{len(stocks)} stocks."
+            )
+
+            # -----------------------------------------------
+            # TOP 3
+            # -----------------------------------------------
+
+            st.subheader(
+                "🥇 Top 3"
+            )
+
+            top_cols = st.columns(
+                min(3, len(top10))
+            )
+
+            for index, (_, row) in enumerate(
+                top10.head(3).iterrows()
+            ):
+
+                with top_cols[index]:
+
+                    score = row[
+                        "Total Score"
+                    ]
+
+                    if score >= 75:
+
+                        st.success(
+                            f"🔥 #{int(row['Rank'])} "
+                            f"{row['Stock']}"
+                        )
+
+                    elif score >= 55:
+
+                        st.warning(
+                            f"⚡ #{int(row['Rank'])} "
+                            f"{row['Stock']}"
+                        )
+
+                    else:
+
+                        st.info(
+                            f"📈 #{int(row['Rank'])} "
+                            f"{row['Stock']}"
+                        )
+
+                    st.metric(
+                        "Technical Score",
+                        f"{score:.1f}/100"
+                    )
+
+                    st.write(
+                        f"Daily RSI9: "
+                        f"**{row['Daily RSI9']}**"
+                    )
+
+                    st.write(
+                        f"Weekly RSI9: "
+                        f"**{row['Weekly RSI9']}**"
+                    )
+
+                    if include_hourly:
+
+                        st.write(
+                            f"Hourly RSI9: "
+                            f"**{row['Hourly RSI9']}**"
+                        )
+
+            # -----------------------------------------------
+            # TABLE
+            # -----------------------------------------------
+
+            st.subheader(
+                "📊 Top 10 Ranking"
+            )
+
+            display_columns = [
+                "Rank",
+                "Stock",
+                "Total Score",
+                "Breakout Score",
+                "Daily Score",
+                "Weekly Score",
+                "Hourly Score",
+                "Daily RSI9",
+                "Weekly RSI9",
+                "Hourly RSI9",
+                "Volume Ratio",
+                "Close",
+                "Daily Pass",
+                "Weekly Pass",
+                "Hourly Pass",
+                "Full MTF"
+            ]
+
+            st.dataframe(
+                top10[
+                    display_columns
+                ],
+                width="stretch",
+                hide_index=True
+            )
+
+            # -----------------------------------------------
+            # MOBILE CARDS
+            # -----------------------------------------------
+
+            st.subheader(
+                "📱 Mobile-Friendly Top 10"
+            )
+
+            for _, row in top10.iterrows():
+
+                score = row[
+                    "Total Score"
+                ]
+
+                title = (
+                    f"#{int(row['Rank'])} "
+                    f"{row['Stock']} — "
+                    f"{score:.1f}/100"
+                )
+
+                with st.expander(
+                    title
+                ):
+
+                    c1, c2 = st.columns(2)
+
+                    c1.metric(
+                        "Total Score",
+                        f"{score:.1f}/100"
+                    )
+
+                    c2.metric(
+                        "Breakout",
+                        f"{row['Breakout Score']:.1f}/40"
+                    )
+
+                    c1, c2 = st.columns(2)
+
+                    c1.metric(
+                        "Daily RSI9",
+                        (
+                            f"{row['Daily RSI9']:.2f}"
+                            if not pd.isna(
+                                row["Daily RSI9"]
+                            )
+                            else "N/A"
+                        )
+                    )
+
+                    c2.metric(
+                        "Weekly RSI9",
+                        (
+                            f"{row['Weekly RSI9']:.2f}"
+                            if not pd.isna(
+                                row["Weekly RSI9"]
+                            )
+                            else "N/A"
+                        )
+                    )
+
+                    if include_hourly:
+
+                        st.write(
+                            f"Hourly RSI9: "
+                            f"**{row['Hourly RSI9']}**"
+                        )
+
+                    st.write(
+                        f"Daily: **{row['Daily Pass']}** | "
+                        f"Weekly: **{row['Weekly Pass']}** | "
+                        f"Hourly: **{row['Hourly Pass']}**"
+                    )
+
+                    if row["Full MTF"] == "🔥":
+
+                        st.success(
+                            "🔥 Full multi-timeframe confirmation"
+                        )
+
+                    else:
+
+                        st.info(
+                            "Partial multi-timeframe confirmation"
+                        )
+
+                    if not pd.isna(
+                        row["Close"]
+                    ):
+
+                        st.write(
+                            f"Latest Close: "
+                            f"**₹{row['Close']:.2f}**"
+                        )
+
+                    if not pd.isna(
+                        row["Volume Ratio"]
+                    ):
+
+                        st.write(
+                            f"Volume Ratio: "
+                            f"**{row['Volume Ratio']:.2f}×**"
+                        )
+
+            # -----------------------------------------------
+            # CSV DOWNLOAD
+            # -----------------------------------------------
+
+            csv = top10.to_csv(
+                index=False
+            )
+
+            st.download_button(
+                label="⬇️ Download Top 10 Results",
+                data=csv,
+                file_name="Top_10_Momentum_Stocks.csv",
+                mime="text/csv"
+            )
+
+            # -----------------------------------------------
+            # OPTIONAL AI INTERPRETATION
+            # -----------------------------------------------
+
+            st.divider()
+
+            st.subheader(
+                "🤖 AI Interpretation"
+            )
+
+            st.caption(
+                "This is optional. It requires a working "
+                "OpenAI API balance."
+            )
+
+            if client is None:
+
+                st.info(
+                    "Add your OpenAI API key in Streamlit "
+                    "Secrets to enable AI interpretation."
+                )
+
+            else:
+
+                if st.button(
+                    "🤖 Explain Top 10",
+                    type="secondary"
+                ):
+
+                    compact = top10[
+                        [
+                            "Rank",
+                            "Stock",
+                            "Total Score",
+                            "Breakout Score",
+                            "Daily Score",
+                            "Weekly Score",
+                            "Hourly Score",
+                            "Daily RSI9",
+                            "Weekly RSI9",
+                            "Hourly RSI9",
+                            "Volume Ratio",
+                            "Close"
+                        ]
+                    ].to_dict(
+                        orient="records"
+                    )
+
+                    prompt = f"""
+                    Analyze these NSE technical scanner results
+                    as an educational technical analyst.
+
+                    Explain:
+                    1. Which 3 stocks have the strongest setups.
+                    2. Why their combined scores are high.
+                    3. Which stocks have the strongest
+                       multi-timeframe confirmation.
+                    4. Which stocks have weak or missing
+                       confirmation.
+                    5. What should be checked on the chart
+                       before considering a trade.
+
+                    Do not invent prices or indicators.
+                    Do not guarantee returns.
+                    Use only the supplied data.
+
+                    Scanner results:
+                    {compact}
+                    """
+
+                    try:
+
+                        with st.spinner(
+                            "Generating AI interpretation..."
+                        ):
+
+                            response = client.responses.create(
+                                model="gpt-5.6-mini",
+                                instructions=(
+                                    "You are an educational "
+                                    "technical-analysis assistant. "
+                                    "Never guarantee returns and "
+                                    "never invent missing data."
+                                ),
+                                input=prompt
+                            )
+
+                        st.markdown(
+                            response.output_text
+                        )
+
+                    except Exception as e:
+
+                        st.error(
+                            f"AI interpretation error: {e}"
+                        )
+
 
 else:
 
