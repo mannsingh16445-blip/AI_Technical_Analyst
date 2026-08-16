@@ -12,6 +12,10 @@ st.set_page_config(
 st.title("📈 AI Technical Analyst")
 st.caption("Technical Analysis Dashboard")
 
+# ============================================================
+# SIDEBAR
+# ============================================================
+
 st.sidebar.header("Stock Settings")
 
 symbol = st.sidebar.text_input(
@@ -21,12 +25,31 @@ symbol = st.sidebar.text_input(
 
 period = st.sidebar.selectbox(
     "Chart Period",
-    ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
-    index=2
+    ["6mo", "1y", "2y", "5y"],
+    index=1
+)
+
+show_sma20 = st.sidebar.checkbox(
+    "SMA 20",
+    value=True
+)
+
+show_sma50 = st.sidebar.checkbox(
+    "SMA 50",
+    value=True
+)
+
+show_sma200 = st.sidebar.checkbox(
+    "SMA 200",
+    value=True
 )
 
 ticker = symbol + ".NS"
 
+
+# ============================================================
+# MARKET DATA
+# ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_data(ticker, period):
@@ -65,19 +88,21 @@ try:
 
         st.error(
             f"Unable to retrieve data for {symbol}. "
-            "Please try again in a few seconds."
+            "Please try again."
         )
 
         st.stop()
 
-    # Handle Yahoo Finance MultiIndex
+    # ========================================================
+    # HANDLE YAHOO FINANCE COLUMNS
+    # ========================================================
+
     if hasattr(data.columns, "nlevels"):
 
         if data.columns.nlevels > 1:
 
             data.columns = data.columns.get_level_values(0)
 
-    # Make sure required columns exist
     required_columns = [
         "Open",
         "High",
@@ -86,31 +111,57 @@ try:
     ]
 
     missing = [
-        col for col in required_columns
-        if col not in data.columns
+        column
+        for column in required_columns
+        if column not in data.columns
     ]
 
     if missing:
 
         st.error(
-            f"Market data is missing: {', '.join(missing)}"
+            f"Missing market data: {', '.join(missing)}"
         )
 
         st.stop()
 
-    # Remove rows without price data
     data = data.dropna(
-        subset=["Open", "High", "Low", "Close"]
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close"
+        ]
     )
 
-    if data.empty:
+    # ========================================================
+    # MOVING AVERAGES
+    # ========================================================
 
-        st.error("No usable price data was returned.")
+    data["SMA20"] = (
+        data["Close"]
+        .rolling(window=20)
+        .mean()
+    )
 
-        st.stop()
+    data["SMA50"] = (
+        data["Close"]
+        .rolling(window=50)
+        .mean()
+    )
 
-    # Create chart
+    data["SMA200"] = (
+        data["Close"]
+        .rolling(window=200)
+        .mean()
+    )
+
+    # ========================================================
+    # CREATE CHART
+    # ========================================================
+
     fig = go.Figure()
+
+    # Candlestick
 
     fig.add_trace(
         go.Candlestick(
@@ -123,13 +174,66 @@ try:
         )
     )
 
+    # SMA 20
+
+    if show_sma20:
+
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA20"],
+                mode="lines",
+                name="SMA 20"
+            )
+        )
+
+    # SMA 50
+
+    if show_sma50:
+
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA50"],
+                mode="lines",
+                name="SMA 50"
+            )
+        )
+
+    # SMA 200
+
+    if show_sma200:
+
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["SMA200"],
+                mode="lines",
+                name="SMA 200"
+            )
+        )
+
+    # ========================================================
+    # CHART LAYOUT
+    # ========================================================
+
     fig.update_layout(
-        title=f"{symbol} Price Chart",
+
+        title=f"{symbol} Price + Moving Averages",
+
         xaxis_title="Date",
+
         yaxis_title="Price",
-        height=650,
+
+        height=700,
+
         xaxis_rangeslider_visible=False,
-        hovermode="x unified"
+
+        hovermode="x unified",
+
+        legend=dict(
+            orientation="h"
+        )
     )
 
     st.plotly_chart(
@@ -137,33 +241,99 @@ try:
         width="stretch"
     )
 
-    # Latest values
+    # ========================================================
+    # CURRENT VALUES
+    # ========================================================
+
     latest = data.iloc[-1]
 
-    latest_close = float(latest["Close"])
-    latest_high = float(latest["High"])
-    latest_low = float(latest["Low"])
+    close = float(latest["Close"])
 
-    col1, col2, col3 = st.columns(3)
+    sma20 = float(latest["SMA20"])
+
+    sma50 = float(latest["SMA50"])
+
+    sma200 = float(latest["SMA200"])
+
+    st.subheader("📊 Current Technical Values")
+
+    col1, col2, col3, col4 = st.columns(4)
 
     col1.metric(
-        "Latest Close",
-        f"₹{latest_close:.2f}"
+        "Current Price",
+        f"₹{close:.2f}"
     )
 
     col2.metric(
-        "Day High",
-        f"₹{latest_high:.2f}"
+        "SMA 20",
+        f"₹{sma20:.2f}"
     )
 
     col3.metric(
-        "Day Low",
-        f"₹{latest_low:.2f}"
+        "SMA 50",
+        f"₹{sma50:.2f}"
+    )
+
+    col4.metric(
+        "SMA 200",
+        f"₹{sma200:.2f}"
+    )
+
+    # ========================================================
+    # TREND ANALYSIS
+    # ========================================================
+
+    st.subheader("📈 Moving Average Trend")
+
+    if close > sma200:
+
+        st.success(
+            "🟢 Price is ABOVE the 200 SMA"
+        )
+
+    else:
+
+        st.warning(
+            "🔴 Price is BELOW the 200 SMA"
+        )
+
+    if sma50 > sma200:
+
+        st.success(
+            "🟢 SMA 50 is ABOVE SMA 200"
+        )
+
+    else:
+
+        st.warning(
+            "🔴 SMA 50 is BELOW SMA 200"
+        )
+
+    if sma20 > sma50:
+
+        st.success(
+            "🟢 SMA 20 is ABOVE SMA 50"
+        )
+
+    else:
+
+        st.warning(
+            "🔴 SMA 20 is BELOW SMA 50"
+        )
+
+    # ========================================================
+    # DATA STATUS
+    # ========================================================
+
+    st.caption(
+        f"Data points: {len(data)} | "
+        f"Last available date: {data.index[-1].date()}"
     )
 
     st.success(
-        f"✅ {symbol} chart loaded successfully"
+        f"✅ {symbol} analysis loaded successfully"
     )
+
 
 except Exception as e:
 
