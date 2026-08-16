@@ -8,7 +8,10 @@ import time
 import os
 
 from io import StringIO
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 from dotenv import load_dotenv
 
 
