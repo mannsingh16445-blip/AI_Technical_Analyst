@@ -2586,6 +2586,7 @@ module = st.sidebar.radio(
         "🚀 Smart Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
         "🏆 Top 20 Momentum Stocks",
+        "📊 Backtest & Performance",
         "🤖 AI Analyst"
     ]
 )
@@ -5404,6 +5405,855 @@ elif module == "🏆 Top 20 Momentum Stocks":
                         st.error(
                             f"AI interpretation error: {e}"
                         )
+
+
+elif module == "📊 Backtest & Performance":
+
+    st.header(
+        "📊 Backtest & Performance"
+    )
+
+    st.write(
+        """
+        Test the scanner rules on historical daily data without
+        using future information. The engine enters only after a
+        signal is confirmed at the close and evaluates the next
+        trading sessions for Entry, Stop Loss and Targets.
+        """
+    )
+
+    st.sidebar.subheader(
+        "📊 Backtest Settings"
+    )
+
+    with st.spinner(
+        "Loading stock universes..."
+    ):
+
+        fno_stocks = load_fno_stocks()
+        nifty500 = load_nifty500()
+        nse_stocks = load_nse_equity_universe()
+
+    universe = st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "NSE F&O Stocks",
+            "Nifty 50",
+            "Nifty 500",
+            "Full NSE"
+        ],
+        index=0
+    )
+
+    if universe == "NSE F&O Stocks":
+        stocks = list(fno_stocks)
+    elif universe == "Nifty 50":
+        stocks = list(NIFTY50)
+    elif universe == "Nifty 500":
+        stocks = list(nifty500)[:500]
+    else:
+        stocks = list(nse_stocks)
+
+    strategy = st.sidebar.selectbox(
+        "Strategy to Backtest",
+        [
+            "Combined Breakout + Daily RSI(9)",
+            "Smart Breakout",
+            "Daily RSI(9)/WMA(21)"
+        ]
+    )
+
+    period = st.sidebar.selectbox(
+        "Historical Period",
+        [
+            "1y",
+            "2y",
+            "3y",
+            "5y",
+            "10y"
+        ],
+        index=3
+    )
+
+    max_stocks = st.sidebar.slider(
+        "Maximum Stocks to Test",
+        min_value=10,
+        max_value=min(250, max(10, len(stocks))),
+        value=min(50, max(10, len(stocks))),
+        step=10
+    )
+
+    min_breakout_score = st.sidebar.slider(
+        "Minimum Breakout Score",
+        min_value=5,
+        max_value=10,
+        value=7,
+        help="Used for Smart Breakout and Combined strategies."
+    )
+
+    holding_days = st.sidebar.slider(
+        "Maximum Holding Days",
+        min_value=5,
+        max_value=60,
+        value=20,
+        step=5
+    )
+
+    initial_capital = st.sidebar.number_input(
+        "Initial Capital (₹)",
+        min_value=10000.0,
+        value=100000.0,
+        step=10000.0
+    )
+
+    position_pct = st.sidebar.slider(
+        "Capital per Trade (%)",
+        min_value=5,
+        max_value=100,
+        value=10,
+        step=5
+    )
+
+
+    run_backtest = st.sidebar.button(
+        "🚀 RUN BACKTEST",
+        type="primary"
+    )
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks selected: **{min(max_stocks, len(stocks))}** | "
+        f"Strategy: **{strategy}**"
+    )
+
+    with st.expander(
+        "📐 Backtest Rules"
+    ):
+
+        st.markdown(
+            """
+            **Signal is evaluated only after a completed daily bar.**
+
+            **Smart Breakout:** your existing C1–C5 breakout rules,
+            with a configurable minimum score.
+
+            **Daily RSI strategy:** RSI(9) crosses above WMA(Close,21)
+            and RSI(9) is above 55.
+
+            **Combined:** both the Smart Breakout score and Daily
+            RSI(9)/WMA(21) confirmation must pass.
+
+            **Entry:** approximately 0.25% above the signal-day close.
+            On the following sessions, a trade is considered filled
+            only when the day's high reaches the entry level.
+
+            **Stop Loss:** below recent support and volatility-adjusted
+            using ATR(14), consistent with the app's trade-plan logic.
+
+            **Target 1:** 2R. **Target 2:** 3R.
+
+            If both stop and target appear within the same daily candle,
+            the backtest uses the conservative assumption that the stop
+            was hit first.
+            """
+        )
+
+    if run_backtest:
+
+        selected_stocks = stocks[:max_stocks]
+        progress = st.progress(
+            0,
+            text="Downloading historical data..."
+        )
+
+        try:
+
+            historical = download_batches(
+                selected_stocks,
+                period,
+                50
+            )
+
+            progress.progress(
+                25,
+                text="Scanning historical signals..."
+            )
+
+            trades = []
+
+            for stock_index, symbol in enumerate(selected_stocks):
+
+                data = historical.get(symbol)
+
+                if data is None or data.empty:
+                    continue
+
+                data = data.copy()
+
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+
+                required = [
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume"
+                ]
+
+                if any(c not in data.columns for c in required):
+                    continue
+
+                data = data.dropna(subset=required)
+
+                if len(data) < 220:
+                    continue
+
+                indicators = calculate_indicators(data)
+                rsi_data = prepare_rsi_wma_data(data)
+
+                # Prevent overlapping signals for the same stock.
+                next_allowed_index = 0
+
+                for i in range(210, len(indicators) - holding_days - 1):
+
+                    if i < next_allowed_index:
+                        continue
+
+                    hist = indicators.iloc[:i + 1]
+                    signal_date = hist.index[-1]
+
+                    breakout = stage_two_analysis(hist)
+
+                    breakout_pass = (
+                        breakout is not None
+                        and breakout["Score"] >= min_breakout_score
+                    )
+
+                    rsi_pass = False
+                    rsi_value = np.nan
+
+                    # rsi_data uses the same RSI(9)/WMA(21) formula as
+                    # the live scanner. Find the latest bar at/before
+                    # the signal date and its previous bar.
+                    rsi_hist = rsi_data.loc[
+                        rsi_data.index <= signal_date
+                    ]
+
+                    if len(rsi_hist) >= 2:
+
+                        prev_r = rsi_hist.iloc[-2]
+                        curr_r = rsi_hist.iloc[-1]
+
+                        cross = (
+                            prev_r["RSI9"] <= prev_r["WMA21_CLOSE"]
+                            and curr_r["RSI9"] > curr_r["WMA21_CLOSE"]
+                        )
+
+                        threshold = (
+                            curr_r["RSI9"] > 55
+                        )
+
+                        rsi_pass = (
+                            cross and threshold
+                        )
+
+                        rsi_value = float(
+                            curr_r["RSI9"]
+                        )
+
+                    if strategy == "Smart Breakout":
+                        signal = breakout_pass
+                    elif strategy == "Daily RSI(9)/WMA(21)":
+                        signal = rsi_pass
+                    else:
+                        signal = breakout_pass and rsi_pass
+
+                    if not signal:
+                        continue
+
+                    signal_close = float(
+                        indicators.iloc[i]["Close"]
+                    )
+
+                    # Build trade plan using information available
+                    # only through the signal bar.
+                    plan = calculate_trade_plan(
+                        indicators.iloc[:i + 1]
+                    )
+
+                    if plan is None:
+                        continue
+
+                    entry = float(plan["Entry"])
+                    stop = float(plan["Stop Loss"])
+                    target1 = float(plan["Target 1"])
+                    target2 = float(plan["Target 2"])
+
+                    if not (
+                        stop < entry < target1 < target2
+                    ):
+                        continue
+
+                    future = indicators.iloc[
+                        i + 1:
+                        min(
+                            i + 1 + holding_days,
+                            len(indicators)
+                        )
+                    ]
+
+                    entry_pos = None
+                    entry_date = None
+
+                    # Find first future day that trades through entry.
+                    for j, (_, candle) in enumerate(future.iterrows()):
+
+                        day_high = float(candle["High"])
+
+                        if day_high >= entry:
+                            entry_pos = j
+                            entry_date = candle.name
+                            break
+
+                    if entry_pos is None:
+                        continue
+
+                    post_entry = future.iloc[
+                        entry_pos:
+                    ]
+
+                    exit_date = post_entry.index[-1]
+                    exit_price = float(
+                        post_entry.iloc[-1]["Close"]
+                    )
+                    outcome = "Time Exit"
+                    r_multiple = (
+                        exit_price - entry
+                    ) / (entry - stop)
+
+                    for _, candle in post_entry.iterrows():
+
+                        day_low = float(candle["Low"])
+                        day_high = float(candle["High"])
+
+                        # Conservative same-day assumption:
+                        # if stop and target both occur, count stop first.
+                        if day_low <= stop:
+
+                            exit_price = stop
+                            exit_date = candle.name
+                            outcome = "Stop Loss"
+                            r_multiple = -1.0
+                            break
+
+                        if day_high >= target2:
+
+                            exit_price = target2
+                            exit_date = candle.name
+                            outcome = "Target 2"
+                            r_multiple = 3.0
+                            break
+
+                        if day_high >= target1:
+
+                            exit_price = target1
+                            exit_date = candle.name
+                            outcome = "Target 1"
+                            r_multiple = 2.0
+                            break
+
+                    grade = "B"
+
+                    if breakout is not None:
+
+                        score = breakout["Score"]
+
+                        if rsi_pass and score >= 9:
+                            grade = "A+"
+                        elif rsi_pass and score >= 8:
+                            grade = "A"
+                        elif score >= 7:
+                            grade = "B"
+                        else:
+                            grade = "C"
+                    elif rsi_pass:
+                        grade = "B"
+
+                    trades.append({
+
+                        "Stock": symbol,
+                        "Signal Date": signal_date,
+                        "Entry Date": entry_date,
+                        "Exit Date": exit_date,
+                        "Setup Grade": grade,
+                        "Entry": round(entry, 2),
+                        "Stop Loss": round(stop, 2),
+                        "Target 1": round(target1, 2),
+                        "Target 2": round(target2, 2),
+                        "Exit Price": round(exit_price, 2),
+                        "Outcome": outcome,
+                        "R Multiple": round(r_multiple, 2),
+                        "RSI9": round(rsi_value, 2)
+                        if not pd.isna(rsi_value)
+                        else np.nan,
+                        "Breakout Score":
+                            breakout["Score"]
+                            if breakout is not None
+                            else np.nan
+                    })
+
+                    # Avoid repeatedly entering the same stock while a
+                    # previous signal's holding window is still active.
+                    next_allowed_index = i + entry_pos + holding_days + 1
+
+                progress.progress(
+                    25 + int(
+                        60 * (stock_index + 1)
+                        / max(1, len(selected_stocks))
+                    ),
+                    text=f"Testing {symbol}..."
+                )
+
+            progress.progress(
+                100,
+                text="Backtest completed."
+            )
+
+            time.sleep(0.2)
+            progress.empty()
+
+            if not trades:
+
+                st.warning(
+                    "No historical trades were generated. "
+                    "Try a broader universe, longer period, or lower "
+                    "minimum breakout score."
+                )
+
+            else:
+
+                trades_df = pd.DataFrame(trades)
+
+                # ------------------------------------------------
+                # PERFORMANCE METRICS
+                # ------------------------------------------------
+
+                total_trades = len(trades_df)
+                wins = int(
+                    (trades_df["R Multiple"] > 0).sum()
+                )
+                losses = int(
+                    (trades_df["R Multiple"] <= 0).sum()
+                )
+
+                win_rate = (
+                    wins / total_trades * 100
+                )
+
+                avg_r = float(
+                    trades_df["R Multiple"].mean()
+                )
+
+                median_r = float(
+                    trades_df["R Multiple"].median()
+                )
+
+                gross_profit_r = float(
+                    trades_df.loc[
+                        trades_df["R Multiple"] > 0,
+                        "R Multiple"
+                    ].sum()
+                )
+
+                gross_loss_r = abs(float(
+                    trades_df.loc[
+                        trades_df["R Multiple"] < 0,
+                        "R Multiple"
+                    ].sum()
+                ))
+
+                profit_factor = (
+                    gross_profit_r / gross_loss_r
+                    if gross_loss_r > 0
+                    else np.inf
+                )
+
+                expectancy = avg_r
+
+                # ------------------------------------------------
+                # EQUITY CURVE
+                # ------------------------------------------------
+
+                ordered = trades_df.sort_values(
+                    "Exit Date"
+                ).reset_index(drop=True)
+
+                risk_per_trade = (
+                    initial_capital
+                    * position_pct
+                    / 100
+                )
+
+                ordered["PnL ₹"] = (
+                    ordered["R Multiple"]
+                    * risk_per_trade
+                )
+
+                ordered["Equity"] = (
+                    initial_capital
+                    + ordered["PnL ₹"].cumsum()
+                )
+
+                ordered["Peak Equity"] = (
+                    ordered["Equity"].cummax()
+                )
+
+                ordered["Drawdown"] = (
+                    ordered["Equity"]
+                    - ordered["Peak Equity"]
+                )
+
+                max_drawdown = float(
+                    ordered["Drawdown"].min()
+                )
+
+                max_drawdown_pct = float(
+                    (
+                        ordered["Drawdown"]
+                        / ordered["Peak Equity"]
+                        * 100
+                    ).min()
+                )
+
+                final_equity = float(
+                    ordered["Equity"].iloc[-1]
+                )
+
+                total_return = (
+                    (final_equity / initial_capital - 1)
+                    * 100
+                )
+
+                trading_days = (
+                    pd.to_datetime(ordered["Exit Date"]).max()
+                    - pd.to_datetime(ordered["Exit Date"]).min()
+                ).days
+
+                years = max(
+                    trading_days / 365.25,
+                    1 / 365.25
+                )
+
+                cagr = (
+                    (final_equity / initial_capital)
+                    ** (1 / years)
+                    - 1
+                ) * 100
+
+                # ------------------------------------------------
+                # DASHBOARD
+                # ------------------------------------------------
+
+                st.success(
+                    f"Backtest completed: {total_trades} trades"
+                )
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric(
+                    "Win Rate",
+                    f"{win_rate:.1f}%"
+                )
+
+                c2.metric(
+                    "Average R",
+                    f"{avg_r:.2f}R"
+                )
+
+                c3.metric(
+                    "Profit Factor",
+                    (
+                        "∞"
+                        if np.isinf(profit_factor)
+                        else f"{profit_factor:.2f}"
+                    )
+                )
+
+                c4.metric(
+                    "Total Return",
+                    f"{total_return:.1f}%"
+                )
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric(
+                    "Expectancy",
+                    f"{expectancy:.2f}R/trade"
+                )
+
+                c2.metric(
+                    "Median R",
+                    f"{median_r:.2f}R"
+                )
+
+                c3.metric(
+                    "CAGR*",
+                    f"{cagr:.1f}%"
+                )
+
+                c4.metric(
+                    "Risk/Trade",
+                    f"₹{risk_per_trade:,.0f}"
+                )
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric(
+                    "Total Trades",
+                    f"{total_trades}"
+                )
+
+                c2.metric(
+                    "Wins / Losses",
+                    f"{wins} / {losses}"
+                )
+
+                c3.metric(
+                    "Max Drawdown",
+                    f"₹{max_drawdown:,.0f}"
+                )
+
+                c4.metric(
+                    "Max DD %",
+                    f"{max_drawdown_pct:.1f}%"
+                )
+
+                st.subheader(
+                    "📈 Equity Curve"
+                )
+
+                equity_chart = go.Figure()
+
+                equity_chart.add_trace(
+                    go.Scatter(
+                        x=ordered["Exit Date"],
+                        y=ordered["Equity"],
+                        mode="lines",
+                        name="Equity"
+                    )
+                )
+
+                equity_chart.add_hline(
+                    y=initial_capital,
+                    line_dash="dash",
+                    annotation_text="Initial Capital"
+                )
+
+                equity_chart.update_layout(
+                    height=450,
+                    xaxis_title="Exit Date",
+                    yaxis_title="Portfolio Value (₹)",
+                    xaxis_rangeslider_visible=False
+                )
+
+                st.plotly_chart(
+                    equity_chart,
+                    width="stretch"
+                )
+
+                # ------------------------------------------------
+                # OUTCOME DISTRIBUTION
+                # ------------------------------------------------
+
+                st.subheader(
+                    "🎯 Trade Outcomes"
+                )
+
+                outcome_counts = (
+                    ordered["Outcome"]
+                    .value_counts()
+                )
+
+                outcome_fig = go.Figure(
+                    data=[
+                        go.Bar(
+                            x=outcome_counts.index,
+                            y=outcome_counts.values,
+                            text=outcome_counts.values,
+                            textposition="auto"
+                        )
+                    ]
+                )
+
+                outcome_fig.update_layout(
+                    height=350,
+                    xaxis_title="Outcome",
+                    yaxis_title="Number of Trades"
+                )
+
+                st.plotly_chart(
+                    outcome_fig,
+                    width="stretch"
+                )
+
+                # ------------------------------------------------
+                # GRADE PERFORMANCE
+                # ------------------------------------------------
+
+                st.subheader(
+                    "🏷️ Setup Grade Performance"
+                )
+
+                grade_summary = (
+                    ordered
+                    .groupby("Setup Grade")
+                    .agg(
+                        Trades=("R Multiple", "count"),
+                        Win_Rate=(
+                            "R Multiple",
+                            lambda x: (x > 0).mean() * 100
+                        ),
+                        Avg_R=(
+                            "R Multiple",
+                            "mean"
+                        ),
+                        Total_R=(
+                            "R Multiple",
+                            "sum"
+                        )
+                    )
+                    .reset_index()
+                )
+
+                grade_summary["Win_Rate"] = (
+                    grade_summary["Win_Rate"]
+                    .round(1)
+                )
+
+                grade_summary["Avg_R"] = (
+                    grade_summary["Avg_R"]
+                    .round(2)
+                )
+
+                grade_summary["Total_R"] = (
+                    grade_summary["Total_R"]
+                    .round(2)
+                )
+
+                st.dataframe(
+                    grade_summary,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                # ------------------------------------------------
+                # MONTHLY PERFORMANCE
+                # ------------------------------------------------
+
+                st.subheader(
+                    "📅 Monthly Performance"
+                )
+
+                monthly = ordered.copy()
+
+                monthly["Month"] = pd.to_datetime(
+                    monthly["Exit Date"]
+                ).dt.to_period("M").astype(str)
+
+                monthly_summary = (
+                    monthly
+                    .groupby("Month")
+                    .agg(
+                        Trades=("R Multiple", "count"),
+                        Total_R=("R Multiple", "sum"),
+                        Avg_R=("R Multiple", "mean"),
+                        Win_Rate=(
+                            "R Multiple",
+                            lambda x: (x > 0).mean() * 100
+                        )
+                    )
+                    .reset_index()
+                )
+
+                monthly_summary["Total_R"] = (
+                    monthly_summary["Total_R"].round(2)
+                )
+                monthly_summary["Avg_R"] = (
+                    monthly_summary["Avg_R"].round(2)
+                )
+                monthly_summary["Win_Rate"] = (
+                    monthly_summary["Win_Rate"].round(1)
+                )
+
+                st.dataframe(
+                    monthly_summary,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                # ------------------------------------------------
+                # TRADE LOG
+                # ------------------------------------------------
+
+                st.subheader(
+                    "📋 Historical Trade Log"
+                )
+
+                st.dataframe(
+                    ordered[
+                        [
+                            "Stock",
+                            "Signal Date",
+                            "Entry Date",
+                            "Exit Date",
+                            "Setup Grade",
+                            "Entry",
+                            "Stop Loss",
+                            "Target 1",
+                            "Target 2",
+                            "Exit Price",
+                            "Outcome",
+                            "R Multiple",
+                            "RSI9",
+                            "Breakout Score",
+                            "PnL ₹",
+                            "Equity"
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True
+                )
+
+                csv = ordered.to_csv(
+                    index=False
+                )
+
+                st.download_button(
+                    "⬇️ Download Backtest Trade Log",
+                    data=csv,
+                    file_name="scanner_backtest_trade_log.csv",
+                    mime="text/csv"
+                )
+
+                st.caption(
+                    "Backtest results are historical simulations and "
+                    "do not guarantee future performance. They also "
+                    "do not model brokerage, taxes, slippage, gaps, "
+                    "corporate actions or liquidity constraints. The "
+                    "equity curve is a fixed-risk R-multiple simulation, "
+                    "not a statement of actual portfolio returns. "
+                    "*CAGR is illustrative under the same fixed-risk "
+                    "assumption."
+                )
+
+        except Exception as e:
+
+            progress.empty()
+
+            st.error(
+                f"Backtest error: {e}"
+            )
 
 
 else:
