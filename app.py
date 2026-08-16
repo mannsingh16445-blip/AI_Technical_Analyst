@@ -4599,6 +4599,43 @@ elif module == "🏆 Top 20 Momentum Stocks":
                 )
 
                 # --------------------------------------------
+                # MULTI-TIMEFRAME PASS CONDITIONS
+                # --------------------------------------------
+
+                daily_pass = (
+                    daily_signal is not None
+                    and daily_signal["Cross"]
+                    and daily_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                weekly_pass = (
+                    weekly_signal is not None
+                    and weekly_signal["Cross"]
+                    and weekly_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                hourly_pass = (
+                    hourly_signal is not None
+                    and hourly_signal["Cross"]
+                    and hourly_signal[
+                        "RSI9 > Threshold"
+                    ]
+                )
+
+                full_mtf = (
+                    daily_pass
+                    and weekly_pass
+                    and (
+                        not include_hourly
+                        or hourly_pass
+                    )
+                )
+
+                # --------------------------------------------
                 # TRADE SETUP QUALITY
                 # --------------------------------------------
 
@@ -4657,39 +4694,6 @@ elif module == "🏆 Top 20 Momentum Stocks":
 
                     setup_grade = "Avoid"
                     setup_label = "🔴 Avoid"
-
-                daily_pass = (
-                    daily_signal is not None
-                    and daily_signal["Cross"]
-                    and daily_signal[
-                        "RSI9 > Threshold"
-                    ]
-                )
-
-                weekly_pass = (
-                    weekly_signal is not None
-                    and weekly_signal["Cross"]
-                    and weekly_signal[
-                        "RSI9 > Threshold"
-                    ]
-                )
-
-                hourly_pass = (
-                    hourly_signal is not None
-                    and hourly_signal["Cross"]
-                    and hourly_signal[
-                        "RSI9 > Threshold"
-                    ]
-                )
-
-                full_mtf = (
-                    daily_pass
-                    and weekly_pass
-                    and (
-                        not include_hourly
-                        or hourly_pass
-                    )
-                )
 
                 # --------------------------------------------
                 # FILTER
