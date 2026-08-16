@@ -1,5 +1,7 @@
-streamlit
+sstreamlit
+openai
 yfinance
 plotly
 pandas
 numpy
+python-dotenv
