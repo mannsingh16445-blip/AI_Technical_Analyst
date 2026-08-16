@@ -24,7 +24,83 @@ st.set_page_config(
     page_icon="📈",
     layout="wide"
 )
+# ============================================================
+# MOBILE RESPONSIVE CSS
+# ============================================================
 
+st.markdown(
+    """
+    <style>
+
+    /* Main application width */
+    .block-container {
+        padding-top: 1rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+
+    /* Mobile */
+    @media only screen and (max-width: 768px) {
+
+        .block-container {
+            padding-top: 0.5rem;
+            padding-left: 0.7rem;
+            padding-right: 0.7rem;
+        }
+
+        /* Smaller headings */
+        h1 {
+            font-size: 1.6rem !important;
+        }
+
+        h2 {
+            font-size: 1.3rem !important;
+        }
+
+        h3 {
+            font-size: 1.1rem !important;
+        }
+
+        /* Metrics */
+        [data-testid="stMetric"] {
+            padding: 0.4rem 0.2rem;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.15rem !important;
+        }
+
+        /* Buttons */
+        .stButton > button {
+            width: 100%;
+            min-height: 2.7rem;
+        }
+
+        /* Inputs */
+        input {
+            font-size: 16px !important;
+        }
+
+        /* Dataframes */
+        [data-testid="stDataFrame"] {
+            width: 100% !important;
+        }
+
+        /* Chat input */
+        [data-testid="stChatInput"] {
+            width: 100%;
+        }
+
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 load_dotenv()
 
 
