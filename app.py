@@ -1,13 +1,37 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
+import pandas as pd
+import numpy as np
 import requests
-import os
 import time
+import os
 
 from io import StringIO
+from dotenv import load_dotenv
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="AI Technical Analyst",
+    page_icon="📈",
+    layout="wide"
+)
+
+
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
+
+load_dotenv()
+
+
+# ============================================================
+# OPENAI
+# ============================================================
 
 try:
     from openai import OpenAI
@@ -15,145 +39,28 @@ except ImportError:
     OpenAI = None
 
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
-st.set_page_config(
-    page_title="AI Technical Analyst",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-
-# ============================================================
-# MOBILE + DESKTOP CSS
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-
-    /* Main page */
-
-    .block-container {
-        padding-top: 1rem;
-        padding-left: 2rem;
-        padding-right: 2rem;
-        max-width: 100%;
-    }
-
-
-    /* Mobile */
-
-    @media (max-width: 768px) {
-
-        .block-container {
-            padding-top: 0.5rem;
-            padding-left: 0.7rem;
-            padding-right: 0.7rem;
-        }
-
-        h1 {
-            font-size: 1.55rem !important;
-        }
-
-        h2 {
-            font-size: 1.3rem !important;
-        }
-
-        h3 {
-            font-size: 1.1rem !important;
-        }
-
-        [data-testid="stMetric"] {
-            padding: 0.3rem;
-        }
-
-        [data-testid="stMetricLabel"] {
-            font-size: 0.72rem !important;
-        }
-
-        [data-testid="stMetricValue"] {
-            font-size: 1.05rem !important;
-        }
-
-        .stButton button {
-            width: 100%;
-            min-height: 2.6rem;
-        }
-
-        input {
-            font-size: 16px !important;
-        }
-
-        .desktop-only {
-            display: none !important;
-        }
-
-        .mobile-only {
-            display: block !important;
-        }
-
-        .stock-card {
-            border: 1px solid rgba(128,128,128,0.35);
-            border-radius: 12px;
-            padding: 14px;
-            margin-bottom: 12px;
-        }
-
-        .stock-name {
-            font-size: 1.15rem;
-            font-weight: 700;
-        }
-
-        .stock-score {
-            font-size: 1rem;
-            font-weight: 700;
-            margin-top: 5px;
-            margin-bottom: 8px;
-        }
-
-        .stock-line {
-            display: flex;
-            justify-content: space-between;
-            padding: 4px 0;
-            font-size: 0.9rem;
-        }
-
-    }
-
-    .mobile-only {
-        display: none;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
-# OPENAI
-# ============================================================
-
-OPENAI_API_KEY = None
+# Try Streamlit Secrets first
+OPENAI_API_KEY = ""
 
 try:
     OPENAI_API_KEY = st.secrets.get(
         "OPENAI_API_KEY",
-        None
+        ""
     )
 except Exception:
+    OPENAI_API_KEY = ""
+
+
+# Fall back to environment variable
+if not OPENAI_API_KEY:
+
     OPENAI_API_KEY = os.getenv(
-        "OPENAI_API_KEY"
+        "OPENAI_API_KEY",
+        ""
     )
 
-if (
-    OPENAI_API_KEY
-    and OpenAI is not None
-):
+
+if OpenAI is not None and OPENAI_API_KEY:
 
     client = OpenAI(
         api_key=OPENAI_API_KEY
@@ -165,7 +72,99 @@ else:
 
 
 # ============================================================
-# APP TITLE
+# MOBILE RESPONSIVE CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    /* ======================================================
+       DESKTOP
+       ====================================================== */
+
+    .block-container {
+        padding-top: 1rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+
+
+    /* ======================================================
+       MOBILE
+       ====================================================== */
+
+    @media only screen and (max-width: 768px) {
+
+        .block-container {
+            padding-top: 0.5rem;
+            padding-left: 0.7rem;
+            padding-right: 0.7rem;
+        }
+
+        /* Headings */
+
+        h1 {
+            font-size: 1.6rem !important;
+        }
+
+        h2 {
+            font-size: 1.3rem !important;
+        }
+
+        h3 {
+            font-size: 1.1rem !important;
+        }
+
+        /* Metrics */
+
+        [data-testid="stMetric"] {
+            padding: 0.4rem 0.2rem;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.15rem !important;
+        }
+
+        /* Buttons */
+
+        .stButton > button {
+            width: 100%;
+            min-height: 2.7rem;
+        }
+
+        /* Inputs */
+
+        input {
+            font-size: 16px !important;
+        }
+
+        /* Dataframes */
+
+        [data-testid="stDataFrame"] {
+            width: 100% !important;
+        }
+
+        /* Chat input */
+
+        [data-testid="stChatInput"] {
+            width: 100%;
+        }
+
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# APPLICATION HEADER
 # ============================================================
 
 st.title(
@@ -173,7 +172,7 @@ st.title(
 )
 
 st.caption(
-    "NSE Technical Analysis • Smart Scanner • AI Assistant"
+    "Technical charts • Smart NSE scanner • AI analysis"
 )
 
 
@@ -238,128 +237,77 @@ NIFTY50 = [
 
 
 # ============================================================
-# COMMON HTTP HEADERS
-# ============================================================
-
-NSE_HEADERS = {
-
-    "User-Agent":
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36",
-
-    "Accept":
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,text/csv;q=0.8,*/*;q=0.7",
-
-    "Accept-Language":
-        "en-US,en;q=0.9",
-
-    "Referer":
-        "https://www.nseindia.com/"
-
-}
-
-
-# ============================================================
-# GENERIC CSV LOADER
-# ============================================================
-
-def download_csv(
-    url,
-    headers=None,
-    timeout=30
-):
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=timeout
-        )
-
-        if response.status_code != 200:
-            return None
-
-        if not response.text.strip():
-            return None
-
-        return pd.read_csv(
-            StringIO(response.text)
-        )
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# FULL NSE EQUITY LIST
+# LOAD FULL NSE EQUITY UNIVERSE
 # ============================================================
 
 @st.cache_data(
     ttl=86400,
     show_spinner=False
 )
-def load_full_nse():
+def load_nse_equity_universe():
 
-    urls = [
-
-        # Current NSE equity securities file
+    url = (
         "https://nsearchives.nseindia.com/"
-        "content/equities/EQUITY_L.csv",
-
-        # Archive fallback
-        "https://archives.nseindia.com/"
         "content/equities/EQUITY_L.csv"
+    )
 
-    ]
+    headers = {
 
-    for url in urls:
+        "User-Agent":
+            (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            ),
 
-        df = download_csv(
+        "Accept":
+            "text/csv,*/*",
+
+        "Referer":
+            "https://www.nseindia.com/"
+
+    }
+
+    try:
+
+        response = requests.get(
             url,
-            NSE_HEADERS
+            headers=headers,
+            timeout=30
         )
 
-        if df is None:
-            continue
+        response.raise_for_status()
+
+        df = pd.read_csv(
+            StringIO(
+                response.text
+            )
+        )
 
         df.columns = [
-            str(c).strip().upper()
-            for c in df.columns
+
+            str(column)
+            .strip()
+            .upper()
+
+            for column in df.columns
+
         ]
 
         if "SYMBOL" not in df.columns:
-            continue
+
+            return []
 
         symbols = (
+
             df["SYMBOL"]
             .astype(str)
             .str.strip()
             .str.upper()
+
         )
-
-        # Equity series only where available
-        if "SERIES" in df.columns:
-
-            series = (
-                df["SERIES"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-
-            eq_symbols = symbols[
-                series == "EQ"
-            ]
-
-            if len(eq_symbols) > 1000:
-
-                symbols = eq_symbols
 
         symbols = symbols[
             ~symbols.isin(
@@ -377,15 +325,15 @@ def load_full_nse():
             .tolist()
         )
 
-        if len(symbols) > 1000:
+        return symbols
 
-            return symbols
+    except Exception:
 
-    return []
+        return []
 
 
 # ============================================================
-# NIFTY 500
+# LOAD NIFTY 500
 # ============================================================
 
 @st.cache_data(
@@ -396,193 +344,421 @@ def load_nifty500():
 
     urls = [
 
-        "https://nsearchives.nseindia.com/"
-        "content/indices/ind_nifty500list.csv",
+        (
+            "https://nsearchives.nseindia.com/"
+            "content/indices/ind_nifty500list.csv"
+        ),
 
-        "https://archives.nseindia.com/"
-        "content/indices/ind_nifty500list.csv",
-
-        "https://www.niftyindices.com/"
-        "IndexConstituent/ind_nifty500list.csv"
+        (
+            "https://www.niftyindices.com/"
+            "IndexConstituent/ind_nifty500list.csv"
+        )
 
     ]
 
+    headers = {
+        "User-Agent":
+            "Mozilla/5.0"
+    }
+
     for url in urls:
 
-        headers = dict(
-            NSE_HEADERS
-        )
+        try:
 
-        headers[
-            "Referer"
-        ] = (
-            "https://www.niftyindices.com/"
-        )
-
-        df = download_csv(
-            url,
-            headers
-        )
-
-        if df is None:
-            continue
-
-        df.columns = [
-            str(c).strip().upper()
-            for c in df.columns
-        ]
-
-        if "SYMBOL" not in df.columns:
-            continue
-
-        symbols = (
-            df["SYMBOL"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        symbols = symbols[
-            ~symbols.isin(
-                [
-                    "",
-                    "NAN",
-                    "NONE"
-                ]
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=30
             )
-        ]
 
-        symbols = sorted(
-            symbols
-            .drop_duplicates()
-            .tolist()
-        )
+            if response.status_code != 200:
 
-        if len(symbols) >= 450:
+                continue
 
-            return symbols
+            df = pd.read_csv(
+                StringIO(
+                    response.text
+                )
+            )
+
+            df.columns = [
+
+                str(column)
+                .strip()
+                .upper()
+
+                for column in df.columns
+
+            ]
+
+            if "SYMBOL" not in df.columns:
+
+                continue
+
+            symbols = (
+
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+
+            )
+
+            symbols = symbols[
+                ~symbols.isin(
+                    [
+                        "",
+                        "NAN",
+                        "NONE"
+                    ]
+                )
+            ]
+
+            if len(symbols) >= 400:
+
+                return sorted(
+                    symbols
+                    .drop_duplicates()
+                    .tolist()
+                )
+
+        except Exception:
+
+            continue
 
     return []
 
 
 # ============================================================
-# MARKET DATA
+# DOWNLOAD MARKET DATA
 # ============================================================
 
 @st.cache_data(
-    ttl=600,
+    ttl=300,
     show_spinner=False
 )
-def get_stock_data(
-    symbol,
-    period="1y"
+def download_batches(
+    tickers,
+    period="1y",
+    batch_size=50
 ):
 
-    ticker = (
-        symbol.upper().strip()
-        + ".NS"
+    all_data = {}
+
+    ticker_list = list(
+        dict.fromkeys(
+            tickers
+        )
     )
 
-    try:
+    for start in range(
+        0,
+        len(ticker_list),
+        batch_size
+    ):
 
-        data = yf.download(
-            ticker,
-            period=period,
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False
-        )
-
-        if data is None:
-            return pd.DataFrame()
-
-        if data.empty:
-            return pd.DataFrame()
-
-        # Handle MultiIndex
-        if isinstance(
-            data.columns,
-            pd.MultiIndex
-        ):
-
-            data.columns = [
-                column[0]
-                for column
-                in data.columns
-            ]
-
-        data.columns = [
-            str(c).strip()
-            for c in data.columns
+        batch = ticker_list[
+            start:
+            start + batch_size
         ]
 
-        required = [
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
+        yahoo_tickers = [
+
+            symbol + ".NS"
+
+            for symbol in batch
+
         ]
 
-        missing = [
-            c
-            for c in required
-            if c not in data.columns
-        ]
+        try:
 
-        if missing:
+            data = yf.download(
 
-            return pd.DataFrame()
+                tickers=yahoo_tickers,
 
-        data = data[
-            required
-        ].copy()
+                period=period,
 
-        data = data.dropna(
-            subset=required
-        )
+                interval="1d",
 
-        return data
+                auto_adjust=False,
 
-    except Exception:
+                progress=False,
 
-        return pd.DataFrame()
+                threads=True,
+
+                group_by="ticker"
+
+            )
+
+            if data is None:
+
+                continue
+
+            if data.empty:
+
+                continue
 
 
-# ============================================================
-# BATCH DOWNLOAD
-# ============================================================
+            # =================================================
+            # SINGLE STOCK
+            # =================================================
 
-@st.cache_data(
-    ttl=600,
-    show_spinner=False
-)
-def get_batch_data(
-    symbols,
-    period="1y"
-):
+            if len(batch) == 1:
 
-    result = {}
+                symbol = batch[0]
 
-    symbols = list(
-        dict.fromkeys(symbols)
-    )
+                stock = data.copy()
 
-    for symbol in symbols:
 
-        data = get_stock_data(
-            symbol,
-            period
-        )
+                if isinstance(
+                    stock.columns,
+                    pd.MultiIndex
+                ):
 
-        if not data.empty:
+                    level0 = (
 
-            result[
-                symbol
-            ] = data
+                        stock.columns
+                        .get_level_values(0)
+                        .tolist()
 
-    return result
+                    )
+
+                    level1 = (
+
+                        stock.columns
+                        .get_level_values(1)
+                        .tolist()
+
+                    )
+
+
+                    if "Open" in level0:
+
+                        stock.columns = [
+
+                            col[0]
+
+                            for col in
+                            stock.columns
+
+                        ]
+
+
+                    elif "Open" in level1:
+
+                        stock.columns = [
+
+                            col[1]
+
+                            for col in
+                            stock.columns
+
+                        ]
+
+
+                else:
+
+                    stock.columns = [
+
+                        str(column)
+                        .strip()
+                        .title()
+
+                        for column in
+                        stock.columns
+
+                    ]
+
+
+                required = [
+
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume"
+
+                ]
+
+
+                if all(
+
+                    column in stock.columns
+
+                    for column in required
+
+                ):
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+
+                    if not stock.empty:
+
+                        all_data[
+                            symbol
+                        ] = stock
+
+
+                continue
+
+
+            # =================================================
+            # MULTIPLE STOCKS
+            # =================================================
+
+            if not isinstance(
+                data.columns,
+                pd.MultiIndex
+            ):
+
+                continue
+
+
+            level0 = (
+
+                data.columns
+                .get_level_values(0)
+                .unique()
+                .tolist()
+
+            )
+
+            level1 = (
+
+                data.columns
+                .get_level_values(1)
+                .unique()
+                .tolist()
+
+            )
+
+
+            for symbol in batch:
+
+                yahoo_symbol = (
+                    symbol + ".NS"
+                )
+
+                try:
+
+                    if (
+                        yahoo_symbol
+                        in level0
+                    ):
+
+                        stock = data[
+                            yahoo_symbol
+                        ].copy()
+
+
+                    elif (
+                        yahoo_symbol
+                        in level1
+                    ):
+
+                        stock = data[
+                            :,
+                            yahoo_symbol
+                        ].copy()
+
+
+                    else:
+
+                        continue
+
+
+                    if isinstance(
+                        stock.columns,
+                        pd.MultiIndex
+                    ):
+
+                        stock.columns = [
+
+                            col[0]
+                            if isinstance(
+                                col,
+                                tuple
+                            )
+                            else col
+
+                            for col in
+                            stock.columns
+
+                        ]
+
+
+                    stock.columns = [
+
+                        str(column)
+                        .strip()
+                        .title()
+
+                        for column in
+                        stock.columns
+
+                    ]
+
+
+                    required = [
+
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                        "Volume"
+
+                    ]
+
+
+                    if not all(
+
+                        column in
+                        stock.columns
+
+                        for column in
+                        required
+
+                    ):
+
+                        continue
+
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+
+                    if not stock.empty:
+
+                        all_data[
+                            symbol
+                        ] = stock
+
+
+                except Exception:
+
+                    continue
+
+
+        except Exception:
+
+            continue
+
+
+        time.sleep(0.2)
+
+
+    return all_data
 
 
 # ============================================================
@@ -595,180 +771,341 @@ def calculate_indicators(
 
     data = data.copy()
 
-    if data.empty:
-        return data
 
-    # --------------------------------------------------------
+    required = [
+
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+
+    ]
+
+
+    data = data.dropna(
+        subset=required
+    )
+
+
+    # ========================================================
     # SMA
-    # --------------------------------------------------------
+    # ========================================================
 
     data["SMA20"] = (
+
         data["Close"]
         .rolling(20)
         .mean()
+
     )
 
+
     data["SMA50"] = (
+
         data["Close"]
         .rolling(50)
         .mean()
+
     )
 
+
     data["SMA200"] = (
+
         data["Close"]
         .rolling(200)
         .mean()
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # RSI
-    # --------------------------------------------------------
+    # ========================================================
 
     delta = (
         data["Close"]
         .diff()
     )
 
+
     gain = delta.clip(
         lower=0
     )
+
 
     loss = -delta.clip(
         upper=0
     )
 
-    avg_gain = (
-        gain
-        .rolling(14)
-        .mean()
+
+    avg_gain = gain.rolling(
+        14
+    ).mean()
+
+
+    avg_loss = loss.rolling(
+        14
+    ).mean()
+
+
+    avg_loss = avg_loss.replace(
+        0,
+        np.nan
     )
 
-    avg_loss = (
-        loss
-        .rolling(14)
-        .mean()
-    )
 
     rs = (
-        avg_gain
-        /
-        avg_loss.replace(
-            0,
-            np.nan
-        )
+        avg_gain /
+        avg_loss
     )
+
 
     data["RSI14"] = (
-        100
-        -
+
+        100 -
         (
-            100
-            /
+            100 /
             (1 + rs)
         )
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # MACD
-    # --------------------------------------------------------
+    # ========================================================
 
     ema12 = (
+
         data["Close"]
         .ewm(
             span=12,
             adjust=False
         )
         .mean()
+
     )
 
+
     ema26 = (
+
         data["Close"]
         .ewm(
             span=26,
             adjust=False
         )
         .mean()
+
     )
+
 
     data["MACD"] = (
-        ema12
-        -
-        ema26
+        ema12 - ema26
     )
 
+
     data["MACD_SIGNAL"] = (
+
         data["MACD"]
         .ewm(
             span=9,
             adjust=False
         )
         .mean()
+
     )
 
+
     data["MACD_HIST"] = (
+
         data["MACD"]
         -
         data["MACD_SIGNAL"]
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # VOLUME
-    # --------------------------------------------------------
+    # ========================================================
 
     data["AVG_VOLUME20"] = (
+
         data["Volume"]
         .rolling(20)
         .mean()
+
     )
 
+
     data["VOLUME_RATIO"] = (
+
         data["Volume"]
         /
         data["AVG_VOLUME20"]
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # TURNOVER
-    # --------------------------------------------------------
+    # ========================================================
 
     data["TURNOVER"] = (
+
         data["Close"]
         *
         data["Volume"]
+
     )
 
+
     data["AVG_TURNOVER20"] = (
+
         data["TURNOVER"]
         .rolling(20)
         .mean()
+
     )
 
-    # --------------------------------------------------------
-    # DONCHIAN
-    # --------------------------------------------------------
+
+    # ========================================================
+    # DONCHIAN CHANNEL
+    # ========================================================
 
     data["DONCHIAN_UPPER"] = (
+
         data["High"]
         .shift(1)
         .rolling(3)
         .max()
+
     )
 
+
     data["DONCHIAN_LOWER"] = (
+
         data["Low"]
         .shift(1)
         .rolling(3)
         .min()
+
     )
+
 
     return data
 
 
 # ============================================================
-# BREAKOUT ANALYSIS
+# STAGE 1 FILTER
 # ============================================================
 
-def analyze_stock(
+def stage_one_filter(
+    data,
+    min_price,
+    min_volume,
+    min_turnover
+):
+
+    if len(data) < 210:
+
+        return False
+
+
+    latest = data.iloc[-1]
+
+
+    values = [
+
+        latest["Close"],
+        latest["SMA200"],
+        latest["AVG_VOLUME20"],
+        latest["AVG_TURNOVER20"]
+
+    ]
+
+
+    if any(
+
+        pd.isna(value)
+
+        for value in values
+
+    ):
+
+        return False
+
+
+    # Price
+
+    if (
+
+        latest["Close"]
+        <
+        min_price
+
+    ):
+
+        return False
+
+
+    # Volume
+
+    if (
+
+        latest["AVG_VOLUME20"]
+        <
+        min_volume
+
+    ):
+
+        return False
+
+
+    # Turnover
+
+    turnover_crore = (
+
+        latest["AVG_TURNOVER20"]
+        /
+        10000000
+
+    )
+
+
+    if (
+
+        turnover_crore
+        <
+        min_turnover
+
+    ):
+
+        return False
+
+
+    # 200 SMA trend
+
+    if (
+
+        latest["Close"]
+        <=
+        latest["SMA200"]
+
+    ):
+
+        return False
+
+
+    return True
+
+
+# ============================================================
+# STAGE 2 TECHNICAL ANALYSIS
+# ============================================================
+
+def stage_two_analysis(
     data
 ):
 
@@ -776,137 +1113,157 @@ def analyze_stock(
 
         return None
 
+
     latest = data.iloc[-1]
 
     previous = data.iloc[-2]
 
     n_minus_2 = data.iloc[-3]
 
-    values = [
 
-        latest["Close"],
-        latest["SMA200"],
-        latest["RSI14"],
-        latest["VOLUME_RATIO"],
-        latest["DONCHIAN_UPPER"],
-        latest["DONCHIAN_LOWER"]
+    # ========================================================
+    # FIVE CORE CONDITIONS
+    # ========================================================
 
-    ]
+    condition_1 = (
 
-    if any(
-        pd.isna(v)
-        for v in values
-    ):
-
-        return None
-
-    # --------------------------------------------------------
-    # C1
-    # --------------------------------------------------------
-
-    c1 = (
         latest["Close"]
         >
         previous["High"]
+
     )
 
-    # --------------------------------------------------------
-    # C2
-    # --------------------------------------------------------
 
-    c2 = (
+    condition_2 = (
+
         previous["High"]
         <
         n_minus_2["High"]
+
     )
 
-    # --------------------------------------------------------
-    # C3
-    # --------------------------------------------------------
 
-    c3 = (
+    condition_3 = (
+
         latest["Close"]
         <
         latest["DONCHIAN_UPPER"]
+
     )
 
-    # --------------------------------------------------------
-    # C4
-    # --------------------------------------------------------
 
-    c4 = (
+    condition_4 = (
+
         latest["Low"]
         >
         latest["DONCHIAN_LOWER"]
+
     )
 
-    # --------------------------------------------------------
-    # C5
-    # --------------------------------------------------------
 
-    c5 = (
+    condition_5 = (
+
         latest["Close"]
         >
         latest["SMA200"]
+
     )
 
-    # --------------------------------------------------------
-    # Confirmations
-    # --------------------------------------------------------
+
+    # ========================================================
+    # CONFIRMATIONS
+    # ========================================================
 
     volume_confirm = (
+
         latest["VOLUME_RATIO"]
-        >= 1.5
+        >=
+        1.5
+
     )
+
 
     rsi_confirm = (
+
         latest["RSI14"]
-        > 50
+        >
+        50
+
     )
 
+
     macd_confirm = (
+
         latest["MACD"]
         >
         latest["MACD_SIGNAL"]
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # SCORE
-    # --------------------------------------------------------
+    # ========================================================
 
     score = 0
 
-    if c1:
+
+    if condition_1:
+
         score += 2
 
-    if c2:
+
+    if condition_2:
+
         score += 1
 
-    if c3:
+
+    if condition_3:
+
         score += 1
 
-    if c4:
+
+    if condition_4:
+
         score += 1
 
-    if c5:
+
+    if condition_5:
+
         score += 2
+
 
     if volume_confirm:
+
         score += 1
+
 
     if rsi_confirm:
+
         score += 1
 
+
     if macd_confirm:
+
         score += 1
+
 
     return {
 
-        "C1": c1,
-        "C2": c2,
-        "C3": c3,
-        "C4": c4,
-        "C5": c5,
+        "C1":
+            condition_1,
+
+        "C2":
+            condition_2,
+
+        "C3":
+            condition_3,
+
+        "C4":
+            condition_4,
+
+        "C5":
+            condition_5,
 
         "Volume Confirm":
             volume_confirm,
@@ -921,202 +1278,60 @@ def analyze_stock(
             score,
 
         "Close":
-            float(
-                latest["Close"]
-            ),
-
-        "SMA20":
-            float(
-                latest["SMA20"]
-            ),
-
-        "SMA50":
-            float(
-                latest["SMA50"]
-            ),
+            latest["Close"],
 
         "SMA200":
-            float(
-                latest["SMA200"]
-            ),
+            latest["SMA200"],
 
         "RSI":
-            float(
-                latest["RSI14"]
-            ),
+            latest["RSI14"],
 
         "MACD":
-            float(
-                latest["MACD"]
-            ),
+            latest["MACD"],
 
         "MACD Signal":
-            float(
-                latest["MACD_SIGNAL"]
-            ),
+            latest["MACD_SIGNAL"],
 
         "Volume Ratio":
-            float(
-                latest["VOLUME_RATIO"]
+            latest["VOLUME_RATIO"],
+
+        "Turnover":
+            (
+                latest["AVG_TURNOVER20"]
+                /
+                10000000
             ),
 
         "Donchian Upper":
-            float(
-                latest["DONCHIAN_UPPER"]
-            ),
+            latest["DONCHIAN_UPPER"],
 
         "Donchian Lower":
-            float(
-                latest["DONCHIAN_LOWER"]
-            )
+            latest["DONCHIAN_LOWER"]
 
     }
 
 
 # ============================================================
-# TECHNICAL CHART FUNCTION
-# ============================================================
-
-def create_chart(
-    data,
-    symbol
-):
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Candlestick(
-
-            x=data.index,
-
-            open=data["Open"],
-
-            high=data["High"],
-
-            low=data["Low"],
-
-            close=data["Close"],
-
-            name=symbol
-
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-
-            x=data.index,
-
-            y=data["SMA20"],
-
-            mode="lines",
-
-            name="SMA 20"
-
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-
-            x=data.index,
-
-            y=data["SMA50"],
-
-            mode="lines",
-
-            name="SMA 50"
-
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-
-            x=data.index,
-
-            y=data["SMA200"],
-
-            mode="lines",
-
-            name="SMA 200"
-
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-
-            x=data.index,
-
-            y=data[
-                "DONCHIAN_UPPER"
-            ],
-
-            mode="lines",
-
-            name="Donchian Upper"
-
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-
-            x=data.index,
-
-            y=data[
-                "DONCHIAN_LOWER"
-            ],
-
-            mode="lines",
-
-            name="Donchian Lower"
-
-        )
-    )
-
-    fig.update_layout(
-
-        title=(
-            f"{symbol} — "
-            "Technical Analysis"
-        ),
-
-        height=600,
-
-        xaxis_rangeslider_visible=False,
-
-        hovermode="x unified",
-
-        margin=dict(
-            l=10,
-            r=10,
-            t=50,
-            b=10
-        )
-
-    )
-
-    return fig
-
-
-# ============================================================
-# SIDEBAR
+# SIDEBAR NAVIGATION
 # ============================================================
 
 st.sidebar.title(
     "⚙️ Control Panel"
 )
 
+
 module = st.sidebar.radio(
 
     "Select Module",
 
     [
+
         "📊 Technical Chart",
-        "🚀 Smart Scanner",
-        "🤖 AI Assistant"
+
+        "🚀 Smart Breakout Scanner",
+
+        "🤖 AI Analyst"
+
     ]
 
 )
@@ -1132,377 +1347,695 @@ if module == "📊 Technical Chart":
         "📊 Technical Chart"
     )
 
-    symbol = st.sidebar.text_input(
-        "NSE Symbol",
-        value="RELIANCE"
+
+    st.write(
+        "Enter any NSE-listed stock symbol."
     )
 
+
+    symbol = st.sidebar.text_input(
+
+        "NSE Symbol",
+
+        value="RELIANCE"
+
+    )
+
+
     symbol = (
+
         symbol
         .strip()
         .upper()
+
     )
+
 
     period = st.sidebar.selectbox(
 
         "Chart Period",
 
         [
-            "3mo",
+
             "6mo",
             "1y",
             "2y",
             "5y"
+
         ],
 
-        index=2
+        index=1
 
     )
 
+
     if st.sidebar.button(
+
         "📈 Load Chart",
+
         type="primary"
+
     ):
 
         with st.spinner(
+
             f"Loading {symbol}..."
+
         ):
 
-            data = get_stock_data(
-                symbol,
-                period
+            market = download_batches(
+
+                [symbol],
+
+                period,
+
+                1
+
             )
+
+
+        if symbol not in market:
+
+            st.error(
+
+                f"""
+                Could not retrieve market data for
+                **{symbol}.NS**.
+
+                Check that the NSE symbol is correct
+                and try again.
+                """
+
+            )
+
+            st.stop()
+
+
+        data = market[
+            symbol
+        ].copy()
+
+
+        data = calculate_indicators(
+            data
+        )
+
 
         if data.empty:
 
             st.error(
-                f"""
-                Could not retrieve data for
-                **{symbol}.NS**
-
-                Please check the NSE symbol.
-                """
+                "No usable market data found."
             )
 
-        else:
+            st.stop()
 
-            data = calculate_indicators(
-                data
+
+        # ====================================================
+        # CANDLESTICK CHART
+        # ====================================================
+
+        fig = go.Figure()
+
+
+        fig.add_trace(
+
+            go.Candlestick(
+
+                x=data.index,
+
+                open=data["Open"],
+
+                high=data["High"],
+
+                low=data["Low"],
+
+                close=data["Close"],
+
+                name=symbol
+
             )
 
-            fig = create_chart(
-                data,
-                symbol
+        )
+
+
+        # SMA 20
+
+        fig.add_trace(
+
+            go.Scatter(
+
+                x=data.index,
+
+                y=data["SMA20"],
+
+                mode="lines",
+
+                name="SMA 20"
+
             )
 
-            st.plotly_chart(
-                fig,
-                width="stretch"
+        )
+
+
+        # SMA 50
+
+        fig.add_trace(
+
+            go.Scatter(
+
+                x=data.index,
+
+                y=data["SMA50"],
+
+                mode="lines",
+
+                name="SMA 50"
+
             )
 
-            latest = data.iloc[-1]
+        )
 
-            # Desktop/mobile metrics
-            c1, c2, c3, c4, c5 = (
-                st.columns(5)
+
+        # SMA 200
+
+        fig.add_trace(
+
+            go.Scatter(
+
+                x=data.index,
+
+                y=data["SMA200"],
+
+                mode="lines",
+
+                name="SMA 200"
+
             )
 
-            c1.metric(
-                "Close",
-                f"₹{latest['Close']:.2f}"
+        )
+
+
+        # Donchian Upper
+
+        fig.add_trace(
+
+            go.Scatter(
+
+                x=data.index,
+
+                y=data[
+                    "DONCHIAN_UPPER"
+                ],
+
+                mode="lines",
+
+                name="Donchian Upper"
+
             )
 
-            c2.metric(
-                "SMA 20",
-                f"₹{latest['SMA20']:.2f}"
+        )
+
+
+        # Donchian Lower
+
+        fig.add_trace(
+
+            go.Scatter(
+
+                x=data.index,
+
+                y=data[
+                    "DONCHIAN_LOWER"
+                ],
+
+                mode="lines",
+
+                name="Donchian Lower"
+
             )
 
-            c3.metric(
-                "SMA 50",
-                f"₹{latest['SMA50']:.2f}"
+        )
+
+
+        fig.update_layout(
+
+            title=(
+                f"{symbol} — Technical Analysis"
+            ),
+
+            height=650,
+
+            xaxis_rangeslider_visible=False,
+
+            hovermode="x unified",
+
+            margin=dict(
+
+                l=10,
+
+                r=10,
+
+                t=50,
+
+                b=10
+
             )
 
-            c4.metric(
-                "SMA 200",
-                f"₹{latest['SMA200']:.2f}"
+        )
+
+
+        st.plotly_chart(
+
+            fig,
+
+            width="stretch"
+
+        )
+
+
+        # ====================================================
+        # CURRENT VALUES
+        # ====================================================
+
+        latest = data.iloc[-1]
+
+
+        col1, col2, col3, col4, col5 = (
+            st.columns(5)
+        )
+
+
+        col1.metric(
+
+            "Close",
+
+            f"₹{latest['Close']:.2f}"
+
+        )
+
+
+        col2.metric(
+
+            "SMA 20",
+
+            f"₹{latest['SMA20']:.2f}"
+
+        )
+
+
+        col3.metric(
+
+            "SMA 50",
+
+            f"₹{latest['SMA50']:.2f}"
+
+        )
+
+
+        col4.metric(
+
+            "SMA 200",
+
+            f"₹{latest['SMA200']:.2f}"
+
+        )
+
+
+        col5.metric(
+
+            "RSI",
+
+            f"{latest['RSI14']:.1f}"
+
+        )
+
+
+        # ====================================================
+        # TECHNICAL SETUP
+        # ====================================================
+
+        analysis = stage_two_analysis(
+            data
+        )
+
+
+        if analysis:
+
+            st.subheader(
+                "Technical Setup"
             )
 
-            c5.metric(
-                "RSI",
-                f"{latest['RSI14']:.1f}"
-            )
 
-            analysis = analyze_stock(
-                data
-            )
+            if analysis["Score"] >= 8:
 
-            if analysis:
+                st.success(
 
-                score = analysis[
-                    "Score"
-                ]
+                    f"🔥 Strong technical setup — "
+                    f"Score {analysis['Score']}/10"
 
-                if score >= 8:
+                )
 
-                    st.success(
-                        f"🔥 Strong setup — "
-                        f"Technical Score "
-                        f"{score}/10"
-                    )
 
-                elif score >= 5:
+            elif analysis["Score"] >= 5:
 
-                    st.warning(
-                        f"⚠️ Moderate setup — "
-                        f"Technical Score "
-                        f"{score}/10"
-                    )
+                st.warning(
 
-                else:
+                    f"⚠️ Moderate technical setup — "
+                    f"Score {analysis['Score']}/10"
 
-                    st.info(
-                        f"Technical Score "
-                        f"{score}/10"
-                    )
+                )
+
+
+            else:
+
+                st.info(
+
+                    f"Technical setup score: "
+                    f"{analysis['Score']}/10"
+
+                )
 
 
 # ============================================================
-# SMART SCANNER
+# SMART BREAKOUT SCANNER
 # ============================================================
 
-elif module == "🚀 Smart Scanner":
+elif module == "🚀 Smart Breakout Scanner":
 
     st.header(
-        "🚀 Smart NSE Breakout Scanner"
+        "🚀 Smart Two-Stage Breakout Scanner"
     )
+
 
     st.write(
+
         """
-        Two-stage technical scanner for
-        Nifty 50, Nifty 500 and Full NSE.
+        **Stage 1:** Liquidity + price + 200 SMA filter
+
+        **Stage 2:** Early breakout + Donchian +
+        RSI + MACD + volume analysis
         """
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # LOAD UNIVERSES
-    # --------------------------------------------------------
+    # ========================================================
 
     with st.spinner(
-        "Loading NSE universes..."
+        "Loading NSE stock universe..."
     ):
 
-        nifty500 = load_nifty500()
+        nse_stocks = (
+            load_nse_equity_universe()
+        )
 
-        full_nse = load_full_nse()
+        nifty500 = (
+            load_nifty500()
+        )
 
-    # --------------------------------------------------------
-    # UNIVERSE
-    # --------------------------------------------------------
+
+    # ========================================================
+    # UNIVERSE SELECTOR
+    # ========================================================
+
+    st.sidebar.subheader(
+        "Stock Universe"
+    )
+
 
     universe = st.sidebar.selectbox(
 
-        "Stock Universe",
+        "Select Universe",
 
         [
+
             "Nifty 50",
+
             "Nifty 500",
+
             "Full NSE"
+
         ]
 
     )
+
 
     if universe == "Nifty 50":
 
         stocks = NIFTY50
 
+
     elif universe == "Nifty 500":
 
         stocks = nifty500
 
+
+    elif universe == "Full NSE":
+
+        stocks = nse_stocks
+
+
     else:
 
-        stocks = full_nse
+        stocks = []
 
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
 
-    st.sidebar.markdown(
-        "---"
-    )
+    if (
 
-    st.sidebar.write(
-        f"🟢 Nifty 50: "
-        f"**{len(NIFTY50)}**"
-    )
+        universe == "Nifty 500"
 
-    st.sidebar.write(
-        f"🔵 Nifty 500: "
-        f"**{len(nifty500)}**"
-    )
+        and not stocks
 
-    st.sidebar.write(
-        f"🟣 Full NSE: "
-        f"**{len(full_nse)}**"
-    )
-
-    if len(stocks) == 0:
+    ):
 
         st.error(
-            f"""
-            The **{universe}** universe
-            could not be loaded.
 
-            Try again after refreshing
-            the Streamlit application.
             """
+            Nifty 500 list could not be loaded.
+
+            Please select Nifty 50 or try again later.
+            """
+
         )
 
         st.stop()
 
+
+    if (
+
+        universe == "Full NSE"
+
+        and not stocks
+
+    ):
+
+        st.error(
+
+            """
+            Full NSE equity list could not be loaded.
+
+            The NSE data server may temporarily reject
+            automated requests.
+
+            Please try again later.
+            """
+
+        )
+
+        st.stop()
+
+
     st.info(
-        f"Selected universe: "
-        f"**{universe}** — "
-        f"**{len(stocks)} stocks**"
+
+        f"Universe: **{universe}** | "
+        f"Stocks: **{len(stocks)}**"
+
     )
 
-    # --------------------------------------------------------
-    # FILTERS
-    # --------------------------------------------------------
+
+    # ========================================================
+    # STAGE 1 SETTINGS
+    # ========================================================
 
     st.sidebar.subheader(
-        "Stage 1 Filters"
+        "Stage 1 — Liquidity"
     )
+
 
     min_price = st.sidebar.number_input(
+
         "Minimum Price ₹",
+
         min_value=0.0,
+
         value=20.0,
+
         step=5.0
+
     )
+
 
     min_volume = st.sidebar.number_input(
+
         "Minimum Avg Volume",
+
         min_value=0,
+
         value=100000,
+
         step=50000
+
     )
+
 
     min_turnover = st.sidebar.number_input(
+
         "Minimum Avg Turnover ₹ Cr",
+
         min_value=0.0,
+
         value=1.0,
+
         step=0.5
+
     )
+
+
+    # ========================================================
+    # STAGE 2 SETTINGS
+    # ========================================================
 
     st.sidebar.subheader(
-        "Stage 2 Filters"
+        "Stage 2 — Technical"
     )
+
 
     min_score = st.sidebar.slider(
+
         "Minimum Technical Score",
-        0,
-        10,
-        5
+
+        min_value=0,
+
+        max_value=10,
+
+        value=5
+
     )
+
 
     require_volume = st.sidebar.checkbox(
+
         "Require Volume Confirmation",
-        False
+
+        value=False
+
     )
+
 
     require_rsi = st.sidebar.checkbox(
+
         "Require RSI > 50",
-        False
+
+        value=False
+
     )
+
 
     require_macd = st.sidebar.checkbox(
+
         "Require MACD > Signal",
-        False
-    )
 
-    # IMPORTANT:
-    # Full NSE can contain thousands of securities.
-    # Limiting scan size protects Yahoo Finance
-    # and Streamlit Cloud from excessive requests.
-
-    max_scan = st.sidebar.selectbox(
-
-        "Maximum stocks to scan",
-
-        [
-            50,
-            100,
-            250,
-            500,
-            1000,
-            "All"
-        ],
-
-        index=3
+        value=False
 
     )
 
-    if max_scan != "All":
 
-        scan_stocks = stocks[
-            :int(max_scan)
-        ]
+    batch_size = st.sidebar.slider(
 
-    else:
+        "Download Batch Size",
 
-        scan_stocks = stocks
+        min_value=25,
 
-    st.sidebar.info(
-        f"Scanner will process "
-        f"**{len(scan_stocks)} stocks**"
+        max_value=100,
+
+        value=50,
+
+        step=25
+
     )
 
-    # --------------------------------------------------------
-    # RUN
-    # --------------------------------------------------------
+
+    # ========================================================
+    # RUN BUTTON
+    # ========================================================
 
     run_scanner = st.sidebar.button(
-        "🚀 RUN SCANNER",
+
+        "🚀 RUN SMART SCANNER",
+
         type="primary"
+
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # CONDITIONS
-    # --------------------------------------------------------
+    # ========================================================
 
     with st.expander(
-        "📋 Scanner Conditions"
+
+        "📋 View Scanner Conditions"
+
     ):
 
         st.markdown(
+
             """
-### C1
-Recent Close > Previous Day High
+### Core Conditions
 
-### C2
-Previous Day High < High of N-2
+**C1:** Recent Close > Previous Day High
 
-### C3
-Recent Close < 3-Day Donchian Upper
+**C2:** Previous Day High < High of N-2
 
-### C4
-Recent Low > 3-Day Donchian Lower
+**C3:** Recent Close < 3-Day Donchian Upper
 
-### C5
-Recent Close > 200 SMA
+**C4:** Recent Low > 3-Day Donchian Lower
+
+**C5:** Recent Close > 200 SMA
 
 ### Confirmations
 
-Volume ≥ 1.5 × 20-day average
+**Volume:** Current Volume ≥ 1.5 × 20-day average
 
-RSI > 50
+**RSI:** RSI > 50
 
-MACD > Signal
+**MACD:** MACD > Signal
 
-Maximum technical score = 10
+### Score
+
+C1 = 2 points
+
+C2 = 1 point
+
+C3 = 1 point
+
+C4 = 1 point
+
+C5 = 2 points
+
+Volume = 1 point
+
+RSI = 1 point
+
+MACD = 1 point
+
+**Maximum = 10 points**
             """
+
         )
+
 
     # ========================================================
     # RUN SCANNER
@@ -1510,129 +2043,276 @@ Maximum technical score = 10
 
     if run_scanner:
 
+        if not stocks:
+
+            st.error(
+                "No stocks available to scan."
+            )
+
+            st.stop()
+
+
+        # ====================================================
+        # DOWNLOAD
+        # ====================================================
+
         progress = st.progress(
+
             0,
-            text="Starting scanner..."
+
+            text="Downloading market data..."
+
         )
+
+
+        market = download_batches(
+
+            stocks,
+
+            "1y",
+
+            batch_size
+
+        )
+
+
+        progress.progress(
+
+            35,
+
+            text="Applying Stage 1 filters..."
+
+        )
+
+
+        stage1_stocks = []
+
+
+        processed = 0
+
+        total = len(market)
+
+
+        # ====================================================
+        # STAGE 1
+        # ====================================================
+
+        for symbol, raw_data in market.items():
+
+            try:
+
+                data = calculate_indicators(
+                    raw_data
+                )
+
+
+                if stage_one_filter(
+
+                    data,
+
+                    min_price,
+
+                    min_volume,
+
+                    min_turnover
+
+                ):
+
+                    stage1_stocks.append(
+                        symbol
+                    )
+
+
+            except Exception:
+
+                pass
+
+
+            processed += 1
+
+
+            if total > 0:
+
+                progress.progress(
+
+                    35 +
+
+                    int(
+
+                        25 *
+                        processed /
+                        total
+
+                    ),
+
+                    text=(
+
+                        f"Stage 1: "
+                        f"{processed}/{total}"
+
+                    )
+
+                )
+
+
+        # ====================================================
+        # STAGE 1 SUMMARY
+        # ====================================================
+
+        st.subheader(
+            "🔎 Stage 1 Results"
+        )
+
+
+        c1, c2, c3 = st.columns(3)
+
+
+        c1.metric(
+
+            "Universe",
+
+            len(stocks)
+
+        )
+
+
+        c2.metric(
+
+            "Data Retrieved",
+
+            len(market)
+
+        )
+
+
+        c3.metric(
+
+            "Stage 1 Survivors",
+
+            len(stage1_stocks)
+
+        )
+
+
+        if not stage1_stocks:
+
+            progress.empty()
+
+
+            st.warning(
+
+                """
+                No stocks survived Stage 1.
+
+                Try lowering:
+
+                • Minimum price
+
+                • Minimum average volume
+
+                • Minimum turnover
+                """
+
+            )
+
+            st.stop()
+
+
+        # ====================================================
+        # STAGE 2
+        # ====================================================
+
+        progress.progress(
+
+            65,
+
+            text="Running Stage 2 technical analysis..."
+
+        )
+
 
         results = []
 
-        total = len(
-            scan_stocks
+
+        total_stage2 = len(
+            stage1_stocks
         )
 
+
         for i, symbol in enumerate(
-            scan_stocks
+            stage1_stocks
         ):
 
             try:
 
-                data = get_stock_data(
-                    symbol,
-                    "1y"
-                )
-
-                if data.empty:
-
-                    continue
-
                 data = calculate_indicators(
+
+                    market[symbol]
+
+                )
+
+
+                analysis = stage_two_analysis(
+
                     data
+
                 )
 
-                if len(data) < 210:
-
-                    continue
-
-                latest = data.iloc[-1]
-
-                # ------------------------------------------------
-                # STAGE 1
-                # ------------------------------------------------
-
-                if (
-                    latest["Close"]
-                    < min_price
-                ):
-
-                    continue
-
-                if (
-                    latest[
-                        "AVG_VOLUME20"
-                    ]
-                    < min_volume
-                ):
-
-                    continue
-
-                avg_turnover_cr = (
-                    latest[
-                        "AVG_TURNOVER20"
-                    ]
-                    /
-                    10000000
-                )
-
-                if (
-                    avg_turnover_cr
-                    < min_turnover
-                ):
-
-                    continue
-
-                if (
-                    latest["Close"]
-                    <= latest["SMA200"]
-                ):
-
-                    continue
-
-                # ------------------------------------------------
-                # STAGE 2
-                # ------------------------------------------------
-
-                analysis = analyze_stock(
-                    data
-                )
 
                 if analysis is None:
 
                     continue
 
+
                 if (
+
                     analysis["Score"]
-                    < min_score
+                    <
+                    min_score
+
                 ):
 
                     continue
 
+
                 if (
+
                     require_volume
+
                     and not analysis[
                         "Volume Confirm"
                     ]
+
                 ):
 
                     continue
 
+
                 if (
+
                     require_rsi
+
                     and not analysis[
                         "RSI Confirm"
                     ]
+
                 ):
 
                     continue
 
+
                 if (
+
                     require_macd
+
                     and not analysis[
                         "MACD Confirm"
                     ]
+
                 ):
 
                     continue
+
 
                 results.append(
 
@@ -1647,7 +2327,7 @@ Maximum technical score = 10
                                 2
                             ),
 
-                        "SMA200":
+                        "200 SMA":
                             round(
                                 analysis["SMA200"],
                                 2
@@ -1659,10 +2339,18 @@ Maximum technical score = 10
                                 1
                             ),
 
-                        "Volume":
+                        "Volume Ratio":
                             round(
                                 analysis[
                                     "Volume Ratio"
+                                ],
+                                2
+                            ),
+
+                        "Avg Turnover ₹Cr":
+                            round(
+                                analysis[
+                                    "Turnover"
                                 ],
                                 2
                             ),
@@ -1692,6 +2380,27 @@ Maximum technical score = 10
                             if analysis["C5"]
                             else "✗",
 
+                        "Volume":
+                            "✓"
+                            if analysis[
+                                "Volume Confirm"
+                            ]
+                            else "✗",
+
+                        "RSI Confirm":
+                            "✓"
+                            if analysis[
+                                "RSI Confirm"
+                            ]
+                            else "✗",
+
+                        "MACD Confirm":
+                            "✓"
+                            if analysis[
+                                "MACD Confirm"
+                            ]
+                            else "✗",
+
                         "Technical Score":
                             analysis["Score"]
 
@@ -1699,30 +2408,37 @@ Maximum technical score = 10
 
                 )
 
+
             except Exception:
 
-                continue
+                pass
+
 
             progress.progress(
 
+                65 +
+
                 int(
-                    (
-                        i + 1
-                    )
+
+                    35 *
+                    (i + 1)
                     /
-                    total
-                    *
-                    100
+                    total_stage2
+
                 ),
 
                 text=(
-                    f"Scanning "
-                    f"{i + 1}/{total}"
+
+                    f"Stage 2: "
+                    f"{i + 1}/{total_stage2}"
+
                 )
 
             )
 
+
         progress.empty()
+
 
         # ====================================================
         # RESULTS
@@ -1731,14 +2447,16 @@ Maximum technical score = 10
         if not results:
 
             st.warning(
-                """
-                No stocks passed the selected
-                conditions.
 
-                Try lowering the minimum score
-                or liquidity filters.
                 """
+                No stocks passed the Stage 2
+                technical conditions.
+
+                Try reducing the minimum score.
+                """
+
             )
+
 
         else:
 
@@ -1746,55 +2464,65 @@ Maximum technical score = 10
                 results
             )
 
+
             results_df = (
+
                 results_df
+
                 .sort_values(
+
                     "Technical Score",
+
                     ascending=False
+
                 )
+
                 .reset_index(
                     drop=True
                 )
+
             )
+
 
             st.success(
-                f"🎯 "
-                f"{len(results_df)} stocks "
-                f"passed the scanner."
+
+                f"🎯 {len(results_df)} "
+                f"stocks passed Stage 2."
+
             )
 
-            # ------------------------------------------------
-            # SELECT STOCK
-            # ------------------------------------------------
+
+            # =================================================
+            # TOP STOCKS
+            # =================================================
 
             st.subheader(
-                "🔍 Select Stock for Analysis"
-            )
 
-            selected_symbol = st.selectbox(
-
-                "Choose a scanned stock",
-
-                results_df[
-                    "Stock"
-                ].tolist()
+                "🏆 Top Early Breakout Candidates"
 
             )
 
-            # ------------------------------------------------
-            # DESKTOP TABLE
-            # ------------------------------------------------
 
-            st.subheader(
-                "🏆 Top Breakout Candidates"
-            )
+            top = results_df[
 
-            top = results_df.head(20)
+                [
 
-            st.markdown(
-                '<div class="desktop-only">',
-                unsafe_allow_html=True
-            )
+                    "Stock",
+
+                    "Close",
+
+                    "200 SMA",
+
+                    "RSI",
+
+                    "Volume Ratio",
+
+                    "Technical Score"
+
+                ]
+
+            ].head(20)
+
 
             st.dataframe(
 
@@ -1806,572 +2534,189 @@ Maximum technical score = 10
 
             )
 
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True
-            )
-
-            # ------------------------------------------------
-            # MOBILE CARDS
-            # ------------------------------------------------
-
-            st.markdown(
-                '<div class="mobile-only">',
-                unsafe_allow_html=True
-            )
-
-            for _, row in top.iterrows():
-
-                score = int(
-                    row[
-                        "Technical Score"
-                    ]
-                )
-
-                if score >= 8:
-
-                    badge = (
-                        "🔥 STRONG"
-                    )
-
-                elif score >= 6:
-
-                    badge = (
-                        "🟢 POSITIVE"
-                    )
-
-                else:
-
-                    badge = (
-                        "🟡 WATCH"
-                    )
-
-                st.markdown(
-
-                    f"""
-                    <div class="stock-card">
-
-                        <div class="stock-name">
-                            📈 {row['Stock']}
-                        </div>
-
-                        <div class="stock-score">
-                            {badge} —
-                            {score}/10
-                        </div>
-
-                        <div class="stock-line">
-                            <span>Close</span>
-                            <b>
-                                ₹{row['Close']:.2f}
-                            </b>
-                        </div>
-
-                        <div class="stock-line">
-                            <span>200 SMA</span>
-                            <b>
-                                ₹{row['SMA200']:.2f}
-                            </b>
-                        </div>
-
-                        <div class="stock-line">
-                            <span>RSI</span>
-                            <b>
-                                {row['RSI']:.1f}
-                            </b>
-                        </div>
-
-                        <div class="stock-line">
-                            <span>Volume</span>
-                            <b>
-                                {row['Volume']:.2f}x
-                            </b>
-                        </div>
-
-                    </div>
-                    """,
-
-                    unsafe_allow_html=True
-
-                )
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True
-            )
-
-            # =================================================
-            # SELECTED STOCK
-            # =================================================
-
-            selected_data = get_stock_data(
-                selected_symbol,
-                "1y"
-            )
-
-            if not selected_data.empty:
-
-                selected_data = (
-                    calculate_indicators(
-                        selected_data
-                    )
-                )
-
-                selected_analysis = (
-                    analyze_stock(
-                        selected_data
-                    )
-                )
-
-                if selected_analysis:
-
-                    st.divider()
-
-                    st.subheader(
-                        f"📊 {selected_symbol}"
-                    )
-
-                    latest = (
-                        selected_data.iloc[-1]
-                    )
-
-                    # -----------------------------------------
-                    # METRICS
-                    # -----------------------------------------
-
-                    a, b, c, d = (
-                        st.columns(4)
-                    )
-
-                    a.metric(
-                        "Close",
-                        f"₹{latest['Close']:.2f}"
-                    )
-
-                    b.metric(
-                        "RSI",
-                        f"{latest['RSI14']:.1f}"
-                    )
-
-                    c.metric(
-                        "Volume",
-                        f"{latest['VOLUME_RATIO']:.2f}x"
-                    )
-
-                    d.metric(
-                        "Score",
-                        f"{selected_analysis['Score']}/10"
-                    )
-
-                    # -----------------------------------------
-                    # CHART
-                    # -----------------------------------------
-
-                    selected_fig = (
-                        create_chart(
-                            selected_data,
-                            selected_symbol
-                        )
-                    )
-
-                    st.plotly_chart(
-                        selected_fig,
-                        width="stretch"
-                    )
-
-                    # -----------------------------------------
-                    # CONDITIONS
-                    # -----------------------------------------
-
-                    st.subheader(
-                        "🎯 Breakout Conditions"
-                    )
-
-                    conditions = pd.DataFrame(
-
-                        {
-
-                            "Condition": [
-
-                                "C1 Close > Previous High",
-
-                                "C2 Previous High < N-2 High",
-
-                                "C3 Close < Donchian Upper",
-
-                                "C4 Low > Donchian Lower",
-
-                                "C5 Close > 200 SMA",
-
-                                "Volume Confirmation",
-
-                                "RSI Confirmation",
-
-                                "MACD Confirmation"
-
-                            ],
-
-                            "Status": [
-
-                                "✓"
-                                if selected_analysis[
-                                    "C1"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "C2"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "C3"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "C4"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "C5"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "Volume Confirm"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "RSI Confirm"
-                                ]
-                                else "✗",
-
-                                "✓"
-                                if selected_analysis[
-                                    "MACD Confirm"
-                                ]
-                                else "✗"
-
-                            ]
-
-                        }
-
-                    )
-
-                    st.dataframe(
-                        conditions,
-                        width="stretch",
-                        hide_index=True
-                    )
-
-                    # -----------------------------------------
-                    # AI ANALYSIS
-                    # -----------------------------------------
-
-                    st.subheader(
-                        "🤖 AI Technical Analysis"
-                    )
-
-                    if st.button(
-                        "🤖 Analyse This Stock",
-                        type="primary"
-                    ):
-
-                        if client is None:
-
-                            st.error(
-                                """
-                                OpenAI API is not configured.
-
-                                Add your API key under:
-
-                                Streamlit Cloud →
-                                Settings →
-                                Secrets
-
-                                OPENAI_API_KEY = "your_key"
-                                """
-                            )
-
-                        else:
-
-                            prompt = f"""
-
-You are analysing the Indian NSE stock:
-
-{selected_symbol}
-
-Use ONLY the following calculated
-technical data.
-
-PRICE
------
-Close: ₹{selected_analysis['Close']:.2f}
-
-MOVING AVERAGES
---------------
-SMA20: ₹{selected_analysis['SMA20']:.2f}
-SMA50: ₹{selected_analysis['SMA50']:.2f}
-SMA200: ₹{selected_analysis['SMA200']:.2f}
-
-MOMENTUM
---------
-RSI: {selected_analysis['RSI']:.2f}
-
-MACD: {selected_analysis['MACD']:.4f}
-
-MACD Signal:
-{selected_analysis['MACD Signal']:.4f}
-
-VOLUME
-------
-Volume Ratio:
-{selected_analysis['Volume Ratio']:.2f}x
-
-DONCHIAN
---------
-Upper:
-₹{selected_analysis['Donchian Upper']:.2f}
-
-Lower:
-₹{selected_analysis['Donchian Lower']:.2f}
-
-BREAKOUT CONDITIONS
--------------------
-
-C1:
-{selected_analysis['C1']}
-
-C2:
-{selected_analysis['C2']}
-
-C3:
-{selected_analysis['C3']}
-
-C4:
-{selected_analysis['C4']}
-
-C5:
-{selected_analysis['C5']}
-
-Volume Confirmation:
-{selected_analysis['Volume Confirm']}
-
-RSI Confirmation:
-{selected_analysis['RSI Confirm']}
-
-MACD Confirmation:
-{selected_analysis['MACD Confirm']}
-
-Technical Score:
-{selected_analysis['Score']}/10
-
-
-Provide:
-
-1. Overall Technical View
-
-2. Trend Analysis
-
-3. Momentum Analysis
-
-4. Volume Analysis
-
-5. Breakout Structure
-
-6. Strengths
-
-7. Risks
-
-8. What to Monitor
-
-9. Overall Technical Score
-
-
-Do not invent any data.
-
-Do not guarantee future returns.
-
-Do not state that the stock will definitely
-rise or fall.
-
-Clearly distinguish technical evidence
-from prediction.
-
-This is educational technical analysis,
-not personalized financial advice.
-
-"""
-
-                            with st.spinner(
-                                "AI analysing..."
-                            ):
-
-                                try:
-
-                                    response = (
-                                        client.responses.create(
-
-                                            model=
-                                            "gpt-5.6-luna",
-
-                                            instructions="""
-
-You are an expert educational
-technical-analysis assistant.
-
-Use only supplied technical data.
-
-Never invent prices,
-indicator values or signals.
-
-Never guarantee returns.
-
-Explain the reasoning clearly.
-
-""",
-
-                                            input=prompt
-
-                                        )
-                                    )
-
-                                    st.markdown(
-                                        "### 🤖 AI Analysis"
-                                    )
-
-                                    st.write(
-                                        response.output_text
-                                    )
-
-                                except Exception as e:
-
-                                    error = str(e)
-
-                                    if "429" in error:
-
-                                        st.error(
-                                            """
-                                            OpenAI API returned
-                                            a 429 error.
-
-                                            Your API credit balance
-                                            may be exhausted or
-                                            the API rate limit may
-                                            have been reached.
-                                            """
-                                        )
-
-                                    elif "401" in error:
-
-                                        st.error(
-                                            """
-                                            OpenAI API authentication
-                                            failed.
-
-                                            Check your API key in
-                                            Streamlit Secrets.
-                                            """
-                                        )
-
-                                    else:
-
-                                        st.error(
-                                            f"AI error: {error}"
-                                        )
 
             # =================================================
             # SCORE DISTRIBUTION
             # =================================================
 
             st.subheader(
-                "📊 Technical Score Distribution"
+
+                "📊 Score Distribution"
+
             )
 
-            score_distribution = (
+
+            score_counts = (
+
                 results_df[
                     "Technical Score"
                 ]
+
                 .value_counts()
+
                 .sort_index()
+
             )
 
+
             st.bar_chart(
-                score_distribution
+                score_counts
             )
+
+
+            # =================================================
+            # FULL RESULTS
+            # =================================================
+
+            st.subheader(
+                "📋 Detailed Results"
+            )
+
+
+            st.dataframe(
+
+                results_df,
+
+                width="stretch",
+
+                hide_index=True
+
+            )
+
 
             # =================================================
             # DOWNLOAD
             # =================================================
 
-            st.subheader(
-                "📥 Download Results"
-            )
-
             csv = results_df.to_csv(
                 index=False
             )
 
+
             st.download_button(
 
-                "⬇️ Download Scanner CSV",
+                label=
+                    "⬇️ Download Scanner Results",
 
                 data=csv,
 
-                file_name=(
-                    "NSE_Technical_Scanner.csv"
-                ),
+                file_name=
+                    "NSE_Smart_Breakout_Scanner.csv",
 
-                mime="text/csv",
+                mime="text/csv"
 
-                width="stretch"
+            )
+
+
+            # =================================================
+            # SUMMARY
+            # =================================================
+
+            st.subheader(
+                "📈 Scanner Summary"
+            )
+
+
+            c1, c2, c3, c4 = (
+                st.columns(4)
+            )
+
+
+            c1.metric(
+
+                "Universe",
+
+                len(stocks)
+
+            )
+
+
+            c2.metric(
+
+                "Stage 1",
+
+                len(stage1_stocks)
+
+            )
+
+
+            c3.metric(
+
+                "Stage 2",
+
+                len(results_df)
+
+            )
+
+
+            c4.metric(
+
+                "Score ≥ 8",
+
+                len(
+
+                    results_df[
+                        results_df[
+                            "Technical Score"
+                        ] >= 8
+                    ]
+
+                )
 
             )
 
 
 # ============================================================
-# AI ASSISTANT
+# AI ANALYST
 # ============================================================
 
 else:
 
     st.header(
-        "🤖 AI Technical Assistant"
+        "🤖 AI Technical Analyst"
     )
 
+
     st.write(
+
         """
-        Ask questions about RSI, MACD,
-        moving averages, breakouts,
-        candlestick patterns, support,
-        resistance and technical analysis.
+        Ask questions about technical analysis,
+        chart patterns, indicators and trading setups.
         """
+
     )
+
+
+    # ========================================================
+    # API STATUS
+    # ========================================================
 
     if client is None:
 
         st.warning(
-            """
-            OpenAI API is not configured.
 
-            Add this to Streamlit Cloud Secrets:
-
-            OPENAI_API_KEY = "your_api_key"
             """
+            OpenAI API is not currently available.
+
+            If you want to use the AI Analyst,
+            add your API key under:
+
+            **Streamlit Cloud → Settings → Secrets**
+
+            Example:
+
+            `OPENAI_API_KEY = "your_api_key"`
+            """
+
         )
 
+
     question = st.chat_input(
-        "Ask a technical-analysis question..."
+
+        "Ask your technical-analysis question..."
+
     )
+
 
     if question:
 
@@ -2380,6 +2725,7 @@ else:
         ).write(
             question
         )
+
 
         with st.chat_message(
             "assistant"
@@ -2391,43 +2737,55 @@ else:
                     "OpenAI API key is not configured."
                 )
 
+
             else:
 
                 try:
 
                     response = (
+
                         client.responses.create(
 
-                            model=
-                            "gpt-5.6-luna",
+                            model="gpt-5.6-luna",
 
                             instructions="""
 
 You are an educational technical-analysis
-assistant focused on Indian equity markets.
+assistant for Indian equity markets.
 
-Explain technical analysis clearly.
+Explain technical-analysis concepts clearly.
 
-Topics include:
+You may discuss:
 
-RSI
-MACD
-Moving averages
-Donchian channels
-Volume
-Breakouts
-Support/resistance
-Candlestick patterns
-Trend analysis
-Risk management
-Elliott Wave
+- Candlestick patterns
+- Support and resistance
+- Moving averages
+- RSI
+- MACD
+- Bollinger Bands
+- Donchian channels
+- Volume
+- Breakouts
+- Trend structure
+- Elliott Wave concepts
+- Risk management
+- Position sizing
 
-Do not invent live prices.
+Do not invent live market prices,
+technical indicator values or company data.
 
-Do not guarantee returns.
+If the application has not supplied
+actual market data, clearly state that
+you cannot verify the current value.
 
-If actual market data has not been
-provided, clearly state that.
+Do not present predictions as certainty.
+
+Use clear sections:
+
+1. Interpretation
+2. Technical reasoning
+3. Risk
+4. What to monitor
 
 This is educational information,
 not personalized financial advice.
@@ -2437,37 +2795,83 @@ not personalized financial advice.
                             input=question
 
                         )
+
                     )
 
+
                     st.write(
+
                         response.output_text
+
                     )
+
 
                 except Exception as e:
 
-                    error = str(e)
+                    error_text = str(e)
 
-                    if "429" in error:
+
+                    # ========================================
+                    # FRIENDLY API ERROR
+                    # ========================================
+
+                    if (
+
+                        "429" in error_text
+
+                        or
+
+                        "insufficient_quota"
+                        in error_text
+
+                        or
+
+                        "credit_balance_exhausted"
+                        in error_text
+
+                    ):
 
                         st.error(
+
                             """
-                            OpenAI API credit balance
-                            exhausted or rate limit reached.
+                            ⚠️ OpenAI API credit balance
+                            is exhausted.
+
+                            Please add API credits to your
+                            OpenAI API billing account and
+                            try again.
                             """
+
                         )
 
-                    elif "401" in error:
+
+                    elif (
+
+                        "401" in error_text
+
+                        or
+
+                        "invalid_api_key"
+                        in error_text
+
+                    ):
 
                         st.error(
-                            """
-                            OpenAI API authentication failed.
 
-                            Check your API key.
                             """
+                            ❌ Invalid OpenAI API key.
+
+                            Please check the API key under
+                            Streamlit Cloud → Settings → Secrets.
+                            """
+
                         )
+
 
                     else:
 
                         st.error(
-                            f"AI error: {error}"
+
+                            f"AI service error: {e}"
+
                         )
