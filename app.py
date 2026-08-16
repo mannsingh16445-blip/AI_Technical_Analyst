@@ -50,6 +50,11 @@ show_rsi = st.sidebar.checkbox(
     value=True
 )
 
+show_macd = st.sidebar.checkbox(
+    "MACD",
+    value=True
+)
+
 ticker = symbol + ".NS"
 
 
@@ -182,25 +187,74 @@ try:
     )
 
     # ========================================================
+    # MACD
+    # ========================================================
+
+    ema12 = (
+        data["Close"]
+        .ewm(
+            span=12,
+            adjust=False
+        )
+        .mean()
+    )
+
+    ema26 = (
+        data["Close"]
+        .ewm(
+            span=26,
+            adjust=False
+        )
+        .mean()
+    )
+
+    data["MACD"] = ema12 - ema26
+
+    data["MACD_Signal"] = (
+        data["MACD"]
+        .ewm(
+            span=9,
+            adjust=False
+        )
+        .mean()
+    )
+
+    data["MACD_Histogram"] = (
+        data["MACD"] -
+        data["MACD_Signal"]
+    )
+
+    # ========================================================
     # CREATE SUBPLOTS
     # ========================================================
 
+    panel_count = 1
+
     if show_rsi:
+        panel_count += 1
 
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            row_heights=[0.70, 0.30]
-        )
+    if show_macd:
+        panel_count += 1
 
-    else:
+    row_heights = [0.55]
 
-        fig = make_subplots(
-            rows=1,
-            cols=1
-        )
+    remaining = 0.45
+
+    if panel_count > 1:
+
+        for i in range(panel_count - 1):
+
+            row_heights.append(
+                remaining / (panel_count - 1)
+            )
+
+    fig = make_subplots(
+        rows=panel_count,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=row_heights
+    )
 
     # ========================================================
     # PRICE CHART
@@ -278,8 +332,10 @@ try:
             col=1
         )
 
+    current_row = 2
+
     # ========================================================
-    # RSI PANEL
+    # RSI
     # ========================================================
 
     if show_rsi:
@@ -293,38 +349,90 @@ try:
                 name="RSI 14"
             ),
 
-            row=2,
+            row=current_row,
             col=1
         )
-
-        # RSI 70 line
 
         fig.add_hline(
             y=70,
-            row=2,
+            row=current_row,
             col=1
         )
-
-        # RSI 50 line
 
         fig.add_hline(
             y=50,
-            row=2,
+            row=current_row,
             col=1
         )
 
-        # RSI 30 line
-
         fig.add_hline(
             y=30,
-            row=2,
+            row=current_row,
             col=1
         )
 
         fig.update_yaxes(
             range=[0, 100],
             title_text="RSI",
-            row=2,
+            row=current_row,
+            col=1
+        )
+
+        current_row += 1
+
+    # ========================================================
+    # MACD
+    # ========================================================
+
+    if show_macd:
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["MACD"],
+                mode="lines",
+                name="MACD"
+            ),
+
+            row=current_row,
+            col=1
+        )
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["MACD_Signal"],
+                mode="lines",
+                name="MACD Signal"
+            ),
+
+            row=current_row,
+            col=1
+        )
+
+        fig.add_trace(
+
+            go.Bar(
+                x=data.index,
+                y=data["MACD_Histogram"],
+                name="MACD Histogram"
+            ),
+
+            row=current_row,
+            col=1
+        )
+
+        fig.add_hline(
+            y=0,
+            row=current_row,
+            col=1
+        )
+
+        fig.update_yaxes(
+            title_text="MACD",
+            row=current_row,
             col=1
         )
 
@@ -336,7 +444,7 @@ try:
 
         title=f"{symbol} Technical Analysis",
 
-        height=850,
+        height=1050,
 
         xaxis_rangeslider_visible=False,
 
@@ -368,6 +476,14 @@ try:
 
     rsi = float(latest["RSI14"])
 
+    macd = float(latest["MACD"])
+
+    signal = float(latest["MACD_Signal"])
+
+    histogram = float(
+        latest["MACD_Histogram"]
+    )
+
     st.subheader("📊 Current Technical Values")
 
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -396,6 +512,53 @@ try:
         "RSI 14",
         f"{rsi:.2f}"
     )
+
+    # ========================================================
+    # MACD VALUES
+    # ========================================================
+
+    st.subheader("📉 MACD Status")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "MACD",
+        f"{macd:.2f}"
+    )
+
+    col2.metric(
+        "Signal",
+        f"{signal:.2f}"
+    )
+
+    col3.metric(
+        "Histogram",
+        f"{histogram:.2f}"
+    )
+
+    if macd > signal:
+
+        st.success(
+            "🟢 MACD is ABOVE the Signal Line — bullish momentum"
+        )
+
+    else:
+
+        st.warning(
+            "🔴 MACD is BELOW the Signal Line — bearish momentum"
+        )
+
+    if histogram > 0:
+
+        st.success(
+            "🟢 MACD Histogram is positive"
+        )
+
+    else:
+
+        st.warning(
+            "🔴 MACD Histogram is negative"
+        )
 
     # ========================================================
     # RSI INTERPRETATION
