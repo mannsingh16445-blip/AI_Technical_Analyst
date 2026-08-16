@@ -1842,7 +1842,7 @@ MACD = 1 point
             # TOP STOCKS
             # ------------------------------------------------
 
-          st.subheader(
+st.subheader(
     "🏆 Top Early Breakout Candidates"
 )
 
