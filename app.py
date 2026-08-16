@@ -2,7 +2,12 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import pandas as pd
 import time
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="AI Technical Analyst",
@@ -10,58 +15,102 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📈 AI Technical Analyst")
-st.caption("Technical Analysis Dashboard")
+# ============================================================
+# NIFTY 50 UNIVERSE
+# ============================================================
+
+NIFTY50 = [
+    "ADANIENT",
+    "ADANIPORTS",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJFINANCE",
+    "BAJAJFINSV",
+    "BEL",
+    "BHARTIARTL",
+    "CIPLA",
+    "COALINDIA",
+    "DRREDDY",
+    "EICHERMOT",
+    "ETERNAL",
+    "GRASIM",
+    "HCLTECH",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HEROMOTOCO",
+    "HINDALCO",
+    "HINDUNILVR",
+    "ICICIBANK",
+    "INDUSINDBK",
+    "INFY",
+    "ITC",
+    "JIOFIN",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LT",
+    "M&M",
+    "MARUTI",
+    "MAXHEALTH",
+    "NESTLEIND",
+    "NTPC",
+    "ONGC",
+    "POWERGRID",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SHRIRAMFIN",
+    "SUNPHARMA",
+    "TATACONSUM",
+    "TATAMOTORS",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TITAN",
+    "TRENT",
+    "ULTRACEMCO"
+]
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.header("Stock Settings")
+st.sidebar.title("📈 AI Technical Analyst")
 
-symbol = st.sidebar.text_input(
-    "Enter NSE Stock Symbol",
-    value="RELIANCE"
-).strip().upper()
-
-period = st.sidebar.selectbox(
-    "Chart Period",
-    ["6mo", "1y", "2y", "5y"],
-    index=1
+page = st.sidebar.radio(
+    "Select Module",
+    [
+        "Technical Chart",
+        "Early Breakout Scanner"
+    ]
 )
-
-show_sma20 = st.sidebar.checkbox("SMA 20", value=True)
-show_sma50 = st.sidebar.checkbox("SMA 50", value=True)
-show_sma200 = st.sidebar.checkbox("SMA 200", value=True)
-show_rsi = st.sidebar.checkbox("RSI 14", value=True)
-show_macd = st.sidebar.checkbox("MACD", value=True)
-show_volume = st.sidebar.checkbox("Volume", value=True)
-show_donchian = st.sidebar.checkbox(
-    "Donchian Channel (3)",
-    value=True
-)
-
-ticker = symbol + ".NS"
-
 
 # ============================================================
-# MARKET DATA
+# DATA DOWNLOAD FUNCTION
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_stock_data(ticker, period):
+def download_market_data(tickers, period="2y"):
+
+    yahoo_tickers = [
+        ticker + ".NS"
+        for ticker in tickers
+    ]
 
     for attempt in range(3):
 
         try:
 
             data = yf.download(
-                ticker,
+                yahoo_tickers,
                 period=period,
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
-                timeout=20
+                group_by="ticker",
+                threads=True,
+                timeout=30
             )
 
             if data is not None and not data.empty:
@@ -70,70 +119,22 @@ def get_stock_data(ticker, period):
         except Exception:
             pass
 
-        time.sleep(1)
+        time.sleep(2)
 
     return None
 
 
-try:
+# ============================================================
+# INDICATOR CALCULATION
+# ============================================================
 
-    with st.spinner(f"Loading {symbol} market data..."):
+def calculate_indicators(data):
 
-        data = get_stock_data(ticker, period)
+    data = data.copy()
 
-    if data is None or data.empty:
-
-        st.error(
-            f"Unable to retrieve data for {symbol}. "
-            "Please try again."
-        )
-
-        st.stop()
-
-    # ========================================================
-    # HANDLE YAHOO FINANCE COLUMNS
-    # ========================================================
-
-    if hasattr(data.columns, "nlevels"):
-
-        if data.columns.nlevels > 1:
-            data.columns = data.columns.get_level_values(0)
-
-    required_columns = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume"
-    ]
-
-    missing = [
-        column
-        for column in required_columns
-        if column not in data.columns
-    ]
-
-    if missing:
-
-        st.error(
-            f"Missing market data: {', '.join(missing)}"
-        )
-
-        st.stop()
-
-    data = data.dropna(
-        subset=[
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ]
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # SMA
-    # ========================================================
+    # --------------------------------------------------------
 
     data["SMA20"] = (
         data["Close"]
@@ -153,9 +154,9 @@ try:
         .mean()
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # RSI 14
-    # ========================================================
+    # --------------------------------------------------------
 
     delta = data["Close"].diff()
 
@@ -173,422 +174,344 @@ try:
         100 / (1 + rs)
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # MACD
-    # ========================================================
+    # --------------------------------------------------------
 
     ema12 = (
         data["Close"]
-        .ewm(span=12, adjust=False)
+        .ewm(
+            span=12,
+            adjust=False
+        )
         .mean()
     )
 
     ema26 = (
         data["Close"]
-        .ewm(span=26, adjust=False)
+        .ewm(
+            span=26,
+            adjust=False
+        )
         .mean()
     )
 
     data["MACD"] = ema12 - ema26
 
-    data["MACD_Signal"] = (
+    data["MACD_SIGNAL"] = (
         data["MACD"]
-        .ewm(span=9, adjust=False)
+        .ewm(
+            span=9,
+            adjust=False
+        )
         .mean()
     )
 
-    data["MACD_Histogram"] = (
+    data["MACD_HIST"] = (
         data["MACD"] -
-        data["MACD_Signal"]
+        data["MACD_SIGNAL"]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # VOLUME
-    # ========================================================
+    # --------------------------------------------------------
 
-    data["Volume_Avg20"] = (
+    data["VOLUME_AVG20"] = (
         data["Volume"]
         .rolling(20)
         .mean()
     )
 
-    data["Volume_Ratio"] = (
+    data["VOLUME_RATIO"] = (
         data["Volume"] /
-        data["Volume_Avg20"]
+        data["VOLUME_AVG20"]
     )
 
-    # ========================================================
-    # DONCHIAN CHANNEL - 3 PERIOD
+    # --------------------------------------------------------
+    # DONCHIAN CHANNEL
     #
-    # IMPORTANT:
-    # shift(1) means today's channel uses only the
-    # previous 3 completed candles.
-    # ========================================================
+    # Previous 3 completed candles only
+    # --------------------------------------------------------
 
-    data["Donchian_Upper_3"] = (
+    data["DONCHIAN_UPPER"] = (
         data["High"]
         .shift(1)
         .rolling(3)
         .max()
     )
 
-    data["Donchian_Lower_3"] = (
+    data["DONCHIAN_LOWER"] = (
         data["Low"]
         .shift(1)
         .rolling(3)
         .min()
     )
 
-    data["Donchian_Middle_3"] = (
-        data["Donchian_Upper_3"] +
-        data["Donchian_Lower_3"]
-    ) / 2
+    return data
 
-    # ========================================================
-    # DONCHIAN POSITION
-    # ========================================================
 
-    data["Donchian_Range"] = (
-        data["Donchian_Upper_3"] -
-        data["Donchian_Lower_3"]
+# ============================================================
+# EARLY BREAKOUT CONDITIONS
+# ============================================================
+
+def check_breakout(data):
+
+    if len(data) < 210:
+        return None
+
+    latest = data.iloc[-1]
+
+    previous = data.iloc[-2]
+
+    two_days_ago = data.iloc[-3]
+
+    # --------------------------------------------------------
+    # CONDITION 1
+    # Recent Close > Previous Day High
+    # --------------------------------------------------------
+
+    condition_1 = (
+        latest["Close"] >
+        previous["High"]
     )
 
-    data["Distance_From_Donchian_Upper"] = (
-        data["Donchian_Upper_3"] -
-        data["Close"]
+    # --------------------------------------------------------
+    # CONDITION 2
+    #
+    # Previous Day High <
+    # High of N-2 days
+    #
+    # N = latest day
+    # N-1 = previous day
+    # N-2 = two days ago
+    # --------------------------------------------------------
+
+    condition_2 = (
+        previous["High"] <
+        two_days_ago["High"]
     )
 
-    data["Distance_From_Donchian_Lower"] = (
-        data["Close"] -
-        data["Donchian_Lower_3"]
+    # --------------------------------------------------------
+    # CONDITION 3
+    #
+    # Recent Close <
+    # Previous 3-day Donchian Upper
+    # --------------------------------------------------------
+
+    condition_3 = (
+        latest["Close"] <
+        latest["DONCHIAN_UPPER"]
     )
 
-    data["Donchian_Position"] = (
-        (
-            data["Close"] -
-            data["Donchian_Lower_3"]
+    # --------------------------------------------------------
+    # CONDITION 4
+    #
+    # Recent Low >
+    # Previous 3-day Donchian Lower
+    # --------------------------------------------------------
+
+    condition_4 = (
+        latest["Low"] >
+        latest["DONCHIAN_LOWER"]
+    )
+
+    # --------------------------------------------------------
+    # CONDITION 5
+    #
+    # Recent Close > 200 SMA
+    # --------------------------------------------------------
+
+    condition_5 = (
+        latest["Close"] >
+        latest["SMA200"]
+    )
+
+    # --------------------------------------------------------
+    # CORE SETUP
+    # --------------------------------------------------------
+
+    core_setup = (
+        condition_1
+        and condition_2
+        and condition_3
+        and condition_4
+        and condition_5
+    )
+
+    # --------------------------------------------------------
+    # CONFIRMATION CONDITIONS
+    # --------------------------------------------------------
+
+    volume_confirmation = (
+        latest["VOLUME_RATIO"] >= 1.5
+    )
+
+    rsi_confirmation = (
+        latest["RSI14"] > 50
+    )
+
+    macd_confirmation = (
+        latest["MACD"] >
+        latest["MACD_SIGNAL"]
+    )
+
+    # --------------------------------------------------------
+    # TECHNICAL SCORE
+    # --------------------------------------------------------
+
+    score = 0
+
+    if condition_1:
+        score += 2
+
+    if condition_2:
+        score += 1
+
+    if condition_3:
+        score += 1
+
+    if condition_4:
+        score += 1
+
+    if condition_5:
+        score += 2
+
+    if volume_confirmation:
+        score += 1
+
+    if rsi_confirmation:
+        score += 1
+
+    if macd_confirmation:
+        score += 1
+
+    return {
+        "Core Setup": core_setup,
+        "Condition 1": condition_1,
+        "Condition 2": condition_2,
+        "Condition 3": condition_3,
+        "Condition 4": condition_4,
+        "Condition 5": condition_5,
+        "Volume Confirm": volume_confirmation,
+        "RSI Confirm": rsi_confirmation,
+        "MACD Confirm": macd_confirmation,
+        "Score": score,
+        "Close": latest["Close"],
+        "SMA200": latest["SMA200"],
+        "RSI": latest["RSI14"],
+        "MACD": latest["MACD"],
+        "Signal": latest["MACD_SIGNAL"],
+        "Volume Ratio": latest["VOLUME_RATIO"],
+        "Donchian Upper": latest["DONCHIAN_UPPER"],
+        "Donchian Lower": latest["DONCHIAN_LOWER"]
+    }
+
+
+# ============================================================
+# TECHNICAL CHART PAGE
+# ============================================================
+
+if page == "Technical Chart":
+
+    st.title("📈 AI Technical Analyst")
+
+    st.caption(
+        "Single-stock technical analysis"
+    )
+
+    symbol = st.sidebar.text_input(
+        "Enter NSE Stock Symbol",
+        value="RELIANCE"
+    ).strip().upper()
+
+    period = st.sidebar.selectbox(
+        "Chart Period",
+        ["6mo", "1y", "2y", "5y"],
+        index=1
+    )
+
+    ticker = symbol + ".NS"
+
+    data = download_market_data(
+        [symbol],
+        period
+    )
+
+    if data is None:
+
+        st.error(
+            "Unable to retrieve market data."
         )
-        /
-        data["Donchian_Range"]
-    ) * 100
 
-    # ========================================================
-    # NUMBER OF CHART PANELS
-    # ========================================================
+        st.stop()
 
-    panel_count = 1
+    # Extract ticker data
 
-    if show_volume:
-        panel_count += 1
+    try:
 
-    if show_rsi:
-        panel_count += 1
+        stock_data = data[ticker].copy()
 
-    if show_macd:
-        panel_count += 1
+    except Exception:
 
-    row_heights = [0.50]
+        st.error(
+            f"No data found for {symbol}"
+        )
 
-    if panel_count > 1:
+        st.stop()
 
-        remaining_height = 0.50
-
-        for _ in range(panel_count - 1):
-
-            row_heights.append(
-                remaining_height /
-                (panel_count - 1)
-            )
-
-    fig = make_subplots(
-        rows=panel_count,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.035,
-        row_heights=row_heights
+    stock_data = stock_data.dropna(
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close"
+        ]
     )
 
-    # ========================================================
-    # PRICE / CANDLESTICK
-    # ========================================================
+    stock_data = calculate_indicators(
+        stock_data
+    )
+
+    st.subheader(
+        f"{symbol} Price Chart"
+    )
+
+    fig = go.Figure()
 
     fig.add_trace(
 
         go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
+            x=stock_data.index,
+            open=stock_data["Open"],
+            high=stock_data["High"],
+            low=stock_data["Low"],
+            close=stock_data["Close"],
             name=symbol
-        ),
-
-        row=1,
-        col=1
+        )
     )
 
-    # ========================================================
-    # SMA 20
-    # ========================================================
-
-    if show_sma20:
+    for column, name in [
+        ("SMA20", "SMA 20"),
+        ("SMA50", "SMA 50"),
+        ("SMA200", "SMA 200"),
+        ("DONCHIAN_UPPER", "Donchian Upper"),
+        ("DONCHIAN_LOWER", "Donchian Lower")
+    ]:
 
         fig.add_trace(
-
             go.Scatter(
-                x=data.index,
-                y=data["SMA20"],
+                x=stock_data.index,
+                y=stock_data[column],
                 mode="lines",
-                name="SMA 20"
-            ),
-
-            row=1,
-            col=1
+                name=name
+            )
         )
-
-    # ========================================================
-    # SMA 50
-    # ========================================================
-
-    if show_sma50:
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["SMA50"],
-                mode="lines",
-                name="SMA 50"
-            ),
-
-            row=1,
-            col=1
-        )
-
-    # ========================================================
-    # SMA 200
-    # ========================================================
-
-    if show_sma200:
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["SMA200"],
-                mode="lines",
-                name="SMA 200"
-            ),
-
-            row=1,
-            col=1
-        )
-
-    # ========================================================
-    # DONCHIAN CHANNEL
-    # ========================================================
-
-    if show_donchian:
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["Donchian_Upper_3"],
-                mode="lines",
-                name="Donchian Upper (3)"
-            ),
-
-            row=1,
-            col=1
-        )
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["Donchian_Lower_3"],
-                mode="lines",
-                name="Donchian Lower (3)"
-            ),
-
-            row=1,
-            col=1
-        )
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["Donchian_Middle_3"],
-                mode="lines",
-                name="Donchian Middle"
-            ),
-
-            row=1,
-            col=1
-        )
-
-    current_row = 2
-
-    # ========================================================
-    # VOLUME
-    # ========================================================
-
-    if show_volume:
-
-        fig.add_trace(
-
-            go.Bar(
-                x=data.index,
-                y=data["Volume"],
-                name="Volume"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["Volume_Avg20"],
-                mode="lines",
-                name="Average Volume 20"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.update_yaxes(
-            title_text="Volume",
-            row=current_row,
-            col=1
-        )
-
-        current_row += 1
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    if show_rsi:
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["RSI14"],
-                mode="lines",
-                name="RSI 14"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.add_hline(
-            y=70,
-            row=current_row,
-            col=1
-        )
-
-        fig.add_hline(
-            y=50,
-            row=current_row,
-            col=1
-        )
-
-        fig.add_hline(
-            y=30,
-            row=current_row,
-            col=1
-        )
-
-        fig.update_yaxes(
-            range=[0, 100],
-            title_text="RSI",
-            row=current_row,
-            col=1
-        )
-
-        current_row += 1
-
-    # ========================================================
-    # MACD
-    # ========================================================
-
-    if show_macd:
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["MACD"],
-                mode="lines",
-                name="MACD"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.add_trace(
-
-            go.Scatter(
-                x=data.index,
-                y=data["MACD_Signal"],
-                mode="lines",
-                name="MACD Signal"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.add_trace(
-
-            go.Bar(
-                x=data.index,
-                y=data["MACD_Histogram"],
-                name="MACD Histogram"
-            ),
-
-            row=current_row,
-            col=1
-        )
-
-        fig.add_hline(
-            y=0,
-            row=current_row,
-            col=1
-        )
-
-        fig.update_yaxes(
-            title_text="MACD",
-            row=current_row,
-            col=1
-        )
-
-    # ========================================================
-    # CHART LAYOUT
-    # ========================================================
 
     fig.update_layout(
-
         title=f"{symbol} Technical Analysis",
-
-        height=1200,
-
+        height=700,
         xaxis_rangeslider_visible=False,
-
-        hovermode="x unified",
-
-        legend=dict(
-            orientation="h"
-        )
+        hovermode="x unified"
     )
 
     st.plotly_chart(
@@ -596,314 +519,427 @@ try:
         width="stretch"
     )
 
-    # ========================================================
-    # LATEST VALUES
-    # ========================================================
-
-    latest = data.iloc[-1]
-
-    close = float(latest["Close"])
-
-    sma20 = float(latest["SMA20"])
-
-    sma50 = float(latest["SMA50"])
-
-    sma200 = float(latest["SMA200"])
-
-    rsi = float(latest["RSI14"])
-
-    macd = float(latest["MACD"])
-
-    signal = float(latest["MACD_Signal"])
-
-    histogram = float(
-        latest["MACD_Histogram"]
-    )
-
-    volume = float(latest["Volume"])
-
-    avg_volume = float(
-        latest["Volume_Avg20"]
-    )
-
-    volume_ratio = float(
-        latest["Volume_Ratio"]
-    )
-
-    donchian_upper = float(
-        latest["Donchian_Upper_3"]
-    )
-
-    donchian_lower = float(
-        latest["Donchian_Lower_3"]
-    )
-
-    donchian_middle = float(
-        latest["Donchian_Middle_3"]
-    )
-
-    donchian_position = float(
-        latest["Donchian_Position"]
-    )
-
-    # ========================================================
-    # CURRENT TECHNICAL VALUES
-    # ========================================================
-
-    st.subheader(
-        "📊 Current Technical Values"
-    )
+    latest = stock_data.iloc[-1]
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
     col1.metric(
-        "Current Price",
-        f"₹{close:.2f}"
+        "Close",
+        f"₹{latest['Close']:.2f}"
     )
 
     col2.metric(
         "SMA 20",
-        f"₹{sma20:.2f}"
+        f"₹{latest['SMA20']:.2f}"
     )
 
     col3.metric(
         "SMA 50",
-        f"₹{sma50:.2f}"
+        f"₹{latest['SMA50']:.2f}"
     )
 
     col4.metric(
         "SMA 200",
-        f"₹{sma200:.2f}"
+        f"₹{latest['SMA200']:.2f}"
     )
 
     col5.metric(
-        "RSI 14",
-        f"{rsi:.2f}"
+        "RSI",
+        f"{latest['RSI14']:.2f}"
     )
 
-    # ========================================================
-    # DONCHIAN VALUES
-    # ========================================================
 
-    st.subheader(
-        "🎯 Donchian Channel — 3 Period"
+# ============================================================
+# EARLY BREAKOUT SCANNER
+# ============================================================
+
+else:
+
+    st.title(
+        "🚀 Early Breakout Scanner"
     )
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Upper Channel",
-        f"₹{donchian_upper:.2f}"
-    )
-
-    col2.metric(
-        "Current Price",
-        f"₹{close:.2f}"
-    )
-
-    col3.metric(
-        "Middle Channel",
-        f"₹{donchian_middle:.2f}"
-    )
-
-    col4.metric(
-        "Lower Channel",
-        f"₹{donchian_lower:.2f}"
-    )
-
-    st.write(
-        f"**Position within channel:** "
-        f"{donchian_position:.1f}%"
-    )
-
-    if donchian_position >= 80:
-
-        st.info(
-            "🔵 Price is close to the upper Donchian boundary."
-        )
-
-    elif donchian_position <= 20:
-
-        st.warning(
-            "🟡 Price is close to the lower Donchian boundary."
-        )
-
-    else:
-
-        st.success(
-            "🟢 Price is trading within the Donchian channel."
-        )
-
-    # ========================================================
-    # VOLUME STATUS
-    # ========================================================
-
-    st.subheader(
-        "📊 Volume Analysis"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "Current Volume",
-        f"{volume:,.0f}"
-    )
-
-    col2.metric(
-        "20-Day Avg Volume",
-        f"{avg_volume:,.0f}"
-    )
-
-    col3.metric(
-        "Volume Ratio",
-        f"{volume_ratio:.2f}×"
-    )
-
-    if volume_ratio >= 1.5:
-
-        st.success(
-            f"🟢 Strong volume: "
-            f"{volume_ratio:.2f}× the 20-day average"
-        )
-
-    elif volume_ratio >= 1.0:
-
-        st.info(
-            f"🟡 Normal volume: "
-            f"{volume_ratio:.2f}× the 20-day average"
-        )
-
-    else:
-
-        st.warning(
-            f"🔴 Weak volume: "
-            f"{volume_ratio:.2f}× the 20-day average"
-        )
-
-    # ========================================================
-    # MACD STATUS
-    # ========================================================
-
-    st.subheader("📉 MACD Status")
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "MACD",
-        f"{macd:.2f}"
-    )
-
-    col2.metric(
-        "Signal",
-        f"{signal:.2f}"
-    )
-
-    col3.metric(
-        "Histogram",
-        f"{histogram:.2f}"
-    )
-
-    if macd > signal:
-
-        st.success(
-            "🟢 MACD is ABOVE Signal — bullish momentum"
-        )
-
-    else:
-
-        st.warning(
-            "🔴 MACD is BELOW Signal — bearish momentum"
-        )
-
-    # ========================================================
-    # RSI STATUS
-    # ========================================================
-
-    st.subheader("⚡ Momentum Status")
-
-    if rsi >= 70:
-
-        st.warning(
-            f"🔴 RSI = {rsi:.2f} — Overbought zone"
-        )
-
-    elif rsi <= 30:
-
-        st.success(
-            f"🟢 RSI = {rsi:.2f} — Oversold zone"
-        )
-
-    elif rsi > 50:
-
-        st.success(
-            f"🟢 RSI = {rsi:.2f} — Positive momentum"
-        )
-
-    else:
-
-        st.warning(
-            f"🟡 RSI = {rsi:.2f} — Weak/neutral momentum"
-        )
-
-    # ========================================================
-    # TREND STATUS
-    # ========================================================
-
-    st.subheader("📈 Moving Average Trend")
-
-    if close > sma200:
-
-        st.success(
-            "🟢 Price is ABOVE the 200 SMA"
-        )
-
-    else:
-
-        st.warning(
-            "🔴 Price is BELOW the 200 SMA"
-        )
-
-    if sma50 > sma200:
-
-        st.success(
-            "🟢 SMA 50 is ABOVE SMA 200"
-        )
-
-    else:
-
-        st.warning(
-            "🔴 SMA 50 is BELOW SMA 200"
-        )
-
-    if sma20 > sma50:
-
-        st.success(
-            "🟢 SMA 20 is ABOVE SMA 50"
-        )
-
-    else:
-
-        st.warning(
-            "🔴 SMA 20 is BELOW SMA 50"
-        )
-
-    # ========================================================
-    # DATA STATUS
-    # ========================================================
 
     st.caption(
-        f"Data points: {len(data)} | "
-        f"Last available date: "
-        f"{data.index[-1].date()}"
+        "Scans the selected NSE universe using your breakout strategy"
     )
 
-    st.success(
-        f"✅ {symbol} analysis loaded successfully"
+    # --------------------------------------------------------
+    # SCANNER SETTINGS
+    # --------------------------------------------------------
+
+    st.sidebar.subheader(
+        "Scanner Settings"
     )
 
-
-except Exception as e:
-
-    st.error(
-        f"Unexpected error: {e}"
+    min_score = st.sidebar.slider(
+        "Minimum Technical Score",
+        min_value=0,
+        max_value=10,
+        value=5
     )
+
+    require_volume = st.sidebar.checkbox(
+        "Require Volume Confirmation",
+        value=False
+    )
+
+    require_rsi = st.sidebar.checkbox(
+        "Require RSI > 50",
+        value=False
+    )
+
+    require_macd = st.sidebar.checkbox(
+        "Require MACD > Signal",
+        value=False
+    )
+
+    scan_button = st.sidebar.button(
+        "🔍 Run Scanner",
+        type="primary"
+    )
+
+    # --------------------------------------------------------
+    # EXPLANATION
+    # --------------------------------------------------------
+
+    with st.expander(
+        "📋 Scanner Conditions",
+        expanded=False
+    ):
+
+        st.write(
+            """
+            **Core Conditions**
+
+            1. Recent Close > Previous Day High
+
+            2. Previous Day High < High of N-2
+
+            3. Recent Close < Previous 3-Day Donchian Upper
+
+            4. Recent Low > Previous 3-Day Donchian Lower
+
+            5. Recent Close > 200 SMA
+
+            **Confirmation**
+
+            • Volume Ratio >= 1.5
+
+            • RSI > 50
+
+            • MACD > Signal
+            """
+        )
+
+    # --------------------------------------------------------
+    # RUN SCANNER
+    # --------------------------------------------------------
+
+    if scan_button:
+
+        progress = st.progress(
+            0,
+            text="Downloading market data..."
+        )
+
+        market_data = download_market_data(
+            NIFTY50,
+            "2y"
+        )
+
+        progress.progress(
+            50,
+            text="Calculating technical indicators..."
+        )
+
+        if market_data is None:
+
+            st.error(
+                "Unable to download market data. "
+                "Please try again later."
+            )
+
+            st.stop()
+
+        results = []
+
+        total = len(NIFTY50)
+
+        for index, symbol in enumerate(NIFTY50):
+
+            ticker = symbol + ".NS"
+
+            try:
+
+                stock_data = market_data[ticker].copy()
+
+                stock_data = stock_data.dropna(
+                    subset=[
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                        "Volume"
+                    ]
+                )
+
+                if len(stock_data) < 210:
+
+                    continue
+
+                stock_data = calculate_indicators(
+                    stock_data
+                )
+
+                signal = check_breakout(
+                    stock_data
+                )
+
+                if signal is None:
+
+                    continue
+
+                # ------------------------------------------------
+                # Apply optional confirmation filters
+                # ------------------------------------------------
+
+                if signal["Score"] < min_score:
+
+                    continue
+
+                if (
+                    require_volume
+                    and not signal["Volume Confirm"]
+                ):
+
+                    continue
+
+                if (
+                    require_rsi
+                    and not signal["RSI Confirm"]
+                ):
+
+                    continue
+
+                if (
+                    require_macd
+                    and not signal["MACD Confirm"]
+                ):
+
+                    continue
+
+                # ------------------------------------------------
+                # Add result
+                # ------------------------------------------------
+
+                results.append({
+
+                    "Stock": symbol,
+
+                    "Close": round(
+                        signal["Close"],
+                        2
+                    ),
+
+                    "200 SMA": round(
+                        signal["SMA200"],
+                        2
+                    ),
+
+                    "RSI": round(
+                        signal["RSI"],
+                        1
+                    ),
+
+                    "MACD": round(
+                        signal["MACD"],
+                        2
+                    ),
+
+                    "Volume Ratio": round(
+                        signal["Volume Ratio"],
+                        2
+                    ),
+
+                    "Donchian Upper": round(
+                        signal["Donchian Upper"],
+                        2
+                    ),
+
+                    "Donchian Lower": round(
+                        signal["Donchian Lower"],
+                        2
+                    ),
+
+                    "C1 Close > Prev High":
+                        "✓"
+                        if signal["Condition 1"]
+                        else "✗",
+
+                    "C2 High Structure":
+                        "✓"
+                        if signal["Condition 2"]
+                        else "✗",
+
+                    "C3 Below Donchian Upper":
+                        "✓"
+                        if signal["Condition 3"]
+                        else "✗",
+
+                    "C4 Above Donchian Lower":
+                        "✓"
+                        if signal["Condition 4"]
+                        else "✗",
+
+                    "C5 Above 200 SMA":
+                        "✓"
+                        if signal["Condition 5"]
+                        else "✗",
+
+                    "Volume":
+                        "✓"
+                        if signal["Volume Confirm"]
+                        else "✗",
+
+                    "MACD":
+                        "✓"
+                        if signal["MACD Confirm"]
+                        else "✗",
+
+                    "Technical Score":
+                        signal["Score"]
+
+                })
+
+            except Exception:
+                continue
+
+            progress.progress(
+                50 +
+                int(
+                    50 *
+                    (index + 1) /
+                    total
+                ),
+                text=f"Scanning {symbol}..."
+            )
+
+        progress.empty()
+
+        # --------------------------------------------------------
+        # RESULTS
+        # --------------------------------------------------------
+
+        if not results:
+
+            st.warning(
+                "No stocks currently satisfy the selected "
+                "conditions."
+            )
+
+        else:
+
+            results_df = pd.DataFrame(
+                results
+            )
+
+            results_df = results_df.sort_values(
+                "Technical Score",
+                ascending=False
+            )
+
+            st.success(
+                f"🎯 {len(results_df)} stocks found"
+            )
+
+            # ----------------------------------------------------
+            # TOP PICKS
+            # ----------------------------------------------------
+
+            st.subheader(
+                "🏆 Top Scanner Results"
+            )
+
+            top = results_df.head(10)
+
+            st.dataframe(
+                top[
+                    [
+                        "Stock",
+                        "Close",
+                        "200 SMA",
+                        "RSI",
+                        "Volume Ratio",
+                        "Technical Score"
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # ----------------------------------------------------
+            # COMPLETE RESULTS
+            # ----------------------------------------------------
+
+            st.subheader(
+                "📊 Detailed Results"
+            )
+
+            st.dataframe(
+                results_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # ----------------------------------------------------
+            # DOWNLOAD
+            # ----------------------------------------------------
+
+            csv = results_df.to_csv(
+                index=False
+            )
+
+            st.download_button(
+                "⬇️ Download Scanner Results",
+                data=csv,
+                file_name="early_breakout_scanner.csv",
+                mime="text/csv"
+            )
+
+            # ----------------------------------------------------
+            # SUMMARY
+            # ----------------------------------------------------
+
+            st.subheader(
+                "📈 Scanner Summary"
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            col1.metric(
+                "Stocks Scanned",
+                len(NIFTY50)
+            )
+
+            col2.metric(
+                "Stocks Passed",
+                len(results_df)
+            )
+
+            col3.metric(
+                "Score ≥ 8",
+                len(
+                    results_df[
+                        results_df["Technical Score"] >= 8
+                    ]
+                )
+            )
+
+            col4.metric(
+                "Strong Volume",
+                len(
+                    results_df[
+                        results_df["Volume Ratio"] >= 1.5
+                    ]
+                )
+            )
