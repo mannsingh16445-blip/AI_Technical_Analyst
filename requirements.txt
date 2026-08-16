@@ -1,7 +1,5 @@
-sstreamlit
-openai
-yfinance
-plotly
-pandas
-numpy
-python-dotenv
+streamlit==1.48.0
+yfinance==0.2.65
+plotly==6.3.0
+pandas==2.3.2
+numpy==2.3.2
