@@ -3037,7 +3037,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             **D1:** Daily RSI(9) crossed above
             Daily WMA(Daily Close, 21)
 
-            **D2:** Daily RSI(14) > **55**
+            **D2:** Daily RSI(9) > **55**
             """
         )
 
@@ -3054,7 +3054,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             **W1:** Weekly RSI(9) crossed above
             Weekly WMA(Weekly Close, 21)
 
-            **W2:** Weekly RSI(14) > **50**
+            **W2:** Weekly RSI(9) > **50**
             """
         )
 
@@ -3071,7 +3071,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             **H1:** Hourly RSI(9) crossed above
             Hourly WMA(Hourly Close, 21)
 
-            **H2:** Hourly RSI(14) > **55**
+            **H2:** Hourly RSI(9) > **55**
             """
         )
 
@@ -3098,14 +3098,14 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             **W1:** Weekly RSI(9) crossed above
             Weekly WMA(Weekly Close, 21)
 
-            **W2:** Weekly RSI(14) > **50**
+            **W2:** Weekly RSI(9) > **50**
 
             **Daily**
 
             **D1:** Daily RSI(9) crossed above
             Daily WMA(Daily Close, 21)
 
-            **D2:** Daily RSI(14) > **55**
+            **D2:** Daily RSI(9) > **55**
             """
         )
 
@@ -3123,7 +3123,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
                 **H1:** Hourly RSI(9) crossed above
                 Hourly WMA(Hourly Close, 21)
 
-                **H2:** Hourly RSI(14) > **55**
+                **H2:** Hourly RSI(9) > **55**
                 """
             )
 
@@ -3164,7 +3164,7 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
 
         st.markdown(
             """
-            ### Conditions from your supplied screenshot
+            ### RSI(9) / WMA conditions
 
             **1. Weekly RSI(9) crossed above Weekly
             WMA(Weekly Close, 21)**
@@ -3172,26 +3172,26 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             **2. Daily RSI(9) crossed above Daily
             WMA(Daily Close, 21)**
 
-            **3. Daily RSI(14) > 55**
+            **3. Daily RSI(9) > 55**
 
-            **4. Weekly RSI(14) > 50**
+            **4. Weekly RSI(9) > 50**
 
             ### Timeframe adaptation
 
             **Daily Scan**
 
             • RSI(9) crossed above WMA(Close,21)  
-            • RSI(14) > 55
+            • RSI(9) > 55
 
             **Weekly Scan**
 
             • RSI(9) crossed above WMA(Close,21)  
-            • RSI(14) > 50
+            • RSI(9) > 50
 
             **Hourly Scan**
 
             • RSI(9) crossed above WMA(Close,21)  
-            • RSI(14) > 55
+            • RSI(9) > 55
 
             **Multi-Timeframe Scan**
 
