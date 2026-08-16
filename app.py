@@ -30,33 +30,14 @@ period = st.sidebar.selectbox(
     index=1
 )
 
-show_sma20 = st.sidebar.checkbox(
-    "SMA 20",
-    value=True
-)
-
-show_sma50 = st.sidebar.checkbox(
-    "SMA 50",
-    value=True
-)
-
-show_sma200 = st.sidebar.checkbox(
-    "SMA 200",
-    value=True
-)
-
-show_rsi = st.sidebar.checkbox(
-    "RSI 14",
-    value=True
-)
-
-show_macd = st.sidebar.checkbox(
-    "MACD",
-    value=True
-)
-
-show_volume = st.sidebar.checkbox(
-    "Volume",
+show_sma20 = st.sidebar.checkbox("SMA 20", value=True)
+show_sma50 = st.sidebar.checkbox("SMA 50", value=True)
+show_sma200 = st.sidebar.checkbox("SMA 200", value=True)
+show_rsi = st.sidebar.checkbox("RSI 14", value=True)
+show_macd = st.sidebar.checkbox("MACD", value=True)
+show_volume = st.sidebar.checkbox("Volume", value=True)
+show_donchian = st.sidebar.checkbox(
+    "Donchian Channel (3)",
     value=True
 )
 
@@ -116,7 +97,6 @@ try:
     if hasattr(data.columns, "nlevels"):
 
         if data.columns.nlevels > 1:
-
             data.columns = data.columns.get_level_values(0)
 
     required_columns = [
@@ -152,24 +132,24 @@ try:
     )
 
     # ========================================================
-    # MOVING AVERAGES
+    # SMA
     # ========================================================
 
     data["SMA20"] = (
         data["Close"]
-        .rolling(window=20)
+        .rolling(20)
         .mean()
     )
 
     data["SMA50"] = (
         data["Close"]
-        .rolling(window=50)
+        .rolling(50)
         .mean()
     )
 
     data["SMA200"] = (
         data["Close"]
-        .rolling(window=200)
+        .rolling(200)
         .mean()
     )
 
@@ -183,9 +163,9 @@ try:
 
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.rolling(window=14).mean()
+    avg_gain = gain.rolling(14).mean()
 
-    avg_loss = loss.rolling(window=14).mean()
+    avg_loss = loss.rolling(14).mean()
 
     rs = avg_gain / avg_loss
 
@@ -199,19 +179,13 @@ try:
 
     ema12 = (
         data["Close"]
-        .ewm(
-            span=12,
-            adjust=False
-        )
+        .ewm(span=12, adjust=False)
         .mean()
     )
 
     ema26 = (
         data["Close"]
-        .ewm(
-            span=26,
-            adjust=False
-        )
+        .ewm(span=26, adjust=False)
         .mean()
     )
 
@@ -219,10 +193,7 @@ try:
 
     data["MACD_Signal"] = (
         data["MACD"]
-        .ewm(
-            span=9,
-            adjust=False
-        )
+        .ewm(span=9, adjust=False)
         .mean()
     )
 
@@ -232,12 +203,12 @@ try:
     )
 
     # ========================================================
-    # VOLUME ANALYSIS
+    # VOLUME
     # ========================================================
 
     data["Volume_Avg20"] = (
         data["Volume"]
-        .rolling(window=20)
+        .rolling(20)
         .mean()
     )
 
@@ -247,7 +218,62 @@ try:
     )
 
     # ========================================================
-    # CREATE SUBPLOTS
+    # DONCHIAN CHANNEL - 3 PERIOD
+    #
+    # IMPORTANT:
+    # shift(1) means today's channel uses only the
+    # previous 3 completed candles.
+    # ========================================================
+
+    data["Donchian_Upper_3"] = (
+        data["High"]
+        .shift(1)
+        .rolling(3)
+        .max()
+    )
+
+    data["Donchian_Lower_3"] = (
+        data["Low"]
+        .shift(1)
+        .rolling(3)
+        .min()
+    )
+
+    data["Donchian_Middle_3"] = (
+        data["Donchian_Upper_3"] +
+        data["Donchian_Lower_3"]
+    ) / 2
+
+    # ========================================================
+    # DONCHIAN POSITION
+    # ========================================================
+
+    data["Donchian_Range"] = (
+        data["Donchian_Upper_3"] -
+        data["Donchian_Lower_3"]
+    )
+
+    data["Distance_From_Donchian_Upper"] = (
+        data["Donchian_Upper_3"] -
+        data["Close"]
+    )
+
+    data["Distance_From_Donchian_Lower"] = (
+        data["Close"] -
+        data["Donchian_Lower_3"]
+    )
+
+    data["Donchian_Position"] = (
+        (
+            data["Close"] -
+            data["Donchian_Lower_3"]
+        )
+        /
+        data["Donchian_Range"]
+    ) * 100
+
+    # ========================================================
+    # NUMBER OF CHART PANELS
     # ========================================================
 
     panel_count = 1
@@ -267,7 +293,7 @@ try:
 
         remaining_height = 0.50
 
-        for i in range(panel_count - 1):
+        for _ in range(panel_count - 1):
 
             row_heights.append(
                 remaining_height /
@@ -283,7 +309,7 @@ try:
     )
 
     # ========================================================
-    # PRICE CHART
+    # PRICE / CANDLESTICK
     # ========================================================
 
     fig.add_trace(
@@ -352,6 +378,51 @@ try:
                 y=data["SMA200"],
                 mode="lines",
                 name="SMA 200"
+            ),
+
+            row=1,
+            col=1
+        )
+
+    # ========================================================
+    # DONCHIAN CHANNEL
+    # ========================================================
+
+    if show_donchian:
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["Donchian_Upper_3"],
+                mode="lines",
+                name="Donchian Upper (3)"
+            ),
+
+            row=1,
+            col=1
+        )
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["Donchian_Lower_3"],
+                mode="lines",
+                name="Donchian Lower (3)"
+            ),
+
+            row=1,
+            col=1
+        )
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["Donchian_Middle_3"],
+                mode="lines",
+                name="Donchian Middle"
             ),
 
             row=1,
@@ -526,7 +597,7 @@ try:
     )
 
     # ========================================================
-    # CURRENT VALUES
+    # LATEST VALUES
     # ========================================================
 
     latest = data.iloc[-1]
@@ -549,9 +620,7 @@ try:
         latest["MACD_Histogram"]
     )
 
-    volume = float(
-        latest["Volume"]
-    )
+    volume = float(latest["Volume"])
 
     avg_volume = float(
         latest["Volume_Avg20"]
@@ -561,8 +630,24 @@ try:
         latest["Volume_Ratio"]
     )
 
+    donchian_upper = float(
+        latest["Donchian_Upper_3"]
+    )
+
+    donchian_lower = float(
+        latest["Donchian_Lower_3"]
+    )
+
+    donchian_middle = float(
+        latest["Donchian_Middle_3"]
+    )
+
+    donchian_position = float(
+        latest["Donchian_Position"]
+    )
+
     # ========================================================
-    # TECHNICAL VALUES
+    # CURRENT TECHNICAL VALUES
     # ========================================================
 
     st.subheader(
@@ -595,6 +680,59 @@ try:
         "RSI 14",
         f"{rsi:.2f}"
     )
+
+    # ========================================================
+    # DONCHIAN VALUES
+    # ========================================================
+
+    st.subheader(
+        "🎯 Donchian Channel — 3 Period"
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Upper Channel",
+        f"₹{donchian_upper:.2f}"
+    )
+
+    col2.metric(
+        "Current Price",
+        f"₹{close:.2f}"
+    )
+
+    col3.metric(
+        "Middle Channel",
+        f"₹{donchian_middle:.2f}"
+    )
+
+    col4.metric(
+        "Lower Channel",
+        f"₹{donchian_lower:.2f}"
+    )
+
+    st.write(
+        f"**Position within channel:** "
+        f"{donchian_position:.1f}%"
+    )
+
+    if donchian_position >= 80:
+
+        st.info(
+            "🔵 Price is close to the upper Donchian boundary."
+        )
+
+    elif donchian_position <= 20:
+
+        st.warning(
+            "🟡 Price is close to the lower Donchian boundary."
+        )
+
+    else:
+
+        st.success(
+            "🟢 Price is trading within the Donchian channel."
+        )
 
     # ========================================================
     # VOLUME STATUS
@@ -631,7 +769,7 @@ try:
     elif volume_ratio >= 1.0:
 
         st.info(
-            f"🟡 Normal/positive volume: "
+            f"🟡 Normal volume: "
             f"{volume_ratio:.2f}× the 20-day average"
         )
 
@@ -646,9 +784,7 @@ try:
     # MACD STATUS
     # ========================================================
 
-    st.subheader(
-        "📉 MACD Status"
-    )
+    st.subheader("📉 MACD Status")
 
     col1, col2, col3 = st.columns(3)
 
@@ -670,22 +806,20 @@ try:
     if macd > signal:
 
         st.success(
-            "🟢 MACD is ABOVE the Signal Line — bullish momentum"
+            "🟢 MACD is ABOVE Signal — bullish momentum"
         )
 
     else:
 
         st.warning(
-            "🔴 MACD is BELOW the Signal Line — bearish momentum"
+            "🔴 MACD is BELOW Signal — bearish momentum"
         )
 
     # ========================================================
     # RSI STATUS
     # ========================================================
 
-    st.subheader(
-        "⚡ Momentum Status"
-    )
+    st.subheader("⚡ Momentum Status")
 
     if rsi >= 70:
 
@@ -715,9 +849,7 @@ try:
     # TREND STATUS
     # ========================================================
 
-    st.subheader(
-        "📈 Moving Average Trend"
-    )
+    st.subheader("📈 Moving Average Trend")
 
     if close > sma200:
 
