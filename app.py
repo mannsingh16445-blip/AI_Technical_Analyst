@@ -1512,6 +1512,247 @@ def stage_two_analysis(data):
 
 
 # ============================================================
+# AUTOMATIC TRADE PLAN
+# ============================================================
+
+def calculate_trade_plan(data):
+    """
+    Create an educational technical trade plan from daily OHLCV.
+
+    Method:
+      Entry       = 0.25% above the latest close
+      Stop Loss   = tighter of recent swing support and 1.5 ATR
+                    is avoided; stop is placed below both levels
+      Target 1    = Entry + 2R
+      Target 2    = Entry + 3R
+      Risk/Reward = Target / Entry-to-stop risk
+
+    The levels are calculated from price/volatility data only.
+    They are not guaranteed execution levels or recommendations.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    required = [
+        "Open",
+        "High",
+        "Low",
+        "Close"
+    ]
+
+    if any(
+        column not in data.columns
+        for column in required
+    ):
+        return None
+
+    df = data.copy()
+
+    df = df.dropna(
+        subset=required
+    )
+
+    if len(df) < 20:
+        return None
+
+    high = pd.to_numeric(
+        df["High"],
+        errors="coerce"
+    )
+
+    low = pd.to_numeric(
+        df["Low"],
+        errors="coerce"
+    )
+
+    close = pd.to_numeric(
+        df["Close"],
+        errors="coerce"
+    )
+
+    previous_close = close.shift(1)
+
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs()
+        ],
+        axis=1
+    ).max(
+        axis=1
+    )
+
+    atr14 = (
+        true_range
+        .rolling(14)
+        .mean()
+        .iloc[-1]
+    )
+
+    latest_close = float(
+        close.iloc[-1]
+    )
+
+    latest_high = float(
+        high.iloc[-1]
+    )
+
+    # Recent swing support excludes today's candle.
+    swing_low_10 = float(
+        low.shift(1)
+        .rolling(10)
+        .min()
+        .iloc[-1]
+    )
+
+    swing_low_20 = float(
+        low.shift(1)
+        .rolling(20)
+        .min()
+        .iloc[-1]
+    )
+
+    support_candidates = [
+        swing_low_10,
+        swing_low_20
+    ]
+
+    # Use Donchian lower if it exists.
+    if "DONCHIAN_LOWER" in df.columns:
+
+        donchian_support = (
+            pd.to_numeric(
+                df["DONCHIAN_LOWER"],
+                errors="coerce"
+            )
+            .iloc[-1]
+        )
+
+        if not pd.isna(
+            donchian_support
+        ):
+
+            support_candidates.append(
+                float(donchian_support)
+            )
+
+    support = min(
+        support_candidates
+    )
+
+    if pd.isna(atr14) or atr14 <= 0:
+        return None
+
+    # Entry slightly above current close to avoid treating
+    # the current close as a guaranteed fill.
+    entry = max(
+        latest_close * 1.0025,
+        latest_high * 1.001
+    )
+
+    # Stop must be below recent support and below a
+    # volatility-based 1.5 ATR level.
+    atr_stop = (
+        entry
+        - 1.5 * float(atr14)
+    )
+
+    support_stop = (
+        support * 0.995
+    )
+
+    stop_loss = min(
+        atr_stop,
+        support_stop
+    )
+
+    risk = (
+        entry
+        - stop_loss
+    )
+
+    if risk <= 0:
+        return None
+
+    target1 = (
+        entry
+        + 2.0 * risk
+    )
+
+    target2 = (
+        entry
+        + 3.0 * risk
+    )
+
+    risk_pct = (
+        risk
+        / entry
+        * 100
+    )
+
+    target1_pct = (
+        (target1 - entry)
+        / entry
+        * 100
+    )
+
+    target2_pct = (
+        (target2 - entry)
+        / entry
+        * 100
+    )
+
+    rr1 = (
+        target1 - entry
+    ) / risk
+
+    rr2 = (
+        target2 - entry
+    ) / risk
+
+    return {
+
+        "Entry":
+            entry,
+
+        "Stop Loss":
+            stop_loss,
+
+        "Target 1":
+            target1,
+
+        "Target 2":
+            target2,
+
+        "Risk":
+            risk,
+
+        "Risk %":
+            risk_pct,
+
+        "Target 1 %":
+            target1_pct,
+
+        "Target 2 %":
+            target2_pct,
+
+        "R:R T1":
+            rr1,
+
+        "R:R T2":
+            rr2,
+
+        "ATR14":
+            float(atr14),
+
+        "Support":
+            support
+    }
+
+
+# ============================================================
 # RSI / WMA MULTI-TIMEFRAME SCANNER
 # ============================================================
 
@@ -2344,7 +2585,7 @@ module = st.sidebar.radio(
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
-        "🏆 Top 10 Momentum Stocks",
+        "🏆 Top 20 Momentum Stocks",
         "🤖 AI Analyst"
     ]
 )
@@ -3922,10 +4163,10 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
                     """
                 )
 
-elif module == "🏆 Top 10 Momentum Stocks":
+elif module == "🏆 Top 20 Momentum Stocks":
 
     st.header(
-        "🏆 Top 10 Momentum Stocks"
+        "🏆 Top 20 Momentum Stocks"
     )
 
     st.write(
@@ -3960,7 +4201,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
         )
 
     st.sidebar.subheader(
-        "🏆 Top 10 Scanner"
+        "🏆 Top 20 Scanner"
     )
 
     universe = st.sidebar.selectbox(
@@ -4073,6 +4314,18 @@ elif module == "🏆 Top 10 Momentum Stocks":
 
             The ranking is a **technical-strength ranking**, not
             an investment recommendation.
+
+            ### 🎯 Automatic Trade Plan
+
+            • Entry = approximately 0.25% above the latest close  
+            • Stop Loss = below recent support and volatility-adjusted
+              using 1.5× ATR(14)  
+            • Target 1 = 2R  
+            • Target 2 = 3R  
+            • Risk/Reward is calculated from Entry → Stop Loss  
+
+            These are algorithmic reference levels, not guaranteed
+            execution prices or personalized investment advice.
             """
         )
 
@@ -4080,7 +4333,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
 
         progress = st.progress(
             0,
-            text="Starting Top-10 scan..."
+            text="Starting Top-20 scan..."
         )
 
         try:
@@ -4303,6 +4556,16 @@ elif module == "🏆 Top 10 Momentum Stocks":
                         hourly_signal = None
 
                 # --------------------------------------------
+                # AUTOMATIC TRADE PLAN
+                # --------------------------------------------
+
+                trade_plan = (
+                    calculate_trade_plan(
+                        daily_data
+                    )
+                )
+
+                # --------------------------------------------
                 # TOTAL SCORE
                 # --------------------------------------------
 
@@ -4471,6 +4734,62 @@ elif module == "🏆 Top 10 Momentum Stocks":
                         )
                         else np.nan,
 
+                    "Entry":
+                        round(
+                            trade_plan["Entry"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "Stop Loss":
+                        round(
+                            trade_plan["Stop Loss"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "Target 1":
+                        round(
+                            trade_plan["Target 1"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "Target 2":
+                        round(
+                            trade_plan["Target 2"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "Risk %":
+                        round(
+                            trade_plan["Risk %"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "R:R T1":
+                        round(
+                            trade_plan["R:R T1"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
+                    "R:R T2":
+                        round(
+                            trade_plan["R:R T2"],
+                            2
+                        )
+                        if trade_plan
+                        else np.nan,
+
                     "Daily Pass":
                         "✓"
                         if daily_pass
@@ -4520,7 +4839,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
 
             progress.progress(
                 100,
-                text="Top-10 scan completed."
+                text="Top-20 scan completed."
             )
 
             time.sleep(0.2)
@@ -4531,7 +4850,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
             progress.empty()
 
             st.error(
-                f"Top-10 scanner error: {e}"
+                f"Top-20 scanner error: {e}"
             )
 
             st.stop()
@@ -4553,10 +4872,10 @@ elif module == "🏆 Top 10 Momentum Stocks":
 
         else:
 
-            top10 = results_df.head(10).copy()
+            top20 = results_df.head(20).copy()
 
             st.success(
-                f"🏆 Top {len(top10)} stocks ranked from "
+                f"🏆 Top {len(top20)} stocks ranked from "
                 f"{len(stocks)} stocks."
             )
 
@@ -4569,11 +4888,11 @@ elif module == "🏆 Top 10 Momentum Stocks":
             )
 
             top_cols = st.columns(
-                min(3, len(top10))
+                min(3, len(top20))
             )
 
             for index, (_, row) in enumerate(
-                top10.head(3).iterrows()
+                top20.head(3).iterrows()
             ):
 
                 with top_cols[index]:
@@ -4630,7 +4949,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
             # -----------------------------------------------
 
             st.subheader(
-                "📊 Top 10 Ranking"
+                "📊 Top 20 Ranking"
             )
 
             display_columns = [
@@ -4646,6 +4965,13 @@ elif module == "🏆 Top 10 Momentum Stocks":
                 "Hourly RSI9",
                 "Volume Ratio",
                 "Close",
+                "Entry",
+                "Stop Loss",
+                "Target 1",
+                "Target 2",
+                "Risk %",
+                "R:R T1",
+                "R:R T2",
                 "Daily Pass",
                 "Weekly Pass",
                 "Hourly Pass",
@@ -4665,10 +4991,10 @@ elif module == "🏆 Top 10 Momentum Stocks":
             # -----------------------------------------------
 
             st.subheader(
-                "📱 Mobile-Friendly Top 10"
+                "📱 Mobile-Friendly Top 20"
             )
 
-            for _, row in top10.iterrows():
+            for _, row in top20.iterrows():
 
                 score = row[
                     "Total Score"
@@ -4755,6 +5081,44 @@ elif module == "🏆 Top 10 Momentum Stocks":
                         )
 
                     if not pd.isna(
+                        row["Entry"]
+                    ):
+
+                        st.markdown(
+                            "### 🎯 Trade Plan"
+                        )
+
+                        p1, p2 = st.columns(2)
+
+                        p1.metric(
+                            "Entry",
+                            f"₹{row['Entry']:.2f}"
+                        )
+
+                        p2.metric(
+                            "Stop Loss",
+                            f"₹{row['Stop Loss']:.2f}"
+                        )
+
+                        p1, p2 = st.columns(2)
+
+                        p1.metric(
+                            "Target 1",
+                            f"₹{row['Target 1']:.2f}"
+                        )
+
+                        p2.metric(
+                            "Target 2",
+                            f"₹{row['Target 2']:.2f}"
+                        )
+
+                        st.write(
+                            f"Risk: **{row['Risk %']:.2f}%** | "
+                            f"R:R to T1: **1:{row['R:R T1']:.1f}** | "
+                            f"R:R to T2: **1:{row['R:R T2']:.1f}**"
+                        )
+
+                    if not pd.isna(
                         row["Volume Ratio"]
                     ):
 
@@ -4767,14 +5131,14 @@ elif module == "🏆 Top 10 Momentum Stocks":
             # CSV DOWNLOAD
             # -----------------------------------------------
 
-            csv = top10.to_csv(
+            csv = top20.to_csv(
                 index=False
             )
 
             st.download_button(
-                label="⬇️ Download Top 10 Results",
+                label="⬇️ Download Top 20 Results",
                 data=csv,
-                file_name="Top_10_Momentum_Stocks.csv",
+                file_name="Top_20_Momentum_Stocks.csv",
                 mime="text/csv"
             )
 
@@ -4803,7 +5167,7 @@ elif module == "🏆 Top 10 Momentum Stocks":
             else:
 
                 if st.button(
-                    "🤖 Explain Top 10",
+                    "🤖 Explain Top 20",
                     type="secondary"
                 ):
 
@@ -4820,7 +5184,14 @@ elif module == "🏆 Top 10 Momentum Stocks":
                             "Weekly RSI9",
                             "Hourly RSI9",
                             "Volume Ratio",
-                            "Close"
+                            "Close",
+                            "Entry",
+                            "Stop Loss",
+                            "Target 1",
+                            "Target 2",
+                            "Risk %",
+                            "R:R T1",
+                            "R:R T2"
                         ]
                     ].to_dict(
                         orient="records"
