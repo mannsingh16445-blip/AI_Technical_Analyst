@@ -492,6 +492,218 @@ def load_nifty500():
 
 
 # ============================================================
+# LOAD NSE F&O STOCK UNIVERSE
+# ============================================================
+
+@st.cache_data(
+    ttl=86400,
+    show_spinner=False
+)
+def load_fno_stocks():
+
+    """
+    Load current NSE equity-derivatives stock underlyings.
+
+    Primary source:
+        NSE /api/underlying-information
+
+    Only individual-stock underlyings are returned.
+    Index derivatives such as NIFTY and BANKNIFTY are excluded.
+    """
+
+    api_url = (
+        "https://www.nseindia.com/"
+        "api/underlying-information"
+    )
+
+    page_url = (
+        "https://www.nseindia.com/"
+        "static/products-services/"
+        "equity-derivatives-list-underlyings-information"
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": page_url,
+        "Connection": "keep-alive"
+    }
+
+    # --------------------------------------------------------
+    # PRIMARY: NSE JSON endpoint
+    # --------------------------------------------------------
+
+    try:
+
+        session = requests.Session()
+        session.headers.update(headers)
+
+        # Establish NSE cookies/session first.
+        session.get(
+            "https://www.nseindia.com/",
+            timeout=20
+        )
+
+        response = session.get(
+            api_url,
+            headers=headers,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+
+            payload = response.json()
+
+            data_block = payload.get(
+                "data",
+                {}
+            )
+
+            underlying_list = data_block.get(
+                "UnderlyingList",
+                []
+            )
+
+            symbols = []
+
+            for item in underlying_list:
+
+                if isinstance(item, dict):
+
+                    symbol = (
+                        item.get("symbol")
+                        or item.get("SYMBOL")
+                        or item.get("Symbol")
+                    )
+
+                else:
+
+                    symbol = item
+
+                if symbol:
+
+                    symbol = (
+                        str(symbol)
+                        .strip()
+                        .upper()
+                    )
+
+                    if symbol not in [
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL"
+                    ]:
+
+                        symbols.append(
+                            symbol
+                        )
+
+            symbols = sorted(
+                set(symbols)
+            )
+
+            # Reject incomplete NSE responses.
+            if len(symbols) >= 100:
+
+                return symbols
+
+    except Exception:
+
+        pass
+
+    # --------------------------------------------------------
+    # FALLBACK: NSE underlying information page
+    # --------------------------------------------------------
+
+    try:
+
+        session = requests.Session()
+
+        session.headers.update({
+            "User-Agent":
+                headers["User-Agent"],
+            "Accept":
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language":
+                "en-US,en;q=0.9",
+            "Referer":
+                "https://www.nseindia.com/"
+        })
+
+        session.get(
+            "https://www.nseindia.com/",
+            timeout=20
+        )
+
+        response = session.get(
+            page_url,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+
+            tables = pd.read_html(
+                StringIO(
+                    response.text
+                )
+            )
+
+            for table in tables:
+
+                table.columns = [
+                    str(column)
+                    .strip()
+                    .upper()
+                    for column in table.columns
+                ]
+
+                if "SYMBOL" not in table.columns:
+                    continue
+
+                symbols = (
+                    table["SYMBOL"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                symbols = symbols[
+                    ~symbols.isin([
+                        "",
+                        "NAN",
+                        "NONE",
+                        "NULL",
+                        "SYMBOL"
+                    ])
+                ]
+
+                symbols = sorted(
+                    symbols
+                    .drop_duplicates()
+                    .tolist()
+                )
+
+                if len(symbols) >= 100:
+
+                    return symbols
+
+    except Exception:
+
+        pass
+
+    return []
+
+
+# ============================================================
 # DOWNLOAD MARKET DATA
 # ============================================================
 
@@ -2248,7 +2460,7 @@ elif module == "🚀 Smart Breakout Scanner":
     # --------------------------------------------------------
 
     with st.spinner(
-        "Loading NSE stock universe..."
+        "Loading NSE stock universes..."
     ):
 
         nse_stocks = (
@@ -2257,6 +2469,10 @@ elif module == "🚀 Smart Breakout Scanner":
 
         nifty500 = (
             load_nifty500()
+        )
+
+        fno_stocks = (
+            load_fno_stocks()
         )
 
     # --------------------------------------------------------
@@ -2272,6 +2488,7 @@ elif module == "🚀 Smart Breakout Scanner":
         [
             "Nifty 50",
             "Nifty 500",
+            "NSE F&O Stocks",
             "Full NSE"
         ]
     )
@@ -2283,6 +2500,10 @@ elif module == "🚀 Smart Breakout Scanner":
     elif universe == "Nifty 500":
 
         stocks = nifty500
+
+    elif universe == "NSE F&O Stocks":
+
+        stocks = fno_stocks
 
     elif universe == "Full NSE":
 
@@ -2308,6 +2529,23 @@ elif module == "🚀 Smart Breakout Scanner":
         st.stop()
 
     if (
+        universe == "NSE F&O Stocks"
+        and not stocks
+    ):
+
+        st.error(
+            """
+            NSE F&O stock list could not be loaded.
+
+            The NSE derivatives-underlying list may be
+            temporarily unavailable. Please try again later.
+            """
+        )
+
+        st.stop()
+
+
+    if (
         universe == "Full NSE"
         and not stocks
     ):
@@ -2329,6 +2567,14 @@ elif module == "🚀 Smart Breakout Scanner":
         f"Universe: **{universe}** | "
         f"Stocks: **{len(stocks)}**"
     )
+
+    if universe == "NSE F&O Stocks":
+
+        st.caption(
+            "NSE F&O Stocks = individual stocks with "
+            "current equity-derivatives underlyings on NSE. "
+            "Index derivatives are excluded."
+        )
 
     # --------------------------------------------------------
     # STAGE 1
