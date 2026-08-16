@@ -4326,6 +4326,28 @@ elif module == "🏆 Top 20 Momentum Stocks":
 
             These are algorithmic reference levels, not guaranteed
             execution prices or personalized investment advice.
+
+            ### 🏷️ Trade Setup Quality
+
+            **🟢 A+ Setup**
+            - Full Daily + Weekly + Hourly confirmation
+            - Score ≥ 80
+            - R:R to Target 1 ≥ 1:2
+
+            **🟢 A Setup**
+            - Daily + Weekly confirmation
+            - Score ≥ 65
+
+            **🟡 B Setup**
+            - Daily or Weekly confirmation
+            - Score ≥ 50
+
+            **🟡 C Setup**
+            - Partial technical confirmation
+            - Score ≥ 35
+
+            **🔴 Avoid**
+            - Weak technical confirmation
             """
         )
 
@@ -4576,6 +4598,66 @@ elif module == "🏆 Top 20 Momentum Stocks":
                     + hourly_score
                 )
 
+                # --------------------------------------------
+                # TRADE SETUP QUALITY
+                # --------------------------------------------
+
+                # A+ = strong multi-timeframe alignment
+                # A  = strong Daily + Weekly confirmation
+                # B  = useful momentum but incomplete confirmation
+                # C  = partial/weak setup
+                # Avoid = weak technical confirmation
+
+                if (
+                    full_mtf
+                    and total_score >= 80
+                    and (
+                        not pd.isna(
+                            trade_plan["R:R T1"]
+                        )
+                        if trade_plan
+                        else False
+                    )
+                    and (
+                        trade_plan["R:R T1"] >= 2
+                        if trade_plan
+                        else False
+                    )
+                ):
+
+                    setup_grade = "A+"
+                    setup_label = "🟢 A+ Setup"
+
+                elif (
+                    daily_pass
+                    and weekly_pass
+                    and total_score >= 65
+                ):
+
+                    setup_grade = "A"
+                    setup_label = "🟢 A Setup"
+
+                elif (
+                    (
+                        daily_pass
+                        or weekly_pass
+                    )
+                    and total_score >= 50
+                ):
+
+                    setup_grade = "B"
+                    setup_label = "🟡 B Setup"
+
+                elif total_score >= 35:
+
+                    setup_grade = "C"
+                    setup_label = "🟡 C Setup"
+
+                else:
+
+                    setup_grade = "Avoid"
+                    setup_label = "🔴 Avoid"
+
                 daily_pass = (
                     daily_signal is not None
                     and daily_signal["Cross"]
@@ -4661,6 +4743,12 @@ elif module == "🏆 Top 20 Momentum Stocks":
                             total_score,
                             1
                         ),
+
+                    "Setup Grade":
+                        setup_grade,
+
+                    "Setup":
+                        setup_label,
 
                     "Breakout Score":
                         breakout_score_display,
@@ -4817,10 +4905,25 @@ elif module == "🏆 Top 20 Momentum Stocks":
 
             if not results_df.empty:
 
+                grade_order = {
+                    "A+": 5,
+                    "A": 4,
+                    "B": 3,
+                    "C": 2,
+                    "Avoid": 1
+                }
+
+                results_df["_Grade Rank"] = (
+                    results_df["Setup Grade"]
+                    .map(grade_order)
+                    .fillna(0)
+                )
+
                 results_df = (
                     results_df
                     .sort_values(
                         [
+                            "_Grade Rank",
                             "Total Score",
                             "Weekly Score",
                             "Daily Score",
@@ -4831,6 +4934,10 @@ elif module == "🏆 Top 20 Momentum Stocks":
                     .reset_index(
                         drop=True
                     )
+                )
+
+                results_df = results_df.drop(
+                    columns=["_Grade Rank"]
                 )
 
                 results_df["Rank"] = (
@@ -4927,6 +5034,36 @@ elif module == "🏆 Top 20 Momentum Stocks":
                         f"{score:.1f}/100"
                     )
 
+                    if row["Setup Grade"] == "A+":
+
+                        st.success(
+                            "🟢 A+ Setup — Strong MTF confirmation"
+                        )
+
+                    elif row["Setup Grade"] == "A":
+
+                        st.success(
+                            "🟢 A Setup — Strong Daily + Weekly confirmation"
+                        )
+
+                    elif row["Setup Grade"] == "B":
+
+                        st.warning(
+                            "🟡 B Setup — Good momentum, incomplete confirmation"
+                        )
+
+                    elif row["Setup Grade"] == "C":
+
+                        st.warning(
+                            "🟡 C Setup — Partial confirmation"
+                        )
+
+                    else:
+
+                        st.error(
+                            "🔴 Avoid — Weak technical confirmation"
+                        )
+
                     st.write(
                         f"Daily RSI9: "
                         f"**{row['Daily RSI9']}**"
@@ -4955,6 +5092,8 @@ elif module == "🏆 Top 20 Momentum Stocks":
             display_columns = [
                 "Rank",
                 "Stock",
+                "Setup",
+                "Setup Grade",
                 "Total Score",
                 "Breakout Score",
                 "Daily Score",
@@ -5015,6 +5154,18 @@ elif module == "🏆 Top 20 Momentum Stocks":
                     c1.metric(
                         "Total Score",
                         f"{score:.1f}/100"
+                    )
+
+                    c2.metric(
+                        "Setup",
+                        row["Setup"]
+                    )
+
+                    c1, c2 = st.columns(2)
+
+                    c1.metric(
+                        "Grade",
+                        row["Setup Grade"]
                     )
 
                     c2.metric(
@@ -5175,6 +5326,8 @@ elif module == "🏆 Top 20 Momentum Stocks":
                         [
                             "Rank",
                             "Stock",
+                            "Setup",
+                            "Setup Grade",
                             "Total Score",
                             "Breakout Score",
                             "Daily Score",
@@ -5210,6 +5363,8 @@ elif module == "🏆 Top 20 Momentum Stocks":
                        confirmation.
                     5. What should be checked on the chart
                        before considering a trade.
+                    6. Explain why the A+ and A setups rank above
+                       the B/C setups.
 
                     Do not invent prices or indicators.
                     Do not guarantee returns.
