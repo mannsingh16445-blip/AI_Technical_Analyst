@@ -764,23 +764,86 @@ if page == "Technical Chart":
         index=1
     )
 
+    st.info(
+        f"Loading {symbol}.NS..."
+    )
+
     market = download_batches(
         [symbol],
         period,
         1
     )
 
-    if symbol not in market:
+    if not market:
 
         st.error(
-            f"Unable to retrieve {symbol}"
+            f"""
+            Unable to retrieve **{symbol}.NS**
+
+            Please check:
+            1. The NSE symbol is correct.
+            2. The stock is listed on NSE.
+            3. Yahoo Finance is currently returning data.
+            """
         )
 
         st.stop()
 
+    if symbol not in market:
+
+        st.error(
+            f"No Yahoo Finance data available for {symbol}.NS"
+        )
+
+        st.stop()
+
+    data = market[symbol].copy()
+
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
+
+    required_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+    ]
+
+    missing = [
+        col
+        for col in required_columns
+        if col not in data.columns
+    ]
+
+    if missing:
+
+        st.error(
+            f"Missing columns: {missing}"
+        )
+
+        st.stop()
+
+    # ========================================================
+    # INDICATORS
+    # ========================================================
+
     data = calculate_indicators(
-        market[symbol]
+        data
     )
+
+    if data.empty:
+
+        st.error(
+            "No usable historical data after processing."
+        )
+
+        st.stop()
+
+    # ========================================================
+    # CHART
+    # ========================================================
 
     fig = go.Figure()
 
@@ -795,30 +858,73 @@ if page == "Technical Chart":
         )
     )
 
-    for column, name in [
-        ("SMA20", "SMA 20"),
-        ("SMA50", "SMA 50"),
-        ("SMA200", "SMA 200"),
-        (
-            "DONCHIAN_UPPER",
-            "Donchian Upper"
-        ),
-        (
-            "DONCHIAN_LOWER",
-            "Donchian Lower"
-        )
-    ]:
+    # ========================================================
+    # SMA 20
+    # ========================================================
 
-        fig.add_trace(
-            go.Scatter(
-                x=data.index,
-                y=data[column],
-                mode="lines",
-                name=name
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["SMA20"],
+            mode="lines",
+            name="SMA 20"
         )
+    )
+
+    # ========================================================
+    # SMA 50
+    # ========================================================
+
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["SMA50"],
+            mode="lines",
+            name="SMA 50"
+        )
+    )
+
+    # ========================================================
+    # SMA 200
+    # ========================================================
+
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["SMA200"],
+            mode="lines",
+            name="SMA 200"
+        )
+    )
+
+    # ========================================================
+    # DONCHIAN UPPER
+    # ========================================================
+
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["DONCHIAN_UPPER"],
+            mode="lines",
+            name="Donchian Upper"
+        )
+    )
+
+    # ========================================================
+    # DONCHIAN LOWER
+    # ========================================================
+
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["DONCHIAN_LOWER"],
+            mode="lines",
+            name="Donchian Lower"
+        )
+    )
 
     fig.update_layout(
+        title=f"{symbol} — Technical Analysis",
         height=700,
         xaxis_rangeslider_visible=False,
         hovermode="x unified"
@@ -827,6 +933,34 @@ if page == "Technical Chart":
     st.plotly_chart(
         fig,
         width="stretch"
+    )
+
+    # ========================================================
+    # CURRENT DATA
+    # ========================================================
+
+    latest = data.iloc[-1]
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Close",
+        f"₹{latest['Close']:.2f}"
+    )
+
+    col2.metric(
+        "RSI",
+        f"{latest['RSI14']:.1f}"
+    )
+
+    col3.metric(
+        "200 SMA",
+        f"₹{latest['SMA200']:.2f}"
+    )
+
+    col4.metric(
+        "Volume Ratio",
+        f"{latest['VOLUME_RATIO']:.2f}x"
     )
 
 
