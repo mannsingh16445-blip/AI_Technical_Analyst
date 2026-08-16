@@ -1839,172 +1839,171 @@ MACD = 1 point
             )
 
             # ------------------------------------------------
-            # TOP STOCKS
+            # TOP EARLY BREAKOUT CANDIDATES
             # ------------------------------------------------
 
-st.subheader(
-    "🏆 Top Early Breakout Candidates"
-)
+            st.subheader(
+                "🏆 Top Early Breakout Candidates"
+            )
 
-top = results_df[
-    [
-        "Stock",
-        "Close",
-        "200 SMA",
-        "RSI",
-        "Volume Ratio",
-        "Technical Score"
-    ]
-].head(20)
+            top = results_df[
+                [
+                    "Stock",
+                    "Close",
+                    "200 SMA",
+                    "RSI",
+                    "Volume Ratio",
+                    "Technical Score"
+                ]
+            ].head(20)
 
+            # =================================================
+            # DESKTOP TABLE
+            # =================================================
 
-# ============================================================
-# DESKTOP TABLE
-# ============================================================
+            st.markdown(
+                """
+                <div class="desktop-scanner">
+                """,
+                unsafe_allow_html=True
+            )
 
-st.markdown(
-    """
-    <div class="desktop-scanner">
-    """,
-    unsafe_allow_html=True
-)
+            st.dataframe(
+                top,
+                width="stretch",
+                hide_index=True
+            )
 
-st.dataframe(
-    top,
-    width="stretch",
-    hide_index=True
-)
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True
+            )
 
-st.markdown(
-    "</div>",
-    unsafe_allow_html=True
-)
+            # =================================================
+            # MOBILE CSS
+            # =================================================
 
+            st.markdown(
+                """
+                <style>
 
-# ============================================================
-# MOBILE STOCK CARDS
-# ============================================================
+                .mobile-scanner {
+                    display: none;
+                }
 
-st.markdown(
-    """
-    <style>
+                @media only screen and (max-width: 768px) {
 
-    .mobile-scanner {
-        display: none;
-    }
+                    .desktop-scanner {
+                        display: none !important;
+                    }
 
-    @media only screen and (max-width: 768px) {
+                    .mobile-scanner {
+                        display: block !important;
+                    }
 
-        .desktop-scanner {
-            display: none !important;
-        }
+                    .stock-card {
+                        border: 1px solid rgba(128,128,128,0.35);
+                        border-radius: 12px;
+                        padding: 14px;
+                        margin-bottom: 12px;
+                    }
 
-        .mobile-scanner {
-            display: block !important;
-        }
+                    .stock-title {
+                        font-size: 1.2rem;
+                        font-weight: 700;
+                        margin-bottom: 8px;
+                    }
 
-        .stock-card {
-            border: 1px solid rgba(128,128,128,0.35);
-            border-radius: 12px;
-            padding: 14px;
-            margin-bottom: 12px;
-        }
+                    .stock-score {
+                        font-size: 1.05rem;
+                        font-weight: 700;
+                        margin-bottom: 10px;
+                    }
 
-        .stock-title {
-            font-size: 1.2rem;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }
+                    .stock-row {
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 5px 0;
+                        font-size: 0.9rem;
+                    }
 
-        .stock-score {
-            font-size: 1.05rem;
-            font-weight: 700;
-            margin-bottom: 10px;
-        }
+                }
 
-        .stock-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 5px 0;
-            font-size: 0.9rem;
-        }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
 
-    }
+            # =================================================
+            # MOBILE STOCK CARDS
+            # =================================================
 
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+            st.markdown(
+                '<div class="mobile-scanner">',
+                unsafe_allow_html=True
+            )
 
+            for _, row in top.iterrows():
 
-st.markdown(
-    '<div class="mobile-scanner">',
-    unsafe_allow_html=True
-)
+                score = int(
+                    row["Technical Score"]
+                )
 
+                if score >= 8:
 
-for _, row in top.iterrows():
+                    badge = "🔥 STRONG"
 
-    score = int(
-        row["Technical Score"]
-    )
+                elif score >= 6:
 
-    if score >= 8:
+                    badge = "🟢 POSITIVE"
 
-        badge = "🔥 STRONG"
+                else:
 
-    elif score >= 6:
+                    badge = "🟡 WATCH"
 
-        badge = "🟢 POSITIVE"
+                card = f"""
+                <div class="stock-card">
 
-    else:
+                    <div class="stock-title">
+                        📈 {row['Stock']}
+                    </div>
 
-        badge = "🟡 WATCH"
+                    <div class="stock-score">
+                        {badge} — Score {score}/10
+                    </div>
 
-    card = f"""
-    <div class="stock-card">
+                    <div class="stock-row">
+                        <span>Close</span>
+                        <strong>₹{row['Close']:.2f}</strong>
+                    </div>
 
-        <div class="stock-title">
-            📈 {row['Stock']}
-        </div>
+                    <div class="stock-row">
+                        <span>200 SMA</span>
+                        <strong>₹{row['200 SMA']:.2f}</strong>
+                    </div>
 
-        <div class="stock-score">
-            {badge} — Score {score}/10
-        </div>
+                    <div class="stock-row">
+                        <span>RSI</span>
+                        <strong>{row['RSI']:.1f}</strong>
+                    </div>
 
-        <div class="stock-row">
-            <span>Close</span>
-            <strong>₹{row['Close']:.2f}</strong>
-        </div>
+                    <div class="stock-row">
+                        <span>Volume</span>
+                        <strong>{row['Volume Ratio']:.2f}x</strong>
+                    </div>
 
-        <div class="stock-row">
-            <span>200 SMA</span>
-            <strong>₹{row['200 SMA']:.2f}</strong>
-        </div>
+                </div>
+                """
 
-        <div class="stock-row">
-            <span>RSI</span>
-            <strong>{row['RSI']:.1f}</strong>
-        </div>
+                st.markdown(
+                    card,
+                    unsafe_allow_html=True
+                )
 
-        <div class="stock-row">
-            <span>Volume</span>
-            <strong>{row['Volume Ratio']:.2f}x</strong>
-        </div>
-
-    </div>
-    """
-
-    st.markdown(
-        card,
-        unsafe_allow_html=True
-    )
-
-
-st.markdown(
-    "</div>",
-    unsafe_allow_html=True
-)
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True
+            )
 
             # ------------------------------------------------
             # SCORE DISTRIBUTION
