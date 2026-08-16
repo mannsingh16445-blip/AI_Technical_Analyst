@@ -3670,6 +3670,14 @@ elif module == "🚀 Smart Breakout Scanner":
             load_fno_stocks()
         )
 
+        nifty_midcap100 = (
+            load_nifty_midcap100()
+        )
+
+        nifty_smallcap500 = (
+            load_nifty_smallcap500()
+        )
+
     # --------------------------------------------------------
     # UNIVERSE
     # --------------------------------------------------------
@@ -4440,6 +4448,14 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
             load_fno_stocks()
         )
 
+        nifty_midcap100 = (
+            load_nifty_midcap100()
+        )
+
+        nifty_smallcap500 = (
+            load_nifty_smallcap500()
+        )
+
 
     st.sidebar.subheader(
         "RSI/WMA Scanner"
@@ -5011,6 +5027,8 @@ elif module == "📅 Weekly Trend Scanner":
         nse_stocks=load_nse_equity_universe()
         nifty_midcap100=load_nifty_midcap100()
         nifty_smallcap500=load_nifty_smallcap500()
+        nifty_midcap100=load_nifty_midcap100()
+        nifty_smallcap500=load_nifty_smallcap500()
 
     universe=st.sidebar.selectbox(
         "Stock Universe",
@@ -5191,6 +5209,8 @@ elif module == "📈 Daily Trend 50/150/200 Scanner":
         fno_stocks=load_fno_stocks()
         nifty500=load_nifty500()
         nse_stocks=load_nse_equity_universe()
+        nifty_midcap100=load_nifty_midcap100()
+        nifty_smallcap500=load_nifty_smallcap500()
         nifty_midcap100=load_nifty_midcap100()
         nifty_smallcap500=load_nifty_smallcap500()
 
@@ -5404,6 +5424,14 @@ elif module == "🏆 Top 20 Momentum Stocks":
 
         fno_stocks = (
             load_fno_stocks()
+        )
+
+        nifty_midcap100 = (
+            load_nifty_midcap100()
+        )
+
+        nifty_smallcap500 = (
+            load_nifty_smallcap500()
         )
 
     st.sidebar.subheader(
