@@ -55,6 +55,11 @@ show_macd = st.sidebar.checkbox(
     value=True
 )
 
+show_volume = st.sidebar.checkbox(
+    "Volume",
+    value=True
+)
+
 ticker = symbol + ".NS"
 
 
@@ -118,7 +123,8 @@ try:
         "Open",
         "High",
         "Low",
-        "Close"
+        "Close",
+        "Volume"
     ]
 
     missing = [
@@ -140,7 +146,8 @@ try:
             "Open",
             "High",
             "Low",
-            "Close"
+            "Close",
+            "Volume"
         ]
     )
 
@@ -225,10 +232,28 @@ try:
     )
 
     # ========================================================
+    # VOLUME ANALYSIS
+    # ========================================================
+
+    data["Volume_Avg20"] = (
+        data["Volume"]
+        .rolling(window=20)
+        .mean()
+    )
+
+    data["Volume_Ratio"] = (
+        data["Volume"] /
+        data["Volume_Avg20"]
+    )
+
+    # ========================================================
     # CREATE SUBPLOTS
     # ========================================================
 
     panel_count = 1
+
+    if show_volume:
+        panel_count += 1
 
     if show_rsi:
         panel_count += 1
@@ -236,23 +261,24 @@ try:
     if show_macd:
         panel_count += 1
 
-    row_heights = [0.55]
-
-    remaining = 0.45
+    row_heights = [0.50]
 
     if panel_count > 1:
+
+        remaining_height = 0.50
 
         for i in range(panel_count - 1):
 
             row_heights.append(
-                remaining / (panel_count - 1)
+                remaining_height /
+                (panel_count - 1)
             )
 
     fig = make_subplots(
         rows=panel_count,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.04,
+        vertical_spacing=0.035,
         row_heights=row_heights
     )
 
@@ -333,6 +359,45 @@ try:
         )
 
     current_row = 2
+
+    # ========================================================
+    # VOLUME
+    # ========================================================
+
+    if show_volume:
+
+        fig.add_trace(
+
+            go.Bar(
+                x=data.index,
+                y=data["Volume"],
+                name="Volume"
+            ),
+
+            row=current_row,
+            col=1
+        )
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["Volume_Avg20"],
+                mode="lines",
+                name="Average Volume 20"
+            ),
+
+            row=current_row,
+            col=1
+        )
+
+        fig.update_yaxes(
+            title_text="Volume",
+            row=current_row,
+            col=1
+        )
+
+        current_row += 1
 
     # ========================================================
     # RSI
@@ -444,7 +509,7 @@ try:
 
         title=f"{symbol} Technical Analysis",
 
-        height=1050,
+        height=1200,
 
         xaxis_rangeslider_visible=False,
 
@@ -484,7 +549,25 @@ try:
         latest["MACD_Histogram"]
     )
 
-    st.subheader("📊 Current Technical Values")
+    volume = float(
+        latest["Volume"]
+    )
+
+    avg_volume = float(
+        latest["Volume_Avg20"]
+    )
+
+    volume_ratio = float(
+        latest["Volume_Ratio"]
+    )
+
+    # ========================================================
+    # TECHNICAL VALUES
+    # ========================================================
+
+    st.subheader(
+        "📊 Current Technical Values"
+    )
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -514,10 +597,58 @@ try:
     )
 
     # ========================================================
-    # MACD VALUES
+    # VOLUME STATUS
     # ========================================================
 
-    st.subheader("📉 MACD Status")
+    st.subheader(
+        "📊 Volume Analysis"
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "Current Volume",
+        f"{volume:,.0f}"
+    )
+
+    col2.metric(
+        "20-Day Avg Volume",
+        f"{avg_volume:,.0f}"
+    )
+
+    col3.metric(
+        "Volume Ratio",
+        f"{volume_ratio:.2f}×"
+    )
+
+    if volume_ratio >= 1.5:
+
+        st.success(
+            f"🟢 Strong volume: "
+            f"{volume_ratio:.2f}× the 20-day average"
+        )
+
+    elif volume_ratio >= 1.0:
+
+        st.info(
+            f"🟡 Normal/positive volume: "
+            f"{volume_ratio:.2f}× the 20-day average"
+        )
+
+    else:
+
+        st.warning(
+            f"🔴 Weak volume: "
+            f"{volume_ratio:.2f}× the 20-day average"
+        )
+
+    # ========================================================
+    # MACD STATUS
+    # ========================================================
+
+    st.subheader(
+        "📉 MACD Status"
+    )
 
     col1, col2, col3 = st.columns(3)
 
@@ -548,23 +679,13 @@ try:
             "🔴 MACD is BELOW the Signal Line — bearish momentum"
         )
 
-    if histogram > 0:
-
-        st.success(
-            "🟢 MACD Histogram is positive"
-        )
-
-    else:
-
-        st.warning(
-            "🔴 MACD Histogram is negative"
-        )
-
     # ========================================================
-    # RSI INTERPRETATION
+    # RSI STATUS
     # ========================================================
 
-    st.subheader("⚡ Momentum Status")
+    st.subheader(
+        "⚡ Momentum Status"
+    )
 
     if rsi >= 70:
 
@@ -594,7 +715,9 @@ try:
     # TREND STATUS
     # ========================================================
 
-    st.subheader("📈 Moving Average Trend")
+    st.subheader(
+        "📈 Moving Average Trend"
+    )
 
     if close > sma200:
 
@@ -638,7 +761,8 @@ try:
 
     st.caption(
         f"Data points: {len(data)} | "
-        f"Last available date: {data.index[-1].date()}"
+        f"Last available date: "
+        f"{data.index[-1].date()}"
     )
 
     st.success(
