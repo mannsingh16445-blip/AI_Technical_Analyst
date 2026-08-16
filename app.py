@@ -1512,6 +1512,181 @@ def stage_two_analysis(data):
 
 
 # ============================================================
+# WEEKLY TREND / MOMENTUM SCREEN
+# ============================================================
+
+def calculate_weekly_trend_screen(data):
+    """
+    User-specified weekly scanner:
+    1) Close > SMA20
+    2) Close > SMA50
+    3) Close >= 90% of 20-week maximum Close
+    4) ATR14 < ATR14 four weeks ago
+    5) Current week Close > Open
+    6) Previous week Close > Open
+    7) Two weeks ago Close > Open
+    8) Volume > Volume SMA20
+    9) Close > 100
+    10) Volume > 1,000,000
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df=data.copy()
+
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    req=["Open","High","Low","Close","Volume"]
+
+    if any(c not in df.columns for c in req):
+        return None
+
+    df=df.dropna(subset=req)
+
+    if len(df)<260:
+        return None
+
+    df.index=pd.to_datetime(df.index)
+
+    weekly=df.resample("W-FRI").agg({
+        "Open":"first",
+        "High":"max",
+        "Low":"min",
+        "Close":"last",
+        "Volume":"sum"
+    }).dropna(subset=req)
+
+    if len(weekly)<60:
+        return None
+
+    weekly["SMA20"]=weekly["Close"].rolling(20).mean()
+    weekly["SMA50"]=weekly["Close"].rolling(50).mean()
+
+    prev_close=weekly["Close"].shift(1)
+
+    tr=pd.concat([
+        weekly["High"]-weekly["Low"],
+        (weekly["High"]-prev_close).abs(),
+        (weekly["Low"]-prev_close).abs()
+    ],axis=1).max(axis=1)
+
+    weekly["ATR14"]=tr.rolling(14).mean()
+    weekly["MAX20_CLOSE"]=weekly["Close"].rolling(20).max()
+    weekly["VOL_SMA20"]=weekly["Volume"].rolling(20).mean()
+
+    cur=weekly.iloc[-1]
+
+    conditions={
+        "Close > SMA20": cur["Close"] > cur["SMA20"],
+        "Close > SMA50": cur["Close"] > cur["SMA50"],
+        "Close >= 90% of 20W Max": cur["Close"] >= cur["MAX20_CLOSE"]*0.90,
+        "ATR14 < ATR14 4W Ago": cur["ATR14"] < weekly["ATR14"].shift(4).iloc[-1],
+        "Current Week Green": cur["Close"] > cur["Open"],
+        "1 Week Ago Green": weekly["Close"].shift(1).iloc[-1] > weekly["Open"].shift(1).iloc[-1],
+        "2 Weeks Ago Green": weekly["Close"].shift(2).iloc[-1] > weekly["Open"].shift(2).iloc[-1],
+        "Volume > Volume SMA20": cur["Volume"] > cur["VOL_SMA20"],
+        "Close > 100": cur["Close"] > 100,
+        "Volume > 1M": cur["Volume"] > 1000000
+    }
+
+    # All required values are available once 60 weekly bars exist.
+    passed=all(bool(v) for v in conditions.values())
+
+    return {
+        "Pass":passed,
+        "Conditions":conditions,
+        "Close":float(cur["Close"]),
+        "SMA20":float(cur["SMA20"]),
+        "SMA50":float(cur["SMA50"]),
+        "ATR14":float(cur["ATR14"]),
+        "ATR14_4W":float(weekly["ATR14"].shift(4).iloc[-1]),
+        "MAX20_CLOSE":float(cur["MAX20_CLOSE"]),
+        "Volume":float(cur["Volume"]),
+        "VOL_SMA20":float(cur["VOL_SMA20"]),
+        "WeeklyDate":weekly.index[-1]
+    }
+
+
+# ============================================================
+# DAILY TREND / 50-150-200 SMA SCREEN
+# ============================================================
+
+def calculate_daily_trend_screen(data):
+    """
+    Daily conditions supplied by the user:
+    Close>SMA150; Close>SMA200; SMA150>SMA200;
+    SMA200 rising; SMA50>SMA150; SMA50>SMA200;
+    Close>=1.25*252D Low; Close>=0.75*252D High;
+    Close>SMA50; Volume>100000.
+    """
+
+    if data is None or data.empty:
+        return None
+
+    df=data.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    required=["Open","High","Low","Close","Volume"]
+
+    if any(c not in df.columns for c in required):
+        return None
+
+    df=df.dropna(subset=required)
+
+    if len(df)<252:
+        return None
+
+    close=pd.to_numeric(df["Close"],errors="coerce")
+    volume=pd.to_numeric(df["Volume"],errors="coerce")
+
+    sma50=close.rolling(50).mean()
+    sma150=close.rolling(150).mean()
+    sma200=close.rolling(200).mean()
+
+    min252=close.rolling(252).min()
+    max252=close.rolling(252).max()
+
+    c=float(close.iloc[-1])
+    v=float(volume.iloc[-1])
+    s50=float(sma50.iloc[-1])
+    s150=float(sma150.iloc[-1])
+    s200=float(sma200.iloc[-1])
+    prev_s200=float(sma200.iloc[-2])
+    lo=float(min252.iloc[-1])
+    hi=float(max252.iloc[-1])
+
+    conditions={
+        "Close > SMA150": c>s150,
+        "Close > SMA200": c>s200,
+        "SMA150 > SMA200": s150>s200,
+        "SMA200 rising": s200>prev_s200,
+        "SMA50 > SMA150": s50>s150,
+        "SMA50 > SMA200": s50>s200,
+        "Close >= 1.25 x 252D Low": c>=lo*1.25,
+        "Close >= 0.75 x 252D High": c>=hi*0.75,
+        "Close > SMA50": c>s50,
+        "Volume > 100000": v>100000
+    }
+
+    return {
+        "Pass": all(conditions.values()),
+        "Conditions": conditions,
+        "Close": c,
+        "Volume": v,
+        "SMA50": s50,
+        "SMA150": s150,
+        "SMA200": s200,
+        "Previous SMA200": prev_s200,
+        "252D Low": lo,
+        "252D High": hi
+    }
+
+
+# ============================================================
 # AUTOMATIC TRADE PLAN
 # ============================================================
 
@@ -2585,6 +2760,8 @@ module = st.sidebar.radio(
         "📊 Technical Chart",
         "🚀 Smart Breakout Scanner",
         "📡 RSI/WMA Timeframe Scanner",
+        "📅 Weekly Trend Scanner",
+        "📈 Daily Trend 50/150/200 Scanner",
         "🏆 Top 20 Momentum Stocks",
         "📊 Backtest & Performance",
         "🤖 AI Analyst"
@@ -4164,6 +4341,361 @@ elif module == "📡 RSI/WMA Timeframe Scanner":
                     """
                 )
 
+elif module == "📅 Weekly Trend Scanner":
+
+    st.header("📅 Weekly Trend Scanner")
+
+    st.write(
+        "Scanner based on the 10 weekly conditions supplied by you."
+    )
+
+    with st.spinner("Loading NSE stock universes..."):
+
+        fno_stocks=load_fno_stocks()
+        nifty500=load_nifty500()
+        nse_stocks=load_nse_equity_universe()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        ["NSE F&O Stocks","Nifty 50","Nifty 500","Full NSE"],
+        index=0,
+        key="weekly_trend_universe"
+    )
+
+    if universe=="NSE F&O Stocks":
+        stocks=list(fno_stocks)
+    elif universe=="Nifty 50":
+        stocks=list(NIFTY50)
+    elif universe=="Nifty 500":
+        stocks=list(nifty500)[:500]
+    else:
+        stocks=list(nse_stocks)
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks",
+        10,
+        min(500,max(10,len(stocks))),
+        min(100,max(10,len(stocks))),
+        10,
+        key="weekly_trend_max"
+    )
+
+    period=st.sidebar.selectbox(
+        "Data Period",
+        ["2y","3y","5y","10y"],
+        index=1,
+        key="weekly_trend_period"
+    )
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks: **{min(max_stocks,len(stocks))}**"
+    )
+
+    with st.expander("📐 Conditions used"):
+
+        st.markdown(
+            """
+            1. Weekly Close > Weekly SMA(20)  
+            2. Weekly Close > Weekly SMA(50)  
+            3. Weekly Close ≥ 90% of 20-week maximum Close  
+            4. Weekly ATR(14) < ATR(14) four weeks ago  
+            5. Current Weekly Close > Weekly Open  
+            6. 1 week ago Close > 1 week ago Open  
+            7. 2 weeks ago Close > 2 weeks ago Open  
+            8. Weekly Volume > Weekly SMA(Volume,20)  
+            9. Weekly Close > 100  
+            10. Weekly Volume > 1,000,000
+            """
+        )
+
+    if st.sidebar.button(
+        "🔎 RUN WEEKLY SCAN",
+        type="primary",
+        key="weekly_trend_run"
+    ):
+
+        selected=stocks[:max_stocks]
+
+        progress=st.progress(
+            0,
+            text="Scanning weekly conditions..."
+        )
+
+        rows=[]
+
+        market=download_batches(
+            selected,
+            period,
+            50
+        )
+
+        for n,symbol in enumerate(selected):
+
+            result=calculate_weekly_trend_screen(
+                market.get(symbol)
+            )
+
+            if result is not None:
+
+                passed=sum(
+                    bool(v)
+                    for v in result["Conditions"].values()
+                )
+
+                rows.append({
+                    "Stock":symbol,
+                    "Status":"🟢 PASS" if result["Pass"] else "—",
+                    "Passed":f"{passed}/10",
+                    "Weekly Close":round(result["Close"],2),
+                    "SMA20":round(result["SMA20"],2),
+                    "SMA50":round(result["SMA50"],2),
+                    "20W Max":round(result["MAX20_CLOSE"],2),
+                    "ATR14":round(result["ATR14"],2),
+                    "ATR14 4W Ago":round(result["ATR14_4W"],2),
+                    "Volume":int(result["Volume"]),
+                    "Volume SMA20":int(result["VOL_SMA20"])
+                })
+
+            progress.progress(
+                int(100*(n+1)/max(1,len(selected))),
+                text=f"Scanning {symbol}..."
+            )
+
+        progress.empty()
+
+        result_df=pd.DataFrame(rows)
+
+        if result_df.empty:
+
+            st.warning("No usable weekly data was returned.")
+
+        else:
+
+            passed_df=result_df[
+                result_df["Status"]=="🟢 PASS"
+            ].copy()
+
+            st.success(
+                f"**{len(passed_df)}** stocks passed all 10 conditions "
+                f"out of **{len(result_df)}** tested."
+            )
+
+            if not passed_df.empty:
+
+                st.subheader(
+                    "🟢 Stocks Passing All 10 Conditions"
+                )
+
+                st.dataframe(
+                    passed_df,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Weekly Results",
+                    passed_df.to_csv(index=False),
+                    "Weekly_Trend_10_Conditions.csv",
+                    "text/csv"
+                )
+
+            else:
+
+                st.info(
+                    "No stocks currently pass all 10 conditions."
+                )
+
+            with st.expander("📋 Show all tested stocks"):
+
+                st.dataframe(
+                    result_df,
+                    width="stretch",
+                    hide_index=True
+                )
+
+elif module == "📈 Daily Trend 50/150/200 Scanner":
+
+    st.header("📈 Daily Trend 50/150/200 Scanner")
+
+    st.write(
+        "Exact implementation of the 10 daily conditions supplied by you."
+    )
+
+    with st.spinner("Loading NSE stock universes..."):
+
+        fno_stocks=load_fno_stocks()
+        nifty500=load_nifty500()
+        nse_stocks=load_nse_equity_universe()
+
+    st.sidebar.subheader("📈 Daily Trend Scanner")
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        ["NSE F&O Stocks","Nifty 50","Nifty 500","Full NSE"],
+        index=0,
+        key="daily_trend_universe"
+    )
+
+    if universe=="NSE F&O Stocks":
+        stocks=list(fno_stocks)
+    elif universe=="Nifty 50":
+        stocks=list(NIFTY50)
+    elif universe=="Nifty 500":
+        stocks=list(nifty500)[:500]
+    else:
+        stocks=list(nse_stocks)
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks to Scan",
+        min_value=10,
+        max_value=min(500,max(10,len(stocks))),
+        value=min(100,max(10,len(stocks))),
+        step=10,
+        key="daily_trend_max_stocks"
+    )
+
+    period=st.sidebar.selectbox(
+        "Historical Data",
+        ["2y","3y","5y","10y"],
+        index=1,
+        key="daily_trend_period"
+    )
+
+    run_scan=st.sidebar.button(
+        "🔎 RUN DAILY TREND SCAN",
+        type="primary",
+        key="daily_trend_run"
+    )
+
+    with st.expander("📐 Exact Scanner Conditions"):
+
+        st.markdown(
+            """
+            1. Daily Close > Daily SMA(150)
+            2. Daily Close > Daily SMA(200)
+            3. Daily SMA(150) > Daily SMA(200)
+            4. Daily SMA(200) > 1-day-ago Daily SMA(200)
+            5. Daily SMA(50) > Daily SMA(150)
+            6. Daily SMA(50) > Daily SMA(200)
+            7. Daily Close ≥ Daily Min(252, Close) × 1.25
+            8. Daily Close ≥ Daily Max(252, Close) × 0.75
+            9. Daily Close > Daily SMA(50)
+            10. Daily Volume > 100,000
+            """
+        )
+
+    if run_scan:
+
+        selected=stocks[:max_stocks]
+
+        progress=st.progress(0,text="Downloading daily trend data...")
+
+        try:
+
+            market=download_batches(selected,period,50)
+            rows=[]
+
+            for n,symbol in enumerate(selected):
+
+                data=market.get(symbol)
+
+                if data is None or data.empty:
+                    continue
+
+                result=calculate_daily_trend_screen(data)
+
+                if result is None:
+                    continue
+
+                passed_count=sum(
+                    bool(v)
+                    for v in result["Conditions"].values()
+                )
+
+                rows.append({
+                    "Stock":symbol,
+                    "Status":
+                        "🟢 PASS"
+                        if result["Pass"]
+                        else "—",
+                    "Conditions Passed":
+                        f"{passed_count}/10",
+                    "Close":round(result["Close"],2),
+                    "SMA50":round(result["SMA50"],2),
+                    "SMA150":round(result["SMA150"],2),
+                    "SMA200":round(result["SMA200"],2),
+                    "Prev SMA200":round(result["Previous SMA200"],2),
+                    "252D Low":round(result["252D Low"],2),
+                    "252D High":round(result["252D High"],2),
+                    "Volume":int(result["Volume"])
+                })
+
+                progress.progress(
+                    int(100*(n+1)/max(1,len(selected))),
+                    text=f"Scanning {symbol}..."
+                )
+
+            progress.empty()
+
+            result_df=pd.DataFrame(rows)
+
+            if result_df.empty:
+
+                st.warning("No usable daily data was returned.")
+
+            else:
+
+                passed_df=result_df[
+                    result_df["Status"]=="🟢 PASS"
+                ].copy()
+
+                st.success(
+                    f"Daily trend scan completed: "
+                    f"**{len(passed_df)} stocks passed** "
+                    f"out of **{len(result_df)} tested**."
+                )
+
+                if not passed_df.empty:
+
+                    st.subheader(
+                        "🟢 Stocks Passing All 10 Conditions"
+                    )
+
+                    st.dataframe(
+                        passed_df,
+                        width="stretch",
+                        hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Daily Trend Results",
+                        passed_df.to_csv(index=False),
+                        "Daily_Trend_50_150_200_Scanner.csv",
+                        "text/csv"
+                    )
+
+                else:
+
+                    st.info(
+                        "No stocks currently pass all 10 conditions."
+                    )
+
+                with st.expander("📋 Show all tested stocks"):
+
+                    st.dataframe(
+                        result_df,
+                        width="stretch",
+                        hide_index=True
+                    )
+
+        except Exception as e:
+
+            progress.empty()
+            st.error(
+                f"Daily trend scanner error: {e}"
+            )
+
 elif module == "🏆 Top 20 Momentum Stocks":
 
     st.header(
@@ -5459,7 +5991,9 @@ elif module == "📊 Backtest & Performance":
         [
             "Combined Breakout + Daily RSI(9)",
             "Smart Breakout",
-            "Daily RSI(9)/WMA(21)"
+            "Daily RSI(9)/WMA(21)",
+            "Weekly Trend — 10 Conditions",
+            "Daily Trend — 10 Conditions"
         ]
     )
 
@@ -5542,6 +6076,11 @@ elif module == "📊 Backtest & Performance":
 
             **Combined:** both the Smart Breakout score and Daily
             RSI(9)/WMA(21) confirmation must pass.
+
+            **Weekly Trend — 10 Conditions:** the supplied weekly
+            conditions are evaluated from completed weekly bars. The
+            resulting signal is acted on only using subsequent daily
+            candles.
 
             **Entry:** approximately 0.25% above the signal-day close.
             On the following sessions, a trade is considered filled
@@ -5662,10 +6201,34 @@ elif module == "📊 Backtest & Performance":
                             curr_r["RSI9"]
                         )
 
+                    weekly_result = calculate_weekly_trend_screen(
+                        indicators.iloc[:i + 1]
+                    )
+
+                    weekly_pass = (
+                        weekly_result is not None
+                        and weekly_result["Pass"]
+                    )
+
+                    daily_trend_result = (
+                        calculate_daily_trend_screen(
+                            indicators.iloc[:i + 1]
+                        )
+                    )
+
+                    daily_trend_pass = (
+                        daily_trend_result is not None
+                        and daily_trend_result["Pass"]
+                    )
+
                     if strategy == "Smart Breakout":
                         signal = breakout_pass
                     elif strategy == "Daily RSI(9)/WMA(21)":
                         signal = rsi_pass
+                    elif strategy == "Weekly Trend — 10 Conditions":
+                        signal = weekly_pass
+                    elif strategy == "Daily Trend — 10 Conditions":
+                        signal = daily_trend_pass
                     else:
                         signal = breakout_pass and rsi_pass
 
@@ -5800,7 +6363,11 @@ elif module == "📊 Backtest & Performance":
                         "Breakout Score":
                             breakout["Score"]
                             if breakout is not None
-                            else np.nan
+                            else np.nan,
+                        "Weekly Trend Pass":
+                            "✓" if weekly_pass else "—",
+                        "Daily Trend Pass":
+                            "✓" if daily_trend_pass else "—"
                     })
 
                     # Avoid repeatedly entering the same stock while a
