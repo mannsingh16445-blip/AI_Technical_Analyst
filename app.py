@@ -280,6 +280,7 @@ def load_nifty500():
     ttl=300,
     show_spinner=False
 )
+@st.cache_data(ttl=300, show_spinner=False)
 def download_batches(
     tickers,
     period="1y",
@@ -288,9 +289,7 @@ def download_batches(
 
     all_data = {}
 
-    ticker_list = list(
-        dict.fromkeys(tickers)
-    )
+    ticker_list = list(dict.fromkeys(tickers))
 
     for start in range(
         0,
@@ -303,63 +302,182 @@ def download_batches(
         ]
 
         yahoo_tickers = [
-            ticker + ".NS"
-            for ticker in batch
+            symbol + ".NS"
+            for symbol in batch
         ]
 
         try:
 
             data = yf.download(
-                yahoo_tickers,
+                tickers=yahoo_tickers,
                 period=period,
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
-                group_by="ticker",
                 threads=True,
-                timeout=30
+                group_by="ticker"
             )
 
-            if data is None:
+            if data is None or data.empty:
                 continue
 
-            if data.empty:
+            # =================================================
+            # SINGLE STOCK
+            # =================================================
+
+            if len(batch) == 1:
+
+                symbol = batch[0]
+
+                stock = data.copy()
+
+                # Handle MultiIndex returned by yfinance
+
+                if isinstance(
+                    stock.columns,
+                    pd.MultiIndex
+                ):
+
+                    # Case:
+                    # ('Open', 'RELIANCE.NS')
+                    #
+                    # or:
+                    # ('RELIANCE.NS', 'Open')
+
+                    level0 = (
+                        stock.columns
+                        .get_level_values(0)
+                        .tolist()
+                    )
+
+                    level1 = (
+                        stock.columns
+                        .get_level_values(1)
+                        .tolist()
+                    )
+
+                    if "Open" in level0:
+
+                        stock.columns = [
+                            col[0]
+                            for col in stock.columns
+                        ]
+
+                    elif "Open" in level1:
+
+                        stock.columns = [
+                            col[1]
+                            for col in stock.columns
+                        ]
+
+                else:
+
+                    stock.columns = [
+                        str(col)
+                        .strip()
+                        .title()
+                        for col in stock.columns
+                    ]
+
+                # ---------------------------------------------
+                # Required columns
+                # ---------------------------------------------
+
+                required = [
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume"
+                ]
+
+                if all(
+                    column in stock.columns
+                    for column in required
+                ):
+
+                    stock = stock[
+                        required
+                    ].copy()
+
+                    stock = stock.dropna(
+                        subset=required
+                    )
+
+                    if not stock.empty:
+
+                        all_data[symbol] = stock
+
                 continue
 
-            for ticker in batch:
+            # =================================================
+            # MULTIPLE STOCKS
+            # =================================================
 
-                yahoo_symbol = ticker + ".NS"
+            if not isinstance(
+                data.columns,
+                pd.MultiIndex
+            ):
+
+                continue
+
+            level0 = (
+                data.columns
+                .get_level_values(0)
+                .unique()
+                .tolist()
+            )
+
+            level1 = (
+                data.columns
+                .get_level_values(1)
+                .unique()
+                .tolist()
+            )
+
+            for symbol in batch:
+
+                yahoo_symbol = symbol + ".NS"
 
                 try:
 
-                    if len(batch) == 1:
+                    # -----------------------------------------
+                    # Format 1:
+                    #
+                    # RELIANCE.NS
+                    #   Open
+                    #   High
+                    # -----------------------------------------
 
-                        stock = data.copy()
-
-                    else:
-
-                        if not isinstance(
-                            data.columns,
-                            pd.MultiIndex
-                        ):
-
-                            continue
-
-                        level_zero = (
-                            data.columns
-                            .get_level_values(0)
-                            .unique()
-                        )
-
-                        if yahoo_symbol not in level_zero:
-
-                            continue
+                    if yahoo_symbol in level0:
 
                         stock = data[
                             yahoo_symbol
                         ].copy()
 
-                    # Fix MultiIndex
+                    # -----------------------------------------
+                    # Format 2:
+                    #
+                    # Open
+                    # High
+                    # ...
+                    # RELIANCE.NS
+                    # -----------------------------------------
+
+                    elif yahoo_symbol in level1:
+
+                        stock = data[
+                            :,
+                            yahoo_symbol
+                        ].copy()
+
+                    else:
+
+                        continue
+
+                    # -----------------------------------------
+                    # Flatten columns
+                    # -----------------------------------------
 
                     if isinstance(
                         stock.columns,
@@ -375,8 +493,6 @@ def download_batches(
                             else col
                             for col in stock.columns
                         ]
-
-                    # Normalize names
 
                     stock.columns = [
                         str(col)
@@ -410,7 +526,7 @@ def download_batches(
 
                     if not stock.empty:
 
-                        all_data[ticker] = stock
+                        all_data[symbol] = stock
 
                 except Exception:
 
@@ -420,10 +536,9 @@ def download_batches(
 
             continue
 
-        time.sleep(0.20)
+        time.sleep(0.2)
 
     return all_data
-
 
 # ============================================================
 # TECHNICAL INDICATORS
