@@ -1015,7 +1015,7 @@ else:
         ]
     )
 
-    if universe == "Nifty 50":
+if universe == "Nifty 50":
 
         stocks = NIFTY50
 
@@ -1023,21 +1023,31 @@ else:
 
         stocks = nifty500
 
-    else:
+    elif universe == "Full NSE":
 
         stocks = nse_stocks
-       if universe == "Full NSE" and not nse_stocks:
 
-    st.error(
-        """
-        Full NSE list could not be loaded.
+    else:
 
-        The NSE data server may be temporarily
-        blocking the request. Please try again later.
-        """
+        stocks = []
+
+
+    if universe == "Full NSE" and not stocks:
+
+        st.error(
+            """
+            Full NSE stock list could not be loaded.
+
+            Please try again later or select Nifty 500.
+            """
+        )
+
+        st.stop()
+
+
+    st.info(
+        f"Universe selected: **{universe} — {len(stocks)} stocks**"
     )
-
-    st.stop()
 
     # --------------------------------------------------------
     # STAGE 1 FILTERS
