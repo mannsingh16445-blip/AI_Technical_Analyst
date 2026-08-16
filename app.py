@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import time
 
 st.set_page_config(
@@ -41,6 +42,11 @@ show_sma50 = st.sidebar.checkbox(
 
 show_sma200 = st.sidebar.checkbox(
     "SMA 200",
+    value=True
+)
+
+show_rsi = st.sidebar.checkbox(
+    "RSI 14",
     value=True
 )
 
@@ -156,14 +162,52 @@ try:
     )
 
     # ========================================================
-    # CREATE CHART
+    # RSI 14
     # ========================================================
 
-    fig = go.Figure()
+    delta = data["Close"].diff()
 
-    # Candlestick
+    gain = delta.clip(lower=0)
+
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(window=14).mean()
+
+    avg_loss = loss.rolling(window=14).mean()
+
+    rs = avg_gain / avg_loss
+
+    data["RSI14"] = 100 - (
+        100 / (1 + rs)
+    )
+
+    # ========================================================
+    # CREATE SUBPLOTS
+    # ========================================================
+
+    if show_rsi:
+
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.70, 0.30]
+        )
+
+    else:
+
+        fig = make_subplots(
+            rows=1,
+            cols=1
+        )
+
+    # ========================================================
+    # PRICE CHART
+    # ========================================================
 
     fig.add_trace(
+
         go.Candlestick(
             x=data.index,
             open=data["Open"],
@@ -171,46 +215,117 @@ try:
             low=data["Low"],
             close=data["Close"],
             name=symbol
-        )
+        ),
+
+        row=1,
+        col=1
     )
 
+    # ========================================================
     # SMA 20
+    # ========================================================
 
     if show_sma20:
 
         fig.add_trace(
+
             go.Scatter(
                 x=data.index,
                 y=data["SMA20"],
                 mode="lines",
                 name="SMA 20"
-            )
+            ),
+
+            row=1,
+            col=1
         )
 
+    # ========================================================
     # SMA 50
+    # ========================================================
 
     if show_sma50:
 
         fig.add_trace(
+
             go.Scatter(
                 x=data.index,
                 y=data["SMA50"],
                 mode="lines",
                 name="SMA 50"
-            )
+            ),
+
+            row=1,
+            col=1
         )
 
+    # ========================================================
     # SMA 200
+    # ========================================================
 
     if show_sma200:
 
         fig.add_trace(
+
             go.Scatter(
                 x=data.index,
                 y=data["SMA200"],
                 mode="lines",
                 name="SMA 200"
-            )
+            ),
+
+            row=1,
+            col=1
+        )
+
+    # ========================================================
+    # RSI PANEL
+    # ========================================================
+
+    if show_rsi:
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=data.index,
+                y=data["RSI14"],
+                mode="lines",
+                name="RSI 14"
+            ),
+
+            row=2,
+            col=1
+        )
+
+        # RSI 70 line
+
+        fig.add_hline(
+            y=70,
+            row=2,
+            col=1
+        )
+
+        # RSI 50 line
+
+        fig.add_hline(
+            y=50,
+            row=2,
+            col=1
+        )
+
+        # RSI 30 line
+
+        fig.add_hline(
+            y=30,
+            row=2,
+            col=1
+        )
+
+        fig.update_yaxes(
+            range=[0, 100],
+            title_text="RSI",
+            row=2,
+            col=1
         )
 
     # ========================================================
@@ -219,13 +334,9 @@ try:
 
     fig.update_layout(
 
-        title=f"{symbol} Price + Moving Averages",
+        title=f"{symbol} Technical Analysis",
 
-        xaxis_title="Date",
-
-        yaxis_title="Price",
-
-        height=700,
+        height=850,
 
         xaxis_rangeslider_visible=False,
 
@@ -255,9 +366,11 @@ try:
 
     sma200 = float(latest["SMA200"])
 
+    rsi = float(latest["RSI14"])
+
     st.subheader("📊 Current Technical Values")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     col1.metric(
         "Current Price",
@@ -279,8 +392,43 @@ try:
         f"₹{sma200:.2f}"
     )
 
+    col5.metric(
+        "RSI 14",
+        f"{rsi:.2f}"
+    )
+
     # ========================================================
-    # TREND ANALYSIS
+    # RSI INTERPRETATION
+    # ========================================================
+
+    st.subheader("⚡ Momentum Status")
+
+    if rsi >= 70:
+
+        st.warning(
+            f"🔴 RSI = {rsi:.2f} — Overbought zone"
+        )
+
+    elif rsi <= 30:
+
+        st.success(
+            f"🟢 RSI = {rsi:.2f} — Oversold zone"
+        )
+
+    elif rsi > 50:
+
+        st.success(
+            f"🟢 RSI = {rsi:.2f} — Positive momentum"
+        )
+
+    else:
+
+        st.warning(
+            f"🟡 RSI = {rsi:.2f} — Weak/neutral momentum"
+        )
+
+    # ========================================================
+    # TREND STATUS
     # ========================================================
 
     st.subheader("📈 Moving Average Trend")
