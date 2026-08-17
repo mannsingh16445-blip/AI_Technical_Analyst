@@ -3793,6 +3793,548 @@ def run_rsi_wma_scanner(
 
 
 # ============================================================
+# SMART BREAKOUT DRAWDOWN OPTIMIZER
+# ============================================================
+
+def _optimizer_atr14(data):
+    high=pd.to_numeric(data["High"],errors="coerce")
+    low=pd.to_numeric(data["Low"],errors="coerce")
+    close=pd.to_numeric(data["Close"],errors="coerce")
+    prev_close=close.shift(1)
+
+    tr=pd.concat(
+        [
+            high-low,
+            (high-prev_close).abs(),
+            (low-prev_close).abs()
+        ],
+        axis=1
+    ).max(axis=1)
+
+    return tr.rolling(14).mean()
+
+
+def _optimizer_rsi9(close):
+    return calculate_rsi_wilder(
+        pd.to_numeric(close,errors="coerce"),
+        9
+    )
+
+
+def _optimizer_trade(
+    indicators,
+    signal_index,
+    holding_days,
+    entry_buffer
+):
+    """
+    Same entry/SL/2R/3R framework as the app, except that
+    entry_buffer is configurable for the optimizer.
+    """
+
+    if signal_index >= len(indicators)-2:
+        return None
+
+    hist=indicators.iloc[:signal_index+1]
+
+    plan=calculate_trade_plan(hist)
+
+    if plan is None:
+        return None
+
+    close=float(hist.iloc[-1]["Close"])
+    entry=close*(1.0+entry_buffer/100.0)
+
+    # Preserve the app's existing stop calculation.
+    stop=float(plan["Stop Loss"])
+
+    if not stop < entry:
+        return None
+
+    risk=entry-stop
+
+    if risk<=0:
+        return None
+
+    target1=entry+2*risk
+    target2=entry+3*risk
+
+    future=indicators.iloc[
+        signal_index+1:
+        min(
+            signal_index+1+holding_days,
+            len(indicators)
+        )
+    ]
+
+    if future.empty:
+        return None
+
+    entry_date=None
+    entry_pos=None
+
+    for j,(_,candle) in enumerate(
+        future.iterrows()
+    ):
+
+        if float(candle["High"])>=entry:
+            entry_date=candle.name
+            entry_pos=j
+            break
+
+    if entry_pos is None:
+        return None
+
+    post=future.iloc[entry_pos:]
+
+    exit_date=post.index[-1]
+    exit_price=float(
+        post.iloc[-1]["Close"]
+    )
+    outcome="Time Exit"
+    r_multiple=(
+        exit_price-entry
+    )/risk
+
+    for _,candle in post.iterrows():
+
+        day_low=float(candle["Low"])
+        day_high=float(candle["High"])
+
+        # Conservative same-candle rule:
+        # stop is considered first.
+        if day_low<=stop:
+
+            exit_price=stop
+            exit_date=candle.name
+            outcome="Stop Loss"
+            r_multiple=-1.0
+            break
+
+        if day_high>=target2:
+
+            exit_price=target2
+            exit_date=candle.name
+            outcome="Target 2"
+            r_multiple=3.0
+            break
+
+        if day_high>=target1:
+
+            exit_price=target1
+            exit_date=candle.name
+            outcome="Target 1"
+            r_multiple=2.0
+            break
+
+    return {
+        "Signal Date":hist.index[-1],
+        "Entry Date":entry_date,
+        "Exit Date":exit_date,
+        "Entry":entry,
+        "Stop Loss":stop,
+        "Target 1":target1,
+        "Target 2":target2,
+        "Outcome":outcome,
+        "R":r_multiple
+    }
+
+
+def run_smart_breakout_optimizer(
+    historical,
+    score_values,
+    rsi_min_values,
+    rsi_max_values,
+    volume_ratio_values,
+    atr_pct_values,
+    entry_buffer_values,
+    require_sma200_rising,
+    holding_days
+):
+    """
+    Runs the Smart Breakout strategy with optional drawdown-
+    reduction filters.
+
+    The original Smart Breakout conditions are always preserved.
+    The optimizer only adds the user-selected filters.
+
+    Ranking is based on:
+      - Calmar proxy
+      - Maximum drawdown
+      - Profit Factor
+      - Number of trades
+
+    Equity model:
+      1R = 1% of current equity.
+    """
+
+    prepared={}
+
+    for symbol,data in historical.items():
+
+        if data is None or data.empty:
+            continue
+
+        df=data.copy()
+
+        if isinstance(
+            df.columns,
+            pd.MultiIndex
+        ):
+            df.columns=df.columns.get_level_values(0)
+
+        required=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume"
+        ]
+
+        if any(
+            c not in df.columns
+            for c in required
+        ):
+            continue
+
+        df=df.dropna(
+            subset=required
+        ).copy()
+
+        if len(df)<220:
+            continue
+
+        ind=calculate_indicators(df)
+
+        ind["OPT_RSI9"]=_optimizer_rsi9(
+            ind["Close"]
+        )
+
+        ind["OPT_ATR14"]=_optimizer_atr14(
+            ind
+        )
+
+        ind["OPT_ATR_PCT"]=(
+            ind["OPT_ATR14"]
+            / ind["Close"]
+            *100
+        )
+
+        ind["OPT_SMA200_SLOPE20"]=(
+            ind["SMA200"]
+            >
+            ind["SMA200"].shift(20)
+        )
+
+        prepared[symbol]=ind
+
+    results=[]
+
+    for score_min in score_values:
+        for rsi_min in rsi_min_values:
+            for rsi_max in rsi_max_values:
+                for vol_min in volume_ratio_values:
+                    for atr_max in atr_pct_values:
+                        for entry_buffer in entry_buffer_values:
+
+                            trade_list=[]
+
+                            for symbol,ind in prepared.items():
+
+                                next_allowed=0
+
+                                for i in range(
+                                    210,
+                                    len(ind)-holding_days-1
+                                ):
+
+                                    if i<next_allowed:
+                                        continue
+
+                                    hist=ind.iloc[:i+1]
+
+                                    breakout=stage_two_analysis(
+                                        hist
+                                    )
+
+                                    if (
+                                        breakout is None
+                                        or float(
+                                            breakout["Score"]
+                                        )<float(score_min)
+                                    ):
+                                        continue
+
+                                    latest=hist.iloc[-1]
+
+                                    rsi=float(
+                                        latest["OPT_RSI9"]
+                                    )
+
+                                    atr_pct=float(
+                                        latest["OPT_ATR_PCT"]
+                                    )
+
+                                    vol_ratio=float(
+                                        latest["VOLUME_RATIO"]
+                                    )
+
+                                    if pd.isna(rsi):
+                                        continue
+
+                                    if pd.isna(atr_pct):
+                                        continue
+
+                                    if pd.isna(vol_ratio):
+                                        continue
+
+                                    # Optional RSI window.
+                                    if not (
+                                        rsi>=float(rsi_min)
+                                        and rsi<=float(rsi_max)
+                                    ):
+                                        continue
+
+                                    # Volume confirmation.
+                                    if vol_ratio<float(
+                                        vol_min
+                                    ):
+                                        continue
+
+                                    # Volatility filter.
+                                    if atr_pct>float(
+                                        atr_max
+                                    ):
+                                        continue
+
+                                    # Rising SMA200 filter.
+                                    if require_sma200_rising:
+
+                                        if not bool(
+                                            latest[
+                                                "OPT_SMA200_SLOPE20"
+                                            ]
+                                        ):
+                                            continue
+
+                                    trade=_optimizer_trade(
+                                        ind,
+                                        i,
+                                        holding_days,
+                                        entry_buffer
+                                    )
+
+                                    if trade is None:
+                                        continue
+
+                                    trade["Stock"]=symbol
+                                    trade["Score"]=float(
+                                        breakout["Score"]
+                                    )
+                                    trade_list.append(
+                                        trade
+                                    )
+
+                                    # Same non-overlap behaviour
+                                    # as the main backtester.
+                                    try:
+                                        exit_pos=ind.index.get_loc(
+                                            trade["Exit Date"]
+                                        )
+                                        next_allowed=(
+                                            exit_pos+1
+                                        )
+                                    except Exception:
+                                        next_allowed=i+1
+
+                            n=len(trade_list)
+
+                            if n==0:
+                                continue
+
+                            r_values=np.array(
+                                [
+                                    float(t["R"])
+                                    for t in trade_list
+                                ],
+                                dtype=float
+                            )
+
+                            wins=r_values[
+                                r_values>0
+                            ]
+
+                            losses=r_values[
+                                r_values<0
+                            ]
+
+                            win_rate=(
+                                len(wins)/n*100
+                            )
+
+                            gross_profit=(
+                                wins.sum()
+                                if len(wins)
+                                else 0.0
+                            )
+
+                            gross_loss=abs(
+                                losses.sum()
+                            )
+
+                            profit_factor=(
+                                gross_profit/gross_loss
+                                if gross_loss>0
+                                else np.inf
+                            )
+
+                            # 1R = 1% of current equity.
+                            equity=100000.0
+                            peak=equity
+                            max_dd=0.0
+
+                            equity_curve=[]
+
+                            for r_mult in r_values:
+
+                                equity*=(
+                                    1.0
+                                    +0.01*r_mult
+                                )
+
+                                peak=max(
+                                    peak,
+                                    equity
+                                )
+
+                                dd=(
+                                    peak-equity
+                                )/peak*100
+
+                                max_dd=max(
+                                    max_dd,
+                                    dd
+                                )
+
+                                equity_curve.append(
+                                    equity
+                                )
+
+                            total_return=(
+                                equity/100000.0-1
+                            )*100
+
+                            start=min(
+                                t["Entry Date"]
+                                for t in trade_list
+                            )
+
+                            end=max(
+                                t["Exit Date"]
+                                for t in trade_list
+                            )
+
+                            days=max(
+                                1,
+                                (
+                                    pd.Timestamp(end)
+                                    -
+                                    pd.Timestamp(start)
+                                ).days
+                            )
+
+                            years=days/365.25
+
+                            cagr=(
+                                (
+                                    equity/100000.0
+                                )**(
+                                    1/max(
+                                        years,
+                                        0.01
+                                    )
+                                )-1
+                            )*100
+
+                            calmar=(
+                                cagr/max_dd
+                                if max_dd>0
+                                else np.nan
+                            )
+
+                            results.append(
+                                {
+                                    "Score Min":
+                                        score_min,
+                                    "RSI Min":
+                                        rsi_min,
+                                    "RSI Max":
+                                        rsi_max,
+                                    "Volume Ratio Min":
+                                        vol_min,
+                                    "ATR % Max":
+                                        atr_max,
+                                    "Entry Buffer %":
+                                        entry_buffer,
+                                    "SMA200 Rising":
+                                        (
+                                            "Yes"
+                                            if require_sma200_rising
+                                            else "No"
+                                        ),
+                                    "Trades":
+                                        n,
+                                    "Win Rate %":
+                                        round(
+                                            win_rate,
+                                            2
+                                        ),
+                                    "Profit Factor":
+                                        round(
+                                            profit_factor,
+                                            2
+                                        )
+                                        if np.isfinite(
+                                            profit_factor
+                                        )
+                                        else np.inf,
+                                    "Net R":
+                                        round(
+                                            r_values.sum(),
+                                            2
+                                        ),
+                                    "Total Return %":
+                                        round(
+                                            total_return,
+                                            2
+                                        ),
+                                    "CAGR %":
+                                        round(
+                                            cagr,
+                                            2
+                                        ),
+                                    "Max Drawdown %":
+                                        round(
+                                            max_dd,
+                                            2
+                                        ),
+                                    "Calmar":
+                                        round(
+                                            calmar,
+                                            2
+                                        )
+                                        if not pd.isna(
+                                            calmar
+                                        )
+                                        else np.nan
+                                }
+                            )
+
+    return pd.DataFrame(results)
+
+
+
+# ============================================================
 # BUY / SELL SIGNAL ENGINE
 # ============================================================
 
@@ -4088,6 +4630,7 @@ module = st.sidebar.radio(
         "📈 120-Day High Breakout Scanner",
         "⚡ Hourly Donchian Breakout Scanner",
         "🎯 Buy / Sell Signal Engine",
+        "🧪 Smart Breakout Drawdown Optimizer",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -5948,6 +6491,379 @@ elif module == "🎯 Buy / Sell Signal Engine":
                     width="stretch",
                     hide_index=True
                 )
+
+
+
+# ============================================================
+# SMART BREAKOUT DRAWDOWN OPTIMIZER MODULE
+# ============================================================
+
+elif module == "🧪 Smart Breakout Drawdown Optimizer":
+
+    st.header(
+        "🧪 Smart Breakout — Drawdown Reduction Optimizer"
+    )
+
+    st.write(
+        """
+        Automatically tests combinations of Smart Breakout
+        filters to identify configurations that reduce
+        drawdown while preserving a reasonable number of trades.
+        """
+    )
+
+    st.warning(
+        """
+        The optimizer does NOT replace your original Smart
+        Breakout strategy. It creates additional filtered
+        variants for comparison. Results are historical and
+        should be validated on an out-of-sample period before
+        live use.
+        """
+    )
+
+    with st.expander(
+        "🔧 Filters being optimized",
+        expanded=True
+    ):
+
+        st.markdown(
+            """
+            **Always retained:** existing Smart Breakout C1–C5 /
+            technical scoring logic.
+
+            Additional filters tested:
+
+            • Minimum Smart Breakout score  
+            • RSI(9) minimum and maximum  
+            • Volume ratio minimum  
+            • ATR(14) as % of price maximum  
+            • Entry buffer  
+            • Optional rising SMA(200)
+
+            **Optimization objective:** reduce maximum drawdown
+            while maintaining trade count, profit factor and
+            risk-adjusted return.
+            """
+        )
+
+    st.sidebar.subheader(
+        "🧪 Optimizer Settings"
+    )
+
+    st.caption(
+        "Loading stock universes..."
+    )
+
+    nse_stocks=load_nse_equity_universe()
+    nifty500=load_nifty500()
+    fno_stocks=load_fno_stocks()
+    nifty_midcap100=load_nifty_midcap100()
+    nifty_smallcap250=load_nifty_smallcap250()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="optimizer_universe"
+    )
+
+    stocks=resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks",
+        20,
+        min(500,max(20,len(stocks))),
+        min(100,max(20,len(stocks))),
+        10,
+        key="optimizer_max_stocks"
+    )
+
+    period=st.sidebar.selectbox(
+        "Historical Period",
+        [
+            "2y",
+            "3y",
+            "5y",
+            "10y"
+        ],
+        index=1,
+        key="optimizer_period"
+    )
+
+    holding_days=st.sidebar.slider(
+        "Maximum Holding Days",
+        5,
+        60,
+        20,
+        5,
+        key="optimizer_holding_days"
+    )
+
+    st.sidebar.markdown(
+        "### Filter Ranges"
+    )
+
+    score_values=st.sidebar.multiselect(
+        "Smart Breakout Score Minimum",
+        [5,6,7,8,9,10],
+        default=[7,8,9],
+        key="optimizer_scores"
+    )
+
+    rsi_min_values=st.sidebar.multiselect(
+        "RSI(9) Minimum",
+        [50,55,60,65],
+        default=[55,60],
+        key="optimizer_rsi_min"
+    )
+
+    rsi_max_values=st.sidebar.multiselect(
+        "RSI(9) Maximum",
+        [65,70,75,80],
+        default=[70,75],
+        key="optimizer_rsi_max"
+    )
+
+    volume_values=st.sidebar.multiselect(
+        "Minimum Volume Ratio",
+        [1.0,1.25,1.5,1.8,2.0,2.5],
+        default=[1.5,1.8,2.0],
+        key="optimizer_volume"
+    )
+
+    atr_values=st.sidebar.multiselect(
+        "Maximum ATR % of Price",
+        [3.0,4.0,5.0,6.0,8.0],
+        default=[4.0,5.0,6.0],
+        key="optimizer_atr"
+    )
+
+    entry_values=st.sidebar.multiselect(
+        "Entry Buffer %",
+        [0.25,0.50,0.75],
+        default=[0.25,0.50],
+        key="optimizer_entry"
+    )
+
+    sma_rising=st.sidebar.checkbox(
+        "Require SMA(200) rising",
+        value=True,
+        key="optimizer_sma_rising"
+    )
+
+    min_trades=st.sidebar.number_input(
+        "Minimum Trades for Ranking",
+        min_value=10,
+        max_value=200,
+        value=20,
+        step=5,
+        key="optimizer_min_trades"
+    )
+
+    run_optimizer=st.sidebar.button(
+        "🧪 RUN OPTIMIZATION",
+        type="primary",
+        key="optimizer_run"
+    )
+
+    if not stocks:
+        st.error(
+            f"No stocks available for {universe}."
+        )
+        st.stop()
+
+    combinations=(
+        len(score_values)
+        *len(rsi_min_values)
+        *len(rsi_max_values)
+        *len(volume_values)
+        *len(atr_values)
+        *len(entry_values)
+    )
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Stocks: **{len(stocks)}** | "
+        f"Parameter combinations: **{combinations:,}**"
+    )
+
+    if combinations>500:
+        st.error(
+            "Too many combinations. Reduce the selected "
+            "parameter ranges to 500 or fewer combinations."
+        )
+        st.stop()
+
+    if run_optimizer:
+
+        selected=stocks[:max_stocks]
+
+        with st.spinner(
+            f"Downloading {period} historical data "
+            f"for {len(selected)} stocks..."
+        ):
+
+            historical=download_batches(
+                selected,
+                period,
+                50
+            )
+
+        with st.spinner(
+            f"Testing {combinations:,} configurations..."
+        ):
+
+            optimization=run_smart_breakout_optimizer(
+                historical,
+                score_values,
+                rsi_min_values,
+                rsi_max_values,
+                volume_values,
+                atr_values,
+                entry_values,
+                sma_rising,
+                holding_days
+            )
+
+        if optimization.empty:
+
+            st.warning(
+                "No configuration generated enough trades. "
+                "Relax the filters or reduce the minimum "
+                "trade requirement."
+            )
+
+        else:
+
+            ranked=optimization[
+                optimization["Trades"]>=int(
+                    min_trades
+                )
+            ].copy()
+
+            if ranked.empty:
+                st.warning(
+                    "No configuration met the minimum trade "
+                    "requirement."
+                )
+                ranked=optimization.copy()
+
+            # Primary ranking: Calmar, then drawdown,
+            # then profit factor and trade count.
+            ranked=ranked.sort_values(
+                [
+                    "Calmar",
+                    "Max Drawdown %",
+                    "Profit Factor",
+                    "Trades"
+                ],
+                ascending=[
+                    False,
+                    True,
+                    False,
+                    False
+                ]
+            )
+
+            st.subheader(
+                "🏆 Top Drawdown-Adjusted Configurations"
+            )
+
+            st.dataframe(
+                ranked.head(20),
+                width="stretch",
+                hide_index=True
+            )
+
+            best=ranked.iloc[0]
+
+            c1,c2,c3,c4,c5=st.columns(5)
+
+            c1.metric(
+                "Best Max DD",
+                f"{best['Max Drawdown %']:.2f}%"
+            )
+
+            c2.metric(
+                "Calmar",
+                f"{best['Calmar']:.2f}"
+            )
+
+            c3.metric(
+                "Profit Factor",
+                (
+                    f"{best['Profit Factor']:.2f}"
+                    if np.isfinite(
+                        best["Profit Factor"]
+                    )
+                    else "∞"
+                )
+            )
+
+            c4.metric(
+                "Win Rate",
+                f"{best['Win Rate %']:.1f}%"
+            )
+
+            c5.metric(
+                "Trades",
+                int(best["Trades"])
+            )
+
+            st.success(
+                "Recommended configuration for further "
+                "out-of-sample testing:"
+            )
+
+            st.code(
+                f"""
+Smart Breakout Score >= {best['Score Min']}
+RSI(9): {best['RSI Min']} to {best['RSI Max']}
+Volume Ratio >= {best['Volume Ratio Min']}
+ATR(14) % <= {best['ATR % Max']}%
+Entry Buffer = {best['Entry Buffer %']}%
+SMA(200) Rising = {best['SMA200 Rising']}
+
+Trades = {int(best['Trades'])}
+Win Rate = {best['Win Rate %']:.2f}%
+Profit Factor = {best['Profit Factor']}
+Max Drawdown = {best['Max Drawdown %']:.2f}%
+CAGR = {best['CAGR %']:.2f}%
+Calmar = {best['Calmar']:.2f}
+Net R = {best['Net R']:.2f}
+                """.strip()
+            )
+
+            st.download_button(
+                "⬇️ Download Full Optimization Results",
+                optimization.to_csv(
+                    index=False
+                ),
+                "Smart_Breakout_Drawdown_Optimization.csv",
+                "text/csv"
+            )
+
+            st.caption(
+                """
+                Ranking is a research aid, not a guarantee.
+                Always validate the selected configuration on
+                an out-of-sample period to reduce overfitting.
+                """
+            )
 
 
 
