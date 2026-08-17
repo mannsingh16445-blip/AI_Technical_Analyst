@@ -1,3 +1,14 @@
+import os
+
+# Keep the Streamlit Cloud process thread-safe.
+# yfinance is also forced to use serial downloads below.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("BLIS_NUM_THREADS", "1")
+
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
@@ -5,7 +16,6 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-import os
 
 from io import StringIO, BytesIO
 import zipfile
@@ -1057,7 +1067,7 @@ def download_batches(
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
-                threads=True,
+                threads=False,
                 group_by="ticker"
             )
 
@@ -3224,7 +3234,7 @@ def download_rsi_wma_batches(
                 interval=interval,
                 auto_adjust=False,
                 progress=False,
-                threads=True,
+                threads=False,
                 group_by="ticker"
             )
 
@@ -7651,15 +7661,17 @@ elif module == "📊 Backtest & Performance":
         "📊 Backtest Settings"
     )
 
-    with st.spinner(
-        "Loading stock universes..."
-    ):
+    # Do not wrap these cached loaders in st.spinner. Streamlit's
+    # spinner starts a helper thread; on Streamlit Cloud a process
+    # that has accumulated many downloader/BLAS threads can fail
+    # here with: RuntimeError: can't start new thread.
+    st.caption("Loading stock universes...")
 
-        fno_stocks = load_fno_stocks()
-        nifty500 = load_nifty500()
-        nse_stocks = load_nse_equity_universe()
-        nifty_midcap100 = load_nifty_midcap100()
-        nifty_smallcap250 = load_nifty_smallcap250()
+    fno_stocks = load_fno_stocks()
+    nifty500 = load_nifty500()
+    nse_stocks = load_nse_equity_universe()
+    nifty_midcap100 = load_nifty_midcap100()
+    nifty_smallcap250 = load_nifty_smallcap250()
 
     universe = st.sidebar.selectbox(
         "Stock Universe",
