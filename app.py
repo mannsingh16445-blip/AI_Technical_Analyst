@@ -4915,6 +4915,225 @@ def detect_chart_patterns(data):
     )
 
 
+
+# ============================================================
+# ENHANCED CCI + EMA9/21/200 + RSI9/WMA21 STRATEGY
+# ============================================================
+
+def prepare_enhanced_cci_ema_rsi_strategy(data):
+    df=prepare_cci_ema_rsi_strategy(data)
+    if df.empty:
+        return df
+
+    df["EMA_ALIGNMENT"]=(
+        (df["EMA9"]>df["EMA21"]) &
+        (df["EMA21"]>df["EMA200"])
+    )
+
+    df["EMA200_RISING"]=(
+        df["EMA200"]>df["EMA200"].shift(20)
+    )
+
+    df["CLOSE_ABOVE_EMA9"]=(
+        df["Close"]>df["EMA9"]
+    )
+
+    df["EMA9_ABOVE_EMA200_%"]=(
+        (df["EMA9"]-df["EMA200"])
+        /df["EMA200"].abs()*100
+    )
+
+    df["EMA21_ABOVE_EMA200_%"]=(
+        (df["EMA21"]-df["EMA200"])
+        /df["EMA200"].abs()*100
+    )
+
+    return df
+
+
+def enhanced_cci_ema_rsi_entry_condition(
+    row,
+    ema_min_pct=1.0,
+    ema_max_pct=2.0
+):
+    return bool(
+        float(row["CCI20"])>100
+        and bool(row["EMA_ALIGNMENT"])
+        and ema_min_pct<=float(row["EMA9_ABOVE_EMA200_%"])<=ema_max_pct
+        and ema_min_pct<=float(row["EMA21_ABOVE_EMA200_%"])<=ema_max_pct
+        and bool(row["EMA200_RISING"])
+        and bool(row["CLOSE_ABOVE_EMA9"])
+        and 60<float(row["RSI9"])<70
+        and float(row["RSI9"])>float(row["RSI9_WMA21"])
+    )
+
+
+def enhanced_cci_ema_rsi_exit_condition(row):
+    return bool(
+        float(row["EMA9"])<float(row["EMA21"])
+        or
+        float(row["RSI9"])<float(row["RSI9_WMA21"])
+    )
+
+
+def add_enhanced_cci_ema_rsi_conditions(
+    data,
+    ema_min_pct=1.0,
+    ema_max_pct=2.0
+):
+    df=prepare_enhanced_cci_ema_rsi_strategy(data)
+
+    if df.empty:
+        return df
+
+    df["ENTRY_SIGNAL_ENHANCED"]=df.apply(
+        lambda r: enhanced_cci_ema_rsi_entry_condition(
+            r,ema_min_pct,ema_max_pct
+        ),
+        axis=1
+    )
+
+    df["EXIT_SIGNAL_ENHANCED"]=df.apply(
+        enhanced_cci_ema_rsi_exit_condition,
+        axis=1
+    )
+
+    return df
+
+
+def backtest_enhanced_cci_ema_rsi_strategy(
+    data,
+    ema_min_pct=1.0,
+    ema_max_pct=2.0,
+    max_holding_days=120
+):
+    df=add_enhanced_cci_ema_rsi_conditions(
+        data,
+        ema_min_pct,
+        ema_max_pct
+    )
+
+    if df.empty:
+        return {"Trades":[],"Data":df}
+
+    trades=[]
+    in_position=False
+    entry_pos=None
+    entry_price=None
+    entry_date=None
+
+    i=1
+
+    while i<len(df)-1:
+
+        row=df.iloc[i]
+
+        if not in_position:
+
+            if bool(row["ENTRY_SIGNAL_ENHANCED"]):
+
+                entry_pos=i+1
+                if entry_pos>=len(df):
+                    break
+
+                entry_price=float(
+                    df.iloc[entry_pos]["Open"]
+                )
+                entry_date=df.index[entry_pos]
+                in_position=True
+                i=entry_pos+1
+                continue
+
+        else:
+
+            if bool(row["EXIT_SIGNAL_ENHANCED"]):
+
+                exit_pos=min(i+1,len(df)-1)
+                exit_price=float(
+                    df.iloc[exit_pos]["Open"]
+                )
+                exit_date=df.index[exit_pos]
+
+                pnl_pct=(
+                    exit_price-entry_price
+                )/entry_price*100
+
+                reason=(
+                    "EMA9 < EMA21"
+                    if float(row["EMA9"])<float(row["EMA21"])
+                    else "RSI9 < WMA21"
+                )
+
+                trades.append({
+                    "Entry Date":entry_date,
+                    "Entry":entry_price,
+                    "Exit Date":exit_date,
+                    "Exit":exit_price,
+                    "P&L %":pnl_pct,
+                    "Holding Days":(
+                        pd.Timestamp(exit_date)-
+                        pd.Timestamp(entry_date)
+                    ).days,
+                    "Exit Reason":reason
+                })
+
+                in_position=False
+                entry_pos=None
+                entry_price=None
+                entry_date=None
+                i=exit_pos+1
+                continue
+
+            if i-entry_pos>=max_holding_days:
+
+                exit_pos=i
+                exit_price=float(df.iloc[exit_pos]["Close"])
+                exit_date=df.index[exit_pos]
+
+                trades.append({
+                    "Entry Date":entry_date,
+                    "Entry":entry_price,
+                    "Exit Date":exit_date,
+                    "Exit":exit_price,
+                    "P&L %":(
+                        exit_price-entry_price
+                    )/entry_price*100,
+                    "Holding Days":(
+                        pd.Timestamp(exit_date)-
+                        pd.Timestamp(entry_date)
+                    ).days,
+                    "Exit Reason":"Maximum holding period"
+                })
+
+                in_position=False
+                entry_pos=None
+                entry_price=None
+                entry_date=None
+
+        i+=1
+
+    if in_position and entry_date is not None:
+
+        exit_date=df.index[-1]
+        exit_price=float(df["Close"].iloc[-1])
+
+        trades.append({
+            "Entry Date":entry_date,
+            "Entry":entry_price,
+            "Exit Date":exit_date,
+            "Exit":exit_price,
+            "P&L %":(
+                exit_price-entry_price
+            )/entry_price*100,
+            "Holding Days":(
+                pd.Timestamp(exit_date)-
+                pd.Timestamp(entry_date)
+            ).days,
+            "Exit Reason":"End of data"
+        })
+
+    return {"Trades":trades,"Data":df}
+
 # ============================================================
 # CCI + EMA9/21/200 + RSI9/WMA21 STRATEGY
 # ============================================================
@@ -5686,6 +5905,7 @@ module = st.sidebar.radio(
         "🧪 Smart Breakout Drawdown Optimizer",
         "📐 Chart Pattern Scanner",
         "🎯 CCI + EMA + RSI Strategy",
+        "🚀 Enhanced CCI + EMA + RSI Strategy",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -8793,6 +9013,256 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
                     stock_df,
                     width="stretch",
                     hide_index=True
+                )
+
+
+# ============================================================
+# ENHANCED CCI + EMA + RSI STRATEGY MODULE
+# ============================================================
+
+elif module == "🚀 Enhanced CCI + EMA + RSI Strategy":
+
+    st.header(
+        "🚀 Enhanced CCI + EMA9/21/200 + RSI9/WMA21"
+    )
+
+    st.markdown(
+        """
+        **Enhanced Entry**
+
+        - CCI(20) > 100
+        - EMA9 > EMA21 > EMA200
+        - EMA9 and EMA21 each 1–2% above EMA200
+        - EMA200 rising over 20 sessions
+        - Close > EMA9
+        - RSI(9) > 60 and < 70
+        - RSI(9) > WMA(21)
+
+        **Exit 2**
+
+        - EMA9 < EMA21 **OR**
+        - RSI(9) < WMA(21)
+        """
+    )
+
+    st.sidebar.subheader("🚀 Enhanced Strategy")
+
+    nse_stocks=load_nse_equity_universe()
+    nifty500=load_nifty500()
+    fno_stocks=load_fno_stocks()
+    nifty_midcap100=load_nifty_midcap100()
+    nifty_smallcap250=load_nifty_smallcap250()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="enhanced_cci_universe"
+    )
+
+    stocks=resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks",
+        10,
+        min(500,max(10,len(stocks))),
+        min(100,max(10,len(stocks))),
+        10,
+        key="enhanced_cci_max_stocks"
+    )
+
+    max_holding_days=st.sidebar.slider(
+        "Maximum holding days",
+        20,250,120,10,
+        key="enhanced_cci_max_hold"
+    )
+
+    tab1,tab2=st.tabs(
+        ["🔎 Scanner","📊 Backtest"]
+    )
+
+    with tab1:
+
+        run=st.button(
+            "🚀 SCAN ENHANCED STRATEGY",
+            type="primary",
+            key="enhanced_cci_scan"
+        )
+
+        if run:
+
+            with st.spinner("Downloading daily data..."):
+                market=download_batches(
+                    stocks[:max_stocks],
+                    "2y",
+                    50
+                )
+
+            rows=[]
+
+            for symbol in stocks[:max_stocks]:
+
+                data=market.get(symbol)
+
+                if data is None or data.empty:
+                    continue
+
+                df=add_enhanced_cci_ema_rsi_conditions(data)
+
+                if df.empty:
+                    continue
+
+                r=df.iloc[-1]
+
+                if bool(r["ENTRY_SIGNAL_ENHANCED"]):
+                    signal="🟢 BUY"
+                elif bool(r["EXIT_SIGNAL_ENHANCED"]):
+                    signal="🔴 EXIT / SELL"
+                else:
+                    signal="⚪ NO SIGNAL"
+
+                rows.append({
+                    "Stock":symbol,
+                    "Signal":signal,
+                    "Close":round(float(r["Close"]),2),
+                    "CCI(20)":round(float(r["CCI20"]),2),
+                    "EMA9":round(float(r["EMA9"]),2),
+                    "EMA21":round(float(r["EMA21"]),2),
+                    "EMA200":round(float(r["EMA200"]),2),
+                    "EMA9 above EMA200 %":round(
+                        float(r["EMA9_ABOVE_EMA200_%"]),2
+                    ),
+                    "EMA21 above EMA200 %":round(
+                        float(r["EMA21_ABOVE_EMA200_%"]),2
+                    ),
+                    "EMA200 Rising":bool(r["EMA200_RISING"]),
+                    "Close > EMA9":bool(r["CLOSE_ABOVE_EMA9"]),
+                    "RSI(9)":round(float(r["RSI9"]),2),
+                    "WMA(21)":round(float(r["RSI9_WMA21"]),2)
+                })
+
+            result=pd.DataFrame(rows)
+
+            if result.empty:
+                st.warning("No usable daily data.")
+            else:
+
+                c1,c2,c3=st.columns(3)
+                c1.metric(
+                    "🟢 BUY",
+                    int((result["Signal"]=="🟢 BUY").sum())
+                )
+                c2.metric(
+                    "🔴 EXIT / SELL",
+                    int((result["Signal"]=="🔴 EXIT / SELL").sum())
+                )
+                c3.metric(
+                    "⚪ No Signal",
+                    int((result["Signal"]=="⚪ NO SIGNAL").sum())
+                )
+
+                st.dataframe(
+                    result,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Enhanced Results",
+                    result.to_csv(index=False),
+                    "Enhanced_CCI_EMA_RSI_Scanner.csv",
+                    "text/csv"
+                )
+
+    with tab2:
+
+        period=st.selectbox(
+            "Backtest Period",
+            ["2y","3y","5y","10y"],
+            index=1,
+            key="enhanced_cci_period"
+        )
+
+        run_bt=st.button(
+            "📊 RUN ENHANCED BACKTEST",
+            type="primary",
+            key="enhanced_cci_bt"
+        )
+
+        if run_bt:
+
+            with st.spinner("Downloading historical data..."):
+                market=download_batches(
+                    stocks[:max_stocks],
+                    period,
+                    50
+                )
+
+            all_trades=[]
+
+            for symbol in stocks[:max_stocks]:
+
+                data=market.get(symbol)
+
+                if data is None or data.empty:
+                    continue
+
+                bt=backtest_enhanced_cci_ema_rsi_strategy(
+                    data,
+                    1.0,
+                    2.0,
+                    max_holding_days
+                )
+
+                for trade in bt["Trades"]:
+                    t=trade.copy()
+                    t["Stock"]=symbol
+                    all_trades.append(t)
+
+            summary=summarize_cci_ema_rsi_backtest(
+                all_trades
+            )
+
+            a,b,c,d,e=st.columns(5)
+
+            a.metric("Trades",summary["Trades"])
+            b.metric("Win Rate",f"{summary['Win Rate %']:.1f}%")
+            c.metric(
+                "Profit Factor",
+                (
+                    f"{summary['Profit Factor']:.2f}"
+                    if np.isfinite(summary["Profit Factor"])
+                    else "∞"
+                )
+            )
+            d.metric("Net Return",f"{summary['Net Return %']:.2f}%")
+            e.metric("Max Drawdown",f"{summary['Max Drawdown %']:.2f}%")
+
+            if all_trades:
+                trade_df=pd.DataFrame(all_trades).sort_values("Entry Date")
+                st.dataframe(
+                    trade_df,
+                    width="stretch",
+                    hide_index=True
+                )
+                st.download_button(
+                    "⬇️ Download Enhanced Backtest",
+                    trade_df.to_csv(index=False),
+                    "Enhanced_CCI_EMA_RSI_Backtest.csv",
+                    "text/csv"
                 )
 
 
