@@ -5143,47 +5143,54 @@ def backtest_cci_ema_rsi_strategy(
     rsi_wma_50_tolerance=2.0,
     max_holding_days=120,
     max_loss_pct=20.0,
+    trailing_enabled=True,
     trail_activation_pct=10.0,
-    trailing_stop_pct=10.0
+    trailing_stop_pct=10.0,
+    profit_booking_enabled=True,
+    target1_pct=15.0,
+    target1_booking_pct=25.0,
+    target2_pct=25.0,
+    target2_booking_pct=25.0,
+    improved_exit_enabled=False,
+    improved_exit_activation_pct=5.0,
+    ema200_breakdown_exit_enabled=False
 ):
     """
     Strategy-specific backtest.
 
-    Original entry:
-      Next trading day's OPEN after the entry signal.
+    Entry is unchanged.
 
-    Original strategy exit:
-      Next trading day's OPEN after the original exit signal.
-
-    Risk management added:
-      1. Hard maximum loss = max_loss_pct from entry.
-      2. Once price reaches trail_activation_pct profit,
-         a trailing stop is activated.
-      3. The trailing stop is trailing_stop_pct below the
-         highest price reached since entry.
-      4. The trailing stop is based on the PRIOR day's peak,
-         avoiding look-ahead bias.
-      5. If a stop is breached and the market opens through it,
-         the backtest uses the opening price as the exit price.
-      6. If the day's low reaches the stop after opening above it,
-         the stop price is used.
-
-    The original scanner conditions are unchanged.
+    Risk/profit management:
+      - Hard maximum-loss stop from entry.
+      - Optional partial profit booking:
+          Target 1 = +15%, book 25%.
+          Target 2 = +25%, book another 25%.
+        The remaining 50% is allowed to run.
+      - Optional trailing stop on the remaining position.
+      - Optional improved/profit-protection exit:
+          after the trade reaches the configured profit threshold,
+          exit on EMA9 < EMA21 OR RSI9 < WMA21.
+      - Original technical exit remains active.
+      - Stop is checked before intraday profit targets when both
+        appear in the same daily candle (conservative assumption).
+      - Trailing stop uses the peak known before the current candle
+        to avoid look-ahead bias.
     """
 
     df=prepare_cci_ema_rsi_strategy(data)
 
     if df.empty:
-        return {
-            "Trades":[],
-            "Data":df
-        }
+        return {"Trades":[],"Data":df}
 
     df=add_cci_ema_rsi_conditions(
         df,
         ema200_near_pct,
         rsi_wma_50_tolerance
     )
+
+    df["EMA9_PREV"]=df["EMA9"].shift(1)
+    df["EMA21_PREV"]=df["EMA21"].shift(1)
+    df["EMA200_PREV"]=df["EMA200"].shift(1)
 
     trades=[]
     in_position=False
@@ -5193,7 +5200,20 @@ def backtest_cci_ema_rsi_strategy(
     peak_price=None
     trailing_active=False
 
+    remaining_qty=1.0
+    realized_pnl=0.0
+    target1_booked=False
+    target2_booked=False
+    profit_booked_pct=0.0
+    profit_booking_events=[]
+
     i=1
+
+    def reset_position():
+        return (
+            False,None,None,None,None,False,
+            1.0,0.0,False,False,0.0,[]
+        )
 
     while i<len(df)-1:
 
@@ -5211,55 +5231,56 @@ def backtest_cci_ema_rsi_strategy(
                 entry_price=float(
                     df.iloc[entry_pos]["Open"]
                 )
-
                 entry_date=df.index[entry_pos]
 
                 in_position=True
                 peak_price=entry_price
                 trailing_active=False
 
+                remaining_qty=1.0
+                realized_pnl=0.0
+                target1_booked=False
+                target2_booked=False
+                profit_booked_pct=0.0
+                profit_booking_events=[]
+
                 i=entry_pos+1
                 continue
 
         else:
 
+            day_open=float(row["Open"])
+            day_low=float(row["Low"])
+            day_high=float(row["High"])
+
             # ------------------------------------------------
             # 1. HARD MAX-LOSS STOP
             # ------------------------------------------------
             hard_stop=(
-                entry_price
-                *(
-                    1.0-max_loss_pct/100.0
-                )
+                entry_price*
+                (1.0-max_loss_pct/100.0)
             )
 
             # ------------------------------------------------
             # 2. TRAILING STOP
-            #
-            # The stop is calculated from the peak known
-            # BEFORE today's candle. This avoids using today's
-            # high to create a stop and then claiming that the
-            # same candle hit it.
+            # Peak is the peak known BEFORE today's candle.
             # ------------------------------------------------
             if (
-                not trailing_active
+                trailing_enabled
+                and not trailing_active
                 and peak_price>=(
-                    entry_price
-                    *(
-                        1.0+trail_activation_pct/100.0
-                    )
+                    entry_price*
+                    (1.0+trail_activation_pct/100.0)
                 )
             ):
                 trailing_active=True
 
             trailing_stop=None
 
-            if trailing_active:
+            if trailing_enabled and trailing_active:
                 trailing_stop=(
-                    peak_price
-                    *(
-                        1.0-trailing_stop_pct/100.0
-                    )
+                    peak_price*
+                    (1.0-trailing_stop_pct/100.0)
                 )
 
             active_stop=hard_stop
@@ -5270,97 +5291,244 @@ def backtest_cci_ema_rsi_strategy(
                     trailing_stop
                 )
 
-            day_open=float(row["Open"])
-            day_low=float(row["Low"])
+            # ------------------------------------------------
+            # 3. STOP FIRST — CONSERVATIVE SAME-CANDLE RULE
+            # ------------------------------------------------
+            stop_reason=None
 
-            # Stop handling is checked before strategy exit.
-            # This is conservative.
             if day_open<=active_stop:
+                stop_price=day_open
+                stop_reason=(
+                    "Maximum Loss Stop"
+                    if active_stop==hard_stop
+                    else "Trailing Stop"
+                )
 
-                exit_price=day_open
+            elif day_low<=active_stop:
+                stop_price=active_stop
+                stop_reason=(
+                    "Maximum Loss Stop"
+                    if active_stop==hard_stop
+                    else "Trailing Stop"
+                )
+
+            else:
+                stop_price=None
+
+            if stop_price is not None:
+
+                # Remaining position exits at stop.
+                realized_pnl += (
+                    (stop_price-entry_price)
+                    /entry_price
+                    *remaining_qty
+                )
+
                 exit_date=df.index[i]
-
-                pnl_pct=(
-                    exit_price-entry_price
-                )/entry_price*100
 
                 trades.append(
                     {
                         "Entry Date":entry_date,
                         "Entry":entry_price,
                         "Exit Date":exit_date,
-                        "Exit":exit_price,
-                        "P&L %":pnl_pct,
+                        "Exit":stop_price,
+                        "P&L %":realized_pnl*100,
                         "Holding Days":(
-                            pd.Timestamp(exit_date)
-                            -
+                            pd.Timestamp(exit_date)-
                             pd.Timestamp(entry_date)
                         ).days,
-                        "Exit Reason":(
-                            "Maximum Loss Stop"
-                            if active_stop==hard_stop
-                            else "Trailing Stop"
-                        ),
+                        "Exit Reason":stop_reason,
                         "Peak Price":peak_price,
-                        "Trailing Active":trailing_active
+                        "Trailing Active":trailing_active,
+                        "Profit Booked %":profit_booked_pct,
+                        "Profit Booking Events":
+                            "; ".join(profit_booking_events)
                     }
                 )
 
-                in_position=False
-                entry_pos=None
-                entry_price=None
-                entry_date=None
-                peak_price=None
-                trailing_active=False
-
-                i+=1
-                continue
-
-            if day_low<=active_stop:
-
-                exit_price=active_stop
-                exit_date=df.index[i]
-
-                pnl_pct=(
-                    exit_price-entry_price
-                )/entry_price*100
-
-                trades.append(
-                    {
-                        "Entry Date":entry_date,
-                        "Entry":entry_price,
-                        "Exit Date":exit_date,
-                        "Exit":exit_price,
-                        "P&L %":pnl_pct,
-                        "Holding Days":(
-                            pd.Timestamp(exit_date)
-                            -
-                            pd.Timestamp(entry_date)
-                        ).days,
-                        "Exit Reason":(
-                            "Maximum Loss Stop"
-                            if active_stop==hard_stop
-                            else "Trailing Stop"
-                        ),
-                        "Peak Price":peak_price,
-                        "Trailing Active":trailing_active
-                    }
-                )
-
-                in_position=False
-                entry_pos=None
-                entry_price=None
-                entry_date=None
-                peak_price=None
-                trailing_active=False
+                (
+                    in_position,entry_pos,entry_price,entry_date,
+                    peak_price,trailing_active,remaining_qty,
+                    realized_pnl,target1_booked,target2_booked,
+                    profit_booked_pct,profit_booking_events
+                )=reset_position()
 
                 i+=1
                 continue
 
             # ------------------------------------------------
-            # 3. ORIGINAL STRATEGY EXIT
+            # 4. PARTIAL PROFIT BOOKING
+            #
+            # Targets are evaluated using today's high.
+            # If the stop was not hit, targets can be booked.
             # ------------------------------------------------
-            if bool(row["EXIT_SIGNAL"]):
+            if profit_booking_enabled:
+
+                target1_price=(
+                    entry_price*
+                    (1.0+target1_pct/100.0)
+                )
+
+                target2_price=(
+                    entry_price*
+                    (1.0+target2_pct/100.0)
+                )
+
+                if (
+                    not target1_booked
+                    and remaining_qty>0
+                    and day_high>=target1_price
+                ):
+
+                    qty=min(
+                        target1_booking_pct/100.0,
+                        remaining_qty
+                    )
+
+                    realized_pnl += (
+                        (target1_price-entry_price)
+                        /entry_price
+                        *qty
+                    )
+
+                    remaining_qty-=qty
+                    target1_booked=True
+                    profit_booked_pct+=qty*100
+
+                    profit_booking_events.append(
+                        f"T1 +{target1_pct:.0f}%: "
+                        f"booked {qty*100:.0f}%"
+                    )
+
+                if (
+                    not target2_booked
+                    and remaining_qty>0
+                    and day_high>=target2_price
+                ):
+
+                    qty=min(
+                        target2_booking_pct/100.0,
+                        remaining_qty
+                    )
+
+                    realized_pnl += (
+                        (target2_price-entry_price)
+                        /entry_price
+                        *qty
+                    )
+
+                    remaining_qty-=qty
+                    target2_booked=True
+                    profit_booked_pct+=qty*100
+
+                    profit_booking_events.append(
+                        f"T2 +{target2_pct:.0f}%: "
+                        f"booked {qty*100:.0f}%"
+                    )
+
+            # ------------------------------------------------
+            # 5. NEW EMA200 BREAKDOWN EXIT
+            #
+            # User-specified condition:
+            #   1. WMA21 > RSI9
+            #   2. Either EMA9 OR EMA21 has crossed below EMA200
+            #   3. Close is below EMA200
+            #   4. EMA9 and EMA21 are both sloping down
+            #
+            # "Crossed below" is interpreted strictly as:
+            # yesterday's EMA >= EMA200 and today's EMA < EMA200.
+            # ------------------------------------------------
+            wma_rsi_exit = (
+                float(row["RSI9_WMA21"])
+                > float(row["RSI9"])
+            )
+
+            ema9_crossed_below_200 = (
+                float(row["EMA9"]) < float(row["EMA200"])
+                and
+                float(row["EMA9_PREV"]) >= float(row["EMA200_PREV"])
+            )
+
+            ema21_crossed_below_200 = (
+                float(row["EMA21"]) < float(row["EMA200"])
+                and
+                float(row["EMA21_PREV"]) >= float(row["EMA200_PREV"])
+            )
+
+            price_below_200 = (
+                float(row["Close"]) < float(row["EMA200"])
+            )
+
+            both_short_emas_down = (
+                float(row["EMA9"]) < float(row["EMA9_PREV"])
+                and
+                float(row["EMA21"]) < float(row["EMA21_PREV"])
+            )
+
+            ema200_breakdown_exit = (
+                ema200_breakdown_exit_enabled
+                and
+                wma_rsi_exit
+                and
+                (
+                    ema9_crossed_below_200
+                    or
+                    ema21_crossed_below_200
+                )
+                and
+                price_below_200
+                and
+                both_short_emas_down
+            )
+
+            # ------------------------------------------------
+            # 6. IMPROVED EXIT / PROFIT PROTECTION
+            #
+            # Only applies after the trade has first reached
+            # the configured profit threshold. This prevents
+            # the improved exit from prematurely closing normal
+            # losing trades; the hard stop handles those.
+            # ------------------------------------------------
+            improved_exit=False
+
+            if improved_exit_enabled:
+
+                profit_threshold=(
+                    entry_price*
+                    (1.0+improved_exit_activation_pct/100.0)
+                )
+
+                reached_profit=(
+                    peak_price>=profit_threshold
+                    or
+                    day_high>=profit_threshold
+                )
+
+                early_deterioration=(
+                    float(row["EMA9"])
+                    <
+                    float(row["EMA21"])
+                    or
+                    float(row["RSI9"])
+                    <
+                    float(row["RSI9_WMA21"])
+                )
+
+                improved_exit=(
+                    reached_profit
+                    and early_deterioration
+                )
+
+            # ------------------------------------------------
+            # 6. ORIGINAL TECHNICAL EXIT
+            # ------------------------------------------------
+            original_exit=bool(row["EXIT_SIGNAL"])
+
+            if (
+                ema200_breakdown_exit
+                or improved_exit
+                or original_exit
+            ):
 
                 exit_pos=i+1
 
@@ -5370,18 +5538,27 @@ def backtest_cci_ema_rsi_strategy(
                 exit_price=float(
                     df.iloc[exit_pos]["Open"]
                 )
-
                 exit_date=df.index[exit_pos]
 
-                pnl_pct=(
-                    exit_price-entry_price
-                )/entry_price*100
+                # Remaining position exits at next open.
+                realized_pnl += (
+                    (exit_price-entry_price)
+                    /entry_price
+                    *remaining_qty
+                )
 
-                holding_days=(
-                    pd.Timestamp(exit_date)
-                    -
-                    pd.Timestamp(entry_date)
-                ).days
+                if ema200_breakdown_exit:
+                    exit_reason=(
+                        "EMA200 Breakdown Exit"
+                    )
+                elif improved_exit:
+                    exit_reason=(
+                        "Improved Profit-Protection Exit"
+                    )
+                else:
+                    exit_reason=(
+                        "Original Strategy Exit"
+                    )
 
                 trades.append(
                     {
@@ -5389,70 +5566,62 @@ def backtest_cci_ema_rsi_strategy(
                         "Entry":entry_price,
                         "Exit Date":exit_date,
                         "Exit":exit_price,
-                        "P&L %":pnl_pct,
-                        "Holding Days":holding_days,
-                        "Exit Reason":
-                            "Original Strategy Exit",
+                        "P&L %":realized_pnl*100,
+                        "Holding Days":(
+                            pd.Timestamp(exit_date)-
+                            pd.Timestamp(entry_date)
+                        ).days,
+                        "Exit Reason":exit_reason,
                         "Peak Price":peak_price,
-                        "Trailing Active":trailing_active
+                        "Trailing Active":trailing_active,
+                        "Profit Booked %":profit_booked_pct,
+                        "Profit Booking Events":
+                            "; ".join(profit_booking_events)
                     }
                 )
 
-                in_position=False
-                entry_pos=None
-                entry_price=None
-                entry_date=None
-                peak_price=None
-                trailing_active=False
+                (
+                    in_position,entry_pos,entry_price,entry_date,
+                    peak_price,trailing_active,remaining_qty,
+                    realized_pnl,target1_booked,target2_booked,
+                    profit_booked_pct,profit_booking_events
+                )=reset_position()
 
                 i=exit_pos+1
                 continue
 
             # ------------------------------------------------
-            # 4. UPDATE PEAK AFTER STOP CHECK
+            # 7. UPDATE PEAK AFTER ALL PRIOR-DAY-BASED STOPS
             # ------------------------------------------------
-            day_high=float(row["High"])
-
             peak_price=max(
                 peak_price,
                 day_high
             )
 
             if (
-                peak_price>=(
-                    entry_price
-                    *(
-                        1.0+trail_activation_pct/100.0
-                    )
+                trailing_enabled
+                and peak_price>=(
+                    entry_price*
+                    (1.0+trail_activation_pct/100.0)
                 )
             ):
                 trailing_active=True
 
             # ------------------------------------------------
-            # 5. TIME-BASED SAFETY EXIT
+            # 8. MAXIMUM HOLDING PERIOD
             # ------------------------------------------------
-            if (
-                i-entry_pos
-                >=max_holding_days
-            ):
-
-                exit_pos=i
+            if i-entry_pos>=max_holding_days:
 
                 exit_price=float(
-                    df.iloc[exit_pos]["Close"]
+                    df.iloc[i]["Close"]
                 )
+                exit_date=df.index[i]
 
-                exit_date=df.index[exit_pos]
-
-                pnl_pct=(
-                    exit_price-entry_price
-                )/entry_price*100
-
-                holding_days=(
-                    pd.Timestamp(exit_date)
-                    -
-                    pd.Timestamp(entry_date)
-                ).days
+                realized_pnl += (
+                    (exit_price-entry_price)
+                    /entry_price
+                    *remaining_qty
+                )
 
                 trades.append(
                     {
@@ -5460,39 +5629,41 @@ def backtest_cci_ema_rsi_strategy(
                         "Entry":entry_price,
                         "Exit Date":exit_date,
                         "Exit":exit_price,
-                        "P&L %":pnl_pct,
-                        "Holding Days":holding_days,
+                        "P&L %":realized_pnl*100,
+                        "Holding Days":(
+                            pd.Timestamp(exit_date)-
+                            pd.Timestamp(entry_date)
+                        ).days,
                         "Exit Reason":
                             "Maximum holding period",
                         "Peak Price":peak_price,
-                        "Trailing Active":trailing_active
+                        "Trailing Active":trailing_active,
+                        "Profit Booked %":profit_booked_pct,
+                        "Profit Booking Events":
+                            "; ".join(profit_booking_events)
                     }
                 )
 
-                in_position=False
-                entry_pos=None
-                entry_price=None
-                entry_date=None
-                peak_price=None
-                trailing_active=False
+                (
+                    in_position,entry_pos,entry_price,entry_date,
+                    peak_price,trailing_active,remaining_qty,
+                    realized_pnl,target1_booked,target2_booked,
+                    profit_booked_pct,profit_booking_events
+                )=reset_position()
 
         i+=1
 
-    # Close an open position at the last available close.
+    # Close any open position at final close.
     if in_position and entry_date is not None:
 
         exit_date=df.index[-1]
         exit_price=float(df["Close"].iloc[-1])
 
-        pnl_pct=(
-            exit_price-entry_price
-        )/entry_price*100
-
-        holding_days=(
-            pd.Timestamp(exit_date)
-            -
-            pd.Timestamp(entry_date)
-        ).days
+        realized_pnl += (
+            (exit_price-entry_price)
+            /entry_price
+            *remaining_qty
+        )
 
         trades.append(
             {
@@ -5500,12 +5671,17 @@ def backtest_cci_ema_rsi_strategy(
                 "Entry":entry_price,
                 "Exit Date":exit_date,
                 "Exit":exit_price,
-                "P&L %":pnl_pct,
-                "Holding Days":holding_days,
-                "Exit Reason":
-                    "End of data",
+                "P&L %":realized_pnl*100,
+                "Holding Days":(
+                    pd.Timestamp(exit_date)-
+                    pd.Timestamp(entry_date)
+                ).days,
+                "Exit Reason":"End of data",
                 "Peak Price":peak_price,
-                "Trailing Active":trailing_active
+                "Trailing Active":trailing_active,
+                "Profit Booked %":profit_booked_pct,
+                "Profit Booking Events":
+                    "; ".join(profit_booking_events)
             }
         )
 
@@ -8560,6 +8736,12 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
         ### Exit
         1. **EMA(9) and EMA(21) are both sloping downward**
         2. **WMA(21) > RSI(9), with both around 50**
+
+        ### Optional EMA200 Breakdown Exit
+        - **WMA(21) > RSI(9)**
+        - **EMA9 OR EMA21 crosses below EMA200**
+        - **Close < EMA200**
+        - **EMA9 and EMA21 both slope downward**
         """
     )
 
@@ -8638,6 +8820,11 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
 
     st.sidebar.markdown("### 🛡️ Risk Management")
 
+    st.sidebar.caption(
+        "Trailing profit is optional. Turning it OFF does not "
+        "disable the maximum-loss stop."
+    )
+
     max_loss_pct=st.sidebar.slider(
         "Maximum loss per trade (%)",
         5.0,
@@ -8651,6 +8838,17 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
         key="cci_ema_rsi_max_loss"
     )
 
+    trailing_enabled=st.sidebar.checkbox(
+        "Enable trailing profit",
+        value=True,
+        help=(
+            "When OFF, the trail activation and trailing "
+            "stop are completely disabled. The original "
+            "strategy exit and maximum-loss stop remain active."
+        ),
+        key="cci_ema_rsi_trailing_enabled"
+    )
+
     trail_activation_pct=st.sidebar.slider(
         "Trail activates after profit (%)",
         5.0,
@@ -8661,7 +8859,8 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
             "Trailing stop starts after the trade reaches "
             "this profit from entry."
         ),
-        key="cci_ema_rsi_trail_activation"
+        key="cci_ema_rsi_trail_activation",
+        disabled=not trailing_enabled
     )
 
     trailing_stop_pct=st.sidebar.slider(
@@ -8674,7 +8873,80 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
             "Trailing stop remains this percentage below "
             "the highest price reached after entry."
         ),
-        key="cci_ema_rsi_trailing_distance"
+        key="cci_ema_rsi_trailing_distance",
+        disabled=not trailing_enabled
+    )
+
+    st.sidebar.markdown("### 💰 Profit Booking")
+
+    profit_booking_enabled=st.sidebar.checkbox(
+        "Enable partial profit booking",
+        value=True,
+        help=(
+            "Book part of the position at Target 1 and "
+            "Target 2 while allowing the remaining position "
+            "to continue running."
+        ),
+        key="cci_ema_rsi_profit_booking_enabled"
+    )
+
+    target1_pct=st.sidebar.slider(
+        "Target 1 profit (%)",
+        5.0,30.0,15.0,1.0,
+        key="cci_ema_rsi_target1",
+        disabled=not profit_booking_enabled
+    )
+
+    target1_booking_pct=st.sidebar.slider(
+        "Target 1: book position (%)",
+        5.0,50.0,25.0,5.0,
+        key="cci_ema_rsi_target1_booking",
+        disabled=not profit_booking_enabled
+    )
+
+    target2_pct=st.sidebar.slider(
+        "Target 2 profit (%)",
+        10.0,60.0,25.0,1.0,
+        key="cci_ema_rsi_target2",
+        disabled=not profit_booking_enabled
+    )
+
+    target2_booking_pct=st.sidebar.slider(
+        "Target 2: book position (%)",
+        5.0,50.0,25.0,5.0,
+        key="cci_ema_rsi_target2_booking",
+        disabled=not profit_booking_enabled
+    )
+
+    st.sidebar.markdown("### 🛡️ Improved Exit")
+
+    improved_exit_enabled=st.sidebar.checkbox(
+        "Enable profit-protection exit",
+        value=False,
+        help=(
+            "After the trade first reaches the selected profit "
+            "threshold, exit early if EMA9 < EMA21 OR RSI9 < WMA21. "
+            "The original technical exit remains active."
+        ),
+        key="cci_ema_rsi_improved_exit_enabled"
+    )
+
+    improved_exit_activation_pct=st.sidebar.slider(
+        "Profit-protection activates after (%)",
+        3.0,30.0,5.0,1.0,
+        key="cci_ema_rsi_improved_exit_activation",
+        disabled=not improved_exit_enabled
+    )
+
+    ema200_breakdown_exit_enabled=st.sidebar.checkbox(
+        "Enable EMA200 breakdown exit",
+        value=False,
+        help=(
+            "Exit when WMA21 > RSI9 AND either EMA9 or EMA21 "
+            "has crossed below EMA200 AND price closes below "
+            "EMA200 AND both EMA9 and EMA21 are sloping down."
+        ),
+        key="cci_ema_rsi_ema200_breakdown_exit"
     )
 
     max_stocks=st.sidebar.slider(
@@ -8915,8 +9187,17 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
                     rsi_50_tolerance,
                     max_holding_days,
                     max_loss_pct,
+                    trailing_enabled,
                     trail_activation_pct,
-                    trailing_stop_pct
+                    trailing_stop_pct,
+                    profit_booking_enabled,
+                    target1_pct,
+                    target1_booking_pct,
+                    target2_pct,
+                    target2_booking_pct,
+                    improved_exit_enabled,
+                    improved_exit_activation_pct,
+                    ema200_breakdown_exit_enabled
                 )
 
                 trades=bt["Trades"]
@@ -8993,6 +9274,112 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
                     trade_df,
                     width="stretch",
                     hide_index=True
+                )
+
+                # --------------------------------------------
+                # PORTFOLIO EQUITY CURVE
+                # --------------------------------------------
+                # Builds a sequential portfolio curve from the
+                # realized return of each completed trade.
+                # This is an unleveraged, one-position-at-a-time
+                # equity curve based on the backtest trade list.
+                equity_df=trade_df.copy()
+
+                equity_df["Entry Date"]=pd.to_datetime(
+                    equity_df["Entry Date"]
+                )
+                equity_df["Exit Date"]=pd.to_datetime(
+                    equity_df["Exit Date"]
+                )
+
+                equity_df=equity_df.sort_values(
+                    ["Exit Date","Entry Date"]
+                ).reset_index(drop=True)
+
+                starting_capital=st.number_input(
+                    "Portfolio starting capital",
+                    min_value=10000.0,
+                    value=100000.0,
+                    step=10000.0,
+                    key="cci_ema_rsi_starting_capital"
+                )
+
+                equity_df["Equity"] = starting_capital
+
+                current_equity=float(starting_capital)
+                equity_values=[]
+
+                for pnl in equity_df["P&L %"].fillna(0):
+                    current_equity *= (
+                        1.0 + float(pnl)/100.0
+                    )
+                    equity_values.append(current_equity)
+
+                equity_df["Equity"]=equity_values
+
+                portfolio_chart=equity_df[
+                    ["Exit Date","Equity"]
+                ].copy()
+
+                portfolio_chart=portfolio_chart.rename(
+                    columns={
+                        "Exit Date":"Date"
+                    }
+                )
+
+                st.subheader(
+                    "📈 Portfolio Equity Curve"
+                )
+
+                st.line_chart(
+                    portfolio_chart.set_index("Date")["Equity"],
+                    height=400,
+                    use_container_width=True
+                )
+
+                # Portfolio drawdown calculated from the
+                # same sequential equity curve.
+                equity_series=pd.Series(
+                    [starting_capital] + equity_values,
+                    dtype="float64"
+                )
+
+                running_peak=equity_series.cummax()
+
+                drawdown_pct=(
+                    equity_series-running_peak
+                )/running_peak*100.0
+
+                max_portfolio_drawdown=float(
+                    drawdown_pct.min()
+                )
+
+                total_return_pct=(
+                    current_equity-starting_capital
+                )/starting_capital*100.0
+
+                p1,p2,p3=st.columns(3)
+
+                p1.metric(
+                    "Starting Capital",
+                    f"₹{starting_capital:,.0f}"
+                )
+
+                p2.metric(
+                    "Final Equity",
+                    f"₹{current_equity:,.0f}"
+                )
+
+                p3.metric(
+                    "Portfolio Max Drawdown",
+                    f"{max_portfolio_drawdown:.2f}%"
+                )
+
+                st.caption(
+                    f"Portfolio return: {total_return_pct:.2f}%. "
+                    "The curve compounds each completed trade sequentially "
+                    "and therefore represents a strategy-level equity curve, "
+                    "not simultaneous multi-position capital allocation."
                 )
 
                 st.download_button(
