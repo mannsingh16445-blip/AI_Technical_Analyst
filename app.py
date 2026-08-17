@@ -4335,6 +4335,588 @@ def run_smart_breakout_optimizer(
 
 
 # ============================================================
+# CHART PATTERN RECOGNITION ENGINE
+# ============================================================
+
+def _pattern_clean_ohlcv(data):
+    if data is None or data.empty:
+        return None
+
+    df=data.copy()
+
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    required=["Open","High","Low","Close","Volume"]
+
+    if any(c not in df.columns for c in required):
+        return None
+
+    df=df.dropna(subset=required).copy()
+
+    if len(df)<40:
+        return None
+
+    for c in required:
+        df[c]=pd.to_numeric(df[c],errors="coerce")
+
+    return df.dropna(subset=required)
+
+
+def _find_pattern_pivots(df, window=3):
+    high=df["High"].values
+    low=df["Low"].values
+
+    highs=[]
+    lows=[]
+
+    for i in range(window,len(df)-window):
+
+        h=high[i]
+        l=low[i]
+
+        if h>=max(high[i-window:i+window+1]):
+            highs.append((i,float(h)))
+
+        if l<=min(low[i-window:i+window+1]):
+            lows.append((i,float(l)))
+
+    return highs,lows
+
+
+def _nearest_pivots(pivots, start, end, kind="high"):
+    return [
+        p for p in pivots
+        if start<=p[0]<=end
+    ]
+
+
+def _pattern_trade_plan(df, pattern, level, direction):
+    close=float(df["Close"].iloc[-1])
+    atr_series=_optimizer_atr14(df)
+    atr=float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else close*0.02
+
+    if direction=="Bullish":
+        entry=max(close,level)*1.0025
+        stop=min(
+            level-1.2*atr,
+            float(df["Low"].tail(10).min())
+        )
+        if stop>=entry:
+            stop=entry-1.5*atr
+
+        risk=entry-stop
+
+        return {
+            "Entry":entry,
+            "Stop Loss":stop,
+            "Target 1":entry+2*risk,
+            "Target 2":entry+3*risk,
+            "Risk":risk
+        }
+
+    entry=min(close,level)*0.9975
+    stop=max(
+        level+1.2*atr,
+        float(df["High"].tail(10).max())
+    )
+
+    if stop<=entry:
+        stop=entry+1.5*atr
+
+    risk=stop-entry
+
+    return {
+        "Entry":entry,
+        "Stop Loss":stop,
+        "Target 1":entry-2*risk,
+        "Target 2":entry-3*risk,
+        "Risk":risk
+    }
+
+
+def _pattern_result(
+    name,
+    stage,
+    direction,
+    confidence,
+    breakout_level,
+    start_index,
+    end_index,
+    df,
+    details=None
+):
+    current=float(df["Close"].iloc[-1])
+    level=float(breakout_level)
+
+    if direction=="Bullish":
+        breakout=current>level
+        distance=(current-level)/level*100
+    else:
+        breakout=current<level
+        distance=(level-current)/level*100
+
+    # Avoid calling a pattern "confirmed" when price is only
+    # marginally through the level.
+    confirmed=bool(
+        breakout and distance>=0.25
+    )
+
+    if confirmed:
+        stage="CONFIRMED BREAKOUT"
+
+    elif breakout:
+        stage="BREAKOUT"
+
+    elif abs(distance)<=2.0:
+        stage="NEAR BREAKOUT"
+
+    else:
+        stage="FORMING"
+
+    volume_avg=float(
+        df["Volume"].rolling(20).mean().iloc[-1]
+    )
+
+    volume_ratio=(
+        float(df["Volume"].iloc[-1])/volume_avg
+        if volume_avg>0
+        else 1.0
+    )
+
+    if volume_ratio>=1.5:
+        confidence+=8
+    elif volume_ratio<0.7:
+        confidence-=5
+
+    confidence=int(max(0,min(99,confidence)))
+
+    trade=_pattern_trade_plan(
+        df,
+        name,
+        level,
+        direction
+    )
+
+    return {
+        "Pattern":name,
+        "Stage":stage,
+        "Direction":direction,
+        "Confidence":confidence,
+        "Breakout Level":level,
+        "Current Price":current,
+        "Distance %":distance,
+        "Start Bar":start_index,
+        "End Bar":end_index,
+        "Entry":trade["Entry"],
+        "Stop Loss":trade["Stop Loss"],
+        "Target 1":trade["Target 1"],
+        "Target 2":trade["Target 2"],
+        "Risk":trade["Risk"],
+        "Volume Ratio":volume_ratio,
+        "Details":details or ""
+    }
+
+
+def _detect_head_shoulders(df, inverse=False):
+    highs,lows=_find_pattern_pivots(df,3)
+
+    pivots=sorted(
+        [(i,p,"H") for i,p in highs]+
+        [(i,p,"L") for i,p in lows],
+        key=lambda x:x[0]
+    )
+
+    if len(pivots)<5:
+        return None
+
+    candidates=[]
+
+    for j in range(len(pivots)-4):
+
+        p=pivots[j:j+5]
+
+        if [x[2] for x in p] != (
+            ["L","H","L","H","L"]
+            if inverse
+            else ["H","L","H","L","H"]
+        ):
+            continue
+
+        a,b,c,d,e=[x[1] for x in p]
+
+        if not inverse:
+            # H&S: middle high is the head.
+            if not (c>a and c>e):
+                continue
+
+            shoulder_similarity=abs(a-e)/c
+            if shoulder_similarity>0.12:
+                continue
+
+            neck_similarity=abs(b-d)/c
+            if neck_similarity>0.10:
+                continue
+
+            neckline=(b+d)/2
+
+            # Head should be meaningfully above shoulders.
+            if c<=max(a,e)*1.03:
+                continue
+
+            confidence=65
+            confidence+=int(
+                max(
+                    0,
+                    12*(1-shoulder_similarity/0.12)
+                )
+            )
+
+            return _pattern_result(
+                "Head & Shoulders",
+                "FORMING",
+                "Bearish",
+                confidence,
+                neckline,
+                p[0][0],
+                p[-1][0],
+                df,
+                "Head higher than both shoulders; neckline formed by two troughs."
+            )
+
+        else:
+            # Inverse H&S: middle low is the head.
+            if not (c<a and c<e):
+                continue
+
+            shoulder_similarity=abs(a-e)/abs(c)
+            if shoulder_similarity>0.12:
+                continue
+
+            neck_similarity=abs(b-d)/abs(c)
+            if neck_similarity>0.10:
+                continue
+
+            neckline=(b+d)/2
+
+            if c>=min(a,e)*0.97:
+                continue
+
+            confidence=65
+            confidence+=int(
+                max(
+                    0,
+                    12*(1-shoulder_similarity/0.12)
+                )
+            )
+
+            return _pattern_result(
+                "Inverse Head & Shoulders",
+                "FORMING",
+                "Bullish",
+                confidence,
+                neckline,
+                p[0][0],
+                p[-1][0],
+                df,
+                "Head lower than both shoulders; neckline formed by two peaks."
+            )
+
+    return None
+
+
+def _detect_double_top_bottom(df, bottom=False):
+    highs,lows=_find_pattern_pivots(df,3)
+
+    pivots=sorted(
+        [(i,p,"H") for i,p in highs]+
+        [(i,p,"L") for i,p in lows],
+        key=lambda x:x[0]
+    )
+
+    wanted=["L","H","L"] if bottom else ["H","L","H"]
+
+    for j in range(len(pivots)-2):
+
+        p=pivots[j:j+3]
+
+        if [x[2] for x in p]!=wanted:
+            continue
+
+        a,b,c=[x[1] for x in p]
+
+        if bottom:
+            if abs(a-c)/max(a,c)>0.04:
+                continue
+
+            if b>=min(a,c)*1.03:
+                level=b
+                return _pattern_result(
+                    "Double Bottom",
+                    "FORMING",
+                    "Bullish",
+                    70,
+                    level,
+                    p[0][0],
+                    p[-1][0],
+                    df,
+                    "Two comparable lows separated by a rebound."
+                )
+        else:
+            if abs(a-c)/max(a,c)>0.04:
+                continue
+
+            if b<=max(a,c)*0.97:
+                level=b
+                return _pattern_result(
+                    "Double Top",
+                    "FORMING",
+                    "Bearish",
+                    70,
+                    level,
+                    p[0][0],
+                    p[-1][0],
+                    df,
+                    "Two comparable highs separated by a decline."
+                )
+
+    return None
+
+
+def _detect_cup_handle(df):
+    # Use the most recent 30–160 bars and test a rounded cup
+    # followed by a relatively shallow handle.
+    n=len(df)
+    close=df["Close"].values
+
+    for length in range(
+        min(160,n-1),
+        39,
+        -5
+    ):
+
+        start=n-length-1
+        segment=df.iloc[start:n]
+
+        left=float(segment["High"].iloc[:max(5,length//5)].max())
+        right=float(segment["High"].iloc[-max(8,length//5):].max())
+
+        cup_bottom=float(
+            segment["Low"].iloc[length//4:3*length//4].min()
+        )
+
+        if left<=0 or right<=0:
+            continue
+
+        rim_similarity=abs(left-right)/max(left,right)
+
+        if rim_similarity>0.10:
+            continue
+
+        if cup_bottom>=min(left,right)*0.92:
+            continue
+
+        # Require the bottom to be away from both rims.
+        bottom_pos=int(
+            segment["Low"].values.argmin()
+        )
+
+        if not (
+            length*0.20
+            <=bottom_pos
+            <=length*0.80
+        ):
+            continue
+
+        # Handle is the most recent 10–25% of the pattern.
+        handle_len=max(
+            5,
+            min(
+                25,
+                length//5
+            )
+        )
+
+        handle=segment.iloc[-handle_len:]
+
+        handle_low=float(handle["Low"].min())
+
+        if handle_low<right*0.90:
+            continue
+
+        neckline=min(left,right)
+
+        current=float(df["Close"].iloc[-1])
+
+        confidence=68
+
+        confidence+=int(
+            max(
+                0,
+                10*(1-rim_similarity/0.10)
+            )
+        )
+
+        if current>neckline:
+            confidence+=10
+
+        return _pattern_result(
+            "Cup & Handle",
+            "FORMING",
+            "Bullish",
+            confidence,
+            neckline,
+            start,
+            n-1,
+            df,
+            "Rounded cup with comparable rims followed by a shallow handle."
+        )
+
+    return None
+
+
+def _detect_triangles(df):
+    highs,lows=_find_pattern_pivots(df,3)
+
+    recent_highs=[
+        p for p in highs
+        if p[0]>=max(0,len(df)-70)
+    ]
+
+    recent_lows=[
+        p for p in lows
+        if p[0]>=max(0,len(df)-70)
+    ]
+
+    if len(recent_highs)<3 or len(recent_lows)<3:
+        return None
+
+    hs=recent_highs[-4:]
+    ls=recent_lows[-4:]
+
+    xh=np.array([p[0] for p in hs],dtype=float)
+    yh=np.array([p[1] for p in hs],dtype=float)
+
+    xl=np.array([p[0] for p in ls],dtype=float)
+    yl=np.array([p[1] for p in ls],dtype=float)
+
+    hslope=np.polyfit(xh,yh,1)[0]
+    lslope=np.polyfit(xl,yl,1)[0]
+
+    avg_price=float(df["Close"].iloc[-1])
+
+    # Normalize slopes by price per bar.
+    hs_norm=hslope/avg_price
+    ls_norm=lslope/avg_price
+
+    if abs(hs_norm)<0.0015 and ls_norm>0.0003:
+        return _pattern_result(
+            "Ascending Triangle",
+            "FORMING",
+            "Bullish",
+            72,
+            max(yh),
+            hs[0][0],
+            len(df)-1,
+            df,
+            "Flat/resistant highs with rising lows."
+        )
+
+    if hs_norm<-0.0003 and abs(ls_norm)<0.0015:
+        return _pattern_result(
+            "Descending Triangle",
+            "FORMING",
+            "Bearish",
+            72,
+            min(yl),
+            hs[0][0],
+            len(df)-1,
+            df,
+            "Falling highs with relatively flat support."
+        )
+
+    if hs_norm<-0.0002 and ls_norm>0.0002:
+        level=(max(yh)+min(yl))/2
+
+        return _pattern_result(
+            "Symmetrical Triangle",
+            "FORMING",
+            "Neutral",
+            68,
+            level,
+            min(
+                hs[0][0],
+                ls[0][0]
+            ),
+            len(df)-1,
+            df,
+            "Converging falling highs and rising lows."
+        )
+
+    return None
+
+
+def detect_chart_patterns(data):
+    """
+    Detect the supported classical chart patterns.
+
+    Returns a list of the strongest recent pattern candidates.
+    This is a quantitative heuristic detector, not an image/
+    computer-vision classifier.
+    """
+
+    df=_pattern_clean_ohlcv(data)
+
+    if df is None:
+        return []
+
+    candidates=[]
+
+    detectors=[
+        lambda x:_detect_head_shoulders(x,False),
+        lambda x:_detect_head_shoulders(x,True),
+        lambda x:_detect_double_top_bottom(x,False),
+        lambda x:_detect_double_top_bottom(x,True),
+        _detect_cup_handle,
+        _detect_triangles
+    ]
+
+    for detector in detectors:
+
+        try:
+            result=detector(df)
+
+            if result is not None:
+                candidates.append(result)
+
+        except Exception:
+            continue
+
+    # Remove duplicate pattern names and keep highest confidence.
+    unique={}
+
+    for item in candidates:
+
+        name=item["Pattern"]
+
+        if (
+            name not in unique
+            or item["Confidence"]>unique[name]["Confidence"]
+        ):
+            unique[name]=item
+
+    return sorted(
+        unique.values(),
+        key=lambda x:(
+            x["Confidence"],
+            1 if x["Stage"]=="CONFIRMED BREAKOUT" else 0
+        ),
+        reverse=True
+    )
+
+
+
+# ============================================================
 # BUY / SELL SIGNAL ENGINE
 # ============================================================
 
@@ -4631,6 +5213,7 @@ module = st.sidebar.radio(
         "⚡ Hourly Donchian Breakout Scanner",
         "🎯 Buy / Sell Signal Engine",
         "🧪 Smart Breakout Drawdown Optimizer",
+        "📐 Chart Pattern Scanner",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -6864,6 +7447,439 @@ Net R = {best['Net R']:.2f}
                 an out-of-sample period to reduce overfitting.
                 """
             )
+
+
+
+# ============================================================
+# CHART PATTERN SCANNER MODULE
+# ============================================================
+
+elif module == "📐 Chart Pattern Scanner":
+
+    st.header(
+        "📐 Chart Pattern Recognition Scanner"
+    )
+
+    st.write(
+        """
+        Quantitative recognition of classical price structures
+        using swing highs/lows, geometry, breakout levels and
+        volume behaviour.
+        """
+    )
+
+    st.info(
+        """
+        This module identifies patterns from OHLCV price data.
+        It is a rule-based detector, not an image classifier.
+        Pattern recognition is approximate by nature, so use the
+        confidence score and breakout stage as confirmation.
+        """
+    )
+
+    with st.expander(
+        "📋 Supported Patterns",
+        expanded=True
+    ):
+
+        st.markdown(
+            """
+            **Reversal**
+            - Head & Shoulders
+            - Inverse Head & Shoulders
+            - Double Top
+            - Double Bottom
+
+            **Continuation / consolidation**
+            - Cup & Handle
+            - Ascending Triangle
+            - Descending Triangle
+            - Symmetrical Triangle
+
+            **Pattern stages**
+            - FORMING
+            - NEAR BREAKOUT
+            - BREAKOUT
+            - CONFIRMED BREAKOUT
+            """
+        )
+
+    st.sidebar.subheader(
+        "📐 Pattern Scanner Settings"
+    )
+
+    st.caption(
+        "Loading stock universes..."
+    )
+
+    nse_stocks=load_nse_equity_universe()
+    nifty500=load_nifty500()
+    fno_stocks=load_fno_stocks()
+    nifty_midcap100=load_nifty_midcap100()
+    nifty_smallcap250=load_nifty_smallcap250()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="pattern_universe"
+    )
+
+    timeframe=st.sidebar.selectbox(
+        "Timeframe",
+        [
+            "Daily",
+            "Weekly"
+        ],
+        key="pattern_timeframe"
+    )
+
+    pattern_filter=st.sidebar.multiselect(
+        "Patterns",
+        [
+            "Head & Shoulders",
+            "Inverse Head & Shoulders",
+            "Double Top",
+            "Double Bottom",
+            "Cup & Handle",
+            "Ascending Triangle",
+            "Descending Triangle",
+            "Symmetrical Triangle"
+        ],
+        default=[
+            "Head & Shoulders",
+            "Inverse Head & Shoulders",
+            "Double Top",
+            "Double Bottom",
+            "Cup & Handle",
+            "Ascending Triangle",
+            "Descending Triangle",
+            "Symmetrical Triangle"
+        ],
+        key="pattern_filter"
+    )
+
+    stage_filter=st.sidebar.multiselect(
+        "Pattern Stage",
+        [
+            "FORMING",
+            "NEAR BREAKOUT",
+            "BREAKOUT",
+            "CONFIRMED BREAKOUT"
+        ],
+        default=[
+            "FORMING",
+            "NEAR BREAKOUT",
+            "BREAKOUT",
+            "CONFIRMED BREAKOUT"
+        ],
+        key="pattern_stage_filter"
+    )
+
+    min_confidence=st.sidebar.slider(
+        "Minimum Confidence",
+        50,
+        95,
+        65,
+        5,
+        key="pattern_min_confidence"
+    )
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks",
+        10,
+        min(500,max(10,len(
+            resolve_stock_universe(
+                universe,
+                nse_stocks,
+                nifty500,
+                fno_stocks,
+                nifty_midcap100,
+                nifty_smallcap250
+            )
+        ))),
+        min(100,max(10,len(
+            resolve_stock_universe(
+                universe,
+                nse_stocks,
+                nifty500,
+                fno_stocks,
+                nifty_midcap100,
+                nifty_smallcap250
+            )
+        ))),
+        10,
+        key="pattern_max_stocks"
+    )
+
+    run_patterns=st.sidebar.button(
+        "📐 SCAN CHART PATTERNS",
+        type="primary",
+        key="run_pattern_scanner"
+    )
+
+    stocks=resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    if not stocks:
+        st.error(
+            f"No stocks available for {universe}."
+        )
+        st.stop()
+
+    st.info(
+        f"Universe: **{universe}** | "
+        f"Timeframe: **{timeframe}** | "
+        f"Stocks: **{len(stocks)}**"
+    )
+
+    if run_patterns:
+
+        selected=stocks[:max_stocks]
+
+        if timeframe=="Daily":
+
+            period="2y"
+
+            with st.spinner(
+                f"Downloading daily data for {len(selected)} stocks..."
+            ):
+
+                market=download_batches(
+                    selected,
+                    period,
+                    50
+                )
+
+        else:
+
+            # Weekly data is derived from a longer daily history.
+            with st.spinner(
+                f"Downloading weekly-source data for {len(selected)} stocks..."
+            ):
+
+                market=download_batches(
+                    selected,
+                    "5y",
+                    50
+                )
+
+                for symbol in list(market.keys()):
+
+                    d=market[symbol]
+
+                    if d is None or d.empty:
+                        continue
+
+                    d=d.copy()
+
+                    if isinstance(
+                        d.columns,
+                        pd.MultiIndex
+                    ):
+                        d.columns=d.columns.get_level_values(0)
+
+                    d.index=pd.to_datetime(d.index)
+
+                    market[symbol]=(
+                        d.resample("W-FRI")
+                        .agg(
+                            {
+                                "Open":"first",
+                                "High":"max",
+                                "Low":"min",
+                                "Close":"last",
+                                "Volume":"sum"
+                            }
+                        )
+                        .dropna()
+                    )
+
+        rows=[]
+
+        for symbol in selected:
+
+            data=market.get(symbol)
+
+            if data is None or data.empty:
+                continue
+
+            patterns=detect_chart_patterns(
+                data
+            )
+
+            for item in patterns:
+
+                if pattern_filter and (
+                    item["Pattern"]
+                    not in pattern_filter
+                ):
+                    continue
+
+                if item["Stage"] not in stage_filter:
+                    continue
+
+                if item["Confidence"]<min_confidence:
+                    continue
+
+                rows.append(
+                    {
+                        "Stock":symbol,
+                        "Pattern":item["Pattern"],
+                        "Direction":item["Direction"],
+                        "Stage":item["Stage"],
+                        "Confidence":
+                            item["Confidence"],
+                        "Current Price":
+                            round(
+                                item["Current Price"],
+                                2
+                            ),
+                        "Breakout Level":
+                            round(
+                                item["Breakout Level"],
+                                2
+                            ),
+                        "Distance %":
+                            round(
+                                item["Distance %"],
+                                2
+                            ),
+                        "Entry":
+                            round(
+                                item["Entry"],
+                                2
+                            ),
+                        "Stop Loss":
+                            round(
+                                item["Stop Loss"],
+                                2
+                            ),
+                        "Target 1":
+                            round(
+                                item["Target 1"],
+                                2
+                            ),
+                        "Target 2":
+                            round(
+                                item["Target 2"],
+                                2
+                            ),
+                        "R:R":"1:2 / 1:3",
+                        "Volume Ratio":
+                            round(
+                                item["Volume Ratio"],
+                                2
+                            ),
+                        "Description":
+                            item["Details"]
+                    }
+                )
+
+        result_df=pd.DataFrame(rows)
+
+        if result_df.empty:
+
+            st.warning(
+                "No chart patterns matched the selected "
+                "filters."
+            )
+
+        else:
+
+            result_df=result_df.sort_values(
+                [
+                    "Stage",
+                    "Confidence"
+                ],
+                ascending=[
+                    True,
+                    False
+                ]
+            )
+
+            st.success(
+                f"Found **{len(result_df)} pattern signals** "
+                f"across the selected universe."
+            )
+
+            # Strongest confirmed/near-breakout setups first.
+            priority={
+                "CONFIRMED BREAKOUT":0,
+                "BREAKOUT":1,
+                "NEAR BREAKOUT":2,
+                "FORMING":3
+            }
+
+            display_df=result_df.copy()
+
+            display_df["_priority"]=[
+                priority.get(x,9)
+                for x in display_df["Stage"]
+            ]
+
+            display_df=display_df.sort_values(
+                [
+                    "_priority",
+                    "Confidence"
+                ],
+                ascending=[
+                    True,
+                    False
+                ]
+            ).drop(
+                columns=["_priority"]
+            )
+
+            st.subheader(
+                "📐 Detected Chart Patterns"
+            )
+
+            st.dataframe(
+                display_df,
+                width="stretch",
+                hide_index=True
+            )
+
+            st.download_button(
+                "⬇️ Download Pattern Results",
+                display_df.to_csv(index=False),
+                "Chart_Pattern_Scanner.csv",
+                "text/csv"
+            )
+
+            confirmed=display_df[
+                display_df["Stage"].isin(
+                    [
+                        "BREAKOUT",
+                        "CONFIRMED BREAKOUT"
+                    ]
+                )
+            ]
+
+            if not confirmed.empty:
+
+                st.subheader(
+                    "🚀 Breakout / Confirmation Candidates"
+                )
+
+                st.dataframe(
+                    confirmed.head(20),
+                    width="stretch",
+                    hide_index=True
+                )
 
 
 
