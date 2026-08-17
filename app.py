@@ -3918,7 +3918,17 @@ def generate_scanner_signal(
 
     # Scanner-specific behaviour.
     if name=="Smart Breakout":
-        x=stage_two_analysis(df)
+        # stage_two_analysis() expects the application's calculated
+        # indicator columns (DONCHIAN_UPPER/LOWER, VOLUME_RATIO,
+        # RSI14, SMA200, MACD, etc.), while the signal engine
+        # intentionally receives raw OHLCV data.
+        smart_data=calculate_indicators(
+            df
+        )
+
+        x=stage_two_analysis(
+            smart_data
+        )
         if x:
             s=float(x.get("Score",0))
             bullish+=min(25,int(s*2.5))
