@@ -3793,6 +3793,276 @@ def run_rsi_wma_scanner(
 
 
 # ============================================================
+# BUY / SELL SIGNAL ENGINE
+# ============================================================
+
+def generate_scanner_signal(
+    daily_data,
+    scanner_name,
+    hourly_data=None
+):
+    """
+    Convert the selected scanner's current behaviour into:
+    STRONG BUY / BUY / WATCH-HOLD / SELL / STRONG SELL.
+
+    This is a ranking/signal layer only. It does not alter the
+    underlying scanner or its strategy-specific backtest rules.
+    """
+
+    if daily_data is None or daily_data.empty:
+        return None
+
+    df=daily_data.copy()
+
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    required=["Open","High","Low","Close","Volume"]
+
+    if any(c not in df.columns for c in required):
+        return None
+
+    df=df.dropna(subset=required).copy()
+
+    if len(df)<30:
+        return None
+
+    close=pd.to_numeric(df["Close"],errors="coerce")
+    high=pd.to_numeric(df["High"],errors="coerce")
+    low=pd.to_numeric(df["Low"],errors="coerce")
+    volume=pd.to_numeric(df["Volume"],errors="coerce")
+
+    rsi9=calculate_rsi_wilder(close,9)
+    wma21=(
+        rsi9.rolling(21)
+        .apply(
+            lambda x: np.dot(
+                x,
+                np.arange(1,22)
+            )/231.0,
+            raw=True
+        )
+    )
+
+    sma50=close.rolling(50).mean()
+    sma200=close.rolling(200).mean()
+
+    bullish=0
+    bearish=0
+    reasons=[]
+    warnings=[]
+
+    c=float(close.iloc[-1])
+    pc=float(close.iloc[-2])
+    r=float(rsi9.iloc[-1]) if not pd.isna(rsi9.iloc[-1]) else np.nan
+    w=float(wma21.iloc[-1]) if not pd.isna(wma21.iloc[-1]) else np.nan
+
+    # Common price behaviour.
+    if c>pc:
+        bullish+=5
+        reasons.append("Price is rising")
+    else:
+        bearish+=5
+        warnings.append("Price is falling")
+
+    # RSI behaviour.
+    if not pd.isna(r):
+        if r>=60:
+            bullish+=8
+            reasons.append(f"RSI(9) strong ({r:.1f})")
+        elif r>=55:
+            bullish+=5
+            reasons.append(f"RSI(9) bullish ({r:.1f})")
+        elif r<45:
+            bearish+=8
+            warnings.append(f"RSI(9) weak ({r:.1f})")
+        elif r<50:
+            bearish+=5
+            warnings.append(f"RSI(9) below 50 ({r:.1f})")
+
+    if not pd.isna(r) and not pd.isna(w):
+        if r>w:
+            bullish+=7
+            reasons.append("RSI(9) above WMA(21)")
+        else:
+            bearish+=7
+            warnings.append("RSI(9) below WMA(21)")
+
+    # Trend behaviour.
+    if len(df)>=200 and not pd.isna(sma200.iloc[-1]):
+        if c>float(sma200.iloc[-1]):
+            bullish+=8
+            reasons.append("Price above SMA(200)")
+        else:
+            bearish+=8
+            warnings.append("Price below SMA(200)")
+
+    if len(df)>=50 and not pd.isna(sma50.iloc[-1]):
+        if c>float(sma50.iloc[-1]):
+            bullish+=5
+        else:
+            bearish+=5
+
+    # Volume behaviour.
+    av=float(volume.rolling(20).mean().iloc[-1])
+    if av>0 and not pd.isna(av):
+        vr=float(volume.iloc[-1])/av
+        if vr>=1.5:
+            bullish+=7
+            reasons.append(f"Volume expansion ({vr:.1f}x)")
+        elif vr<0.7:
+            bearish+=3
+            warnings.append("Volume below 20-day average")
+
+    name=str(scanner_name)
+
+    # Scanner-specific behaviour.
+    if name=="Smart Breakout":
+        x=stage_two_analysis(df)
+        if x:
+            s=float(x.get("Score",0))
+            bullish+=min(25,int(s*2.5))
+            if s>=8:
+                reasons.append(f"Smart Breakout score {s:.0f}/10")
+            elif s<5:
+                bearish+=10
+                warnings.append(f"Smart Breakout score {s:.0f}/10")
+
+    elif name=="120-Day High Breakout":
+        x=calculate_120day_breakout_screen(df)
+        if x:
+            passed=sum(bool(v) for v in x["Conditions"].values())
+            bullish+=int(passed*7.5)
+            if x["Pass"]:
+                reasons.append("120-day breakout confirmed")
+            else:
+                warnings.append(f"120-day breakout {passed}/4")
+
+            if c>float(x["120D High 1D Ago"]):
+                bullish+=10
+                reasons.append("Price holding above breakout level")
+            else:
+                bearish+=10
+                warnings.append("Price below breakout level")
+
+    elif name=="Hourly Donchian Breakout":
+        if hourly_data is not None and not hourly_data.empty:
+            x=calculate_hourly_donchian_breakout(hourly_data)
+            if x:
+                passed=sum(bool(v) for v in x["Conditions"].values())
+                bullish+=int(passed*5.8)
+                if x["Pass"]:
+                    reasons.append("Hourly Donchian 6/6 confirmed")
+                else:
+                    warnings.append(f"Hourly Donchian {passed}/6")
+                if x["RSI9"]>=55:
+                    bullish+=5
+                else:
+                    bearish+=5
+        else:
+            warnings.append("Hourly data unavailable")
+
+    elif name=="Daily RSI(9)/WMA(21)":
+        if not pd.isna(r) and not pd.isna(w):
+            if r>w:
+                bullish+=10
+                reasons.append("Daily RSI/WMA bullish")
+            else:
+                bearish+=10
+                warnings.append("Daily RSI/WMA bearish")
+            if r>=55:
+                bullish+=10
+            else:
+                bearish+=5
+
+    elif name=="Weekly Trend":
+        x=calculate_weekly_trend_screen(df)
+        if x:
+            passed=sum(bool(v) for v in x["Conditions"].values())
+            bullish+=int(passed/len(x["Conditions"])*30)
+            if x["Pass"]:
+                reasons.append("Weekly trend fully confirmed")
+            else:
+                warnings.append(f"Weekly trend {passed}/10")
+
+    elif name=="Daily Trend":
+        x=calculate_daily_trend_screen(df)
+        if x:
+            passed=sum(bool(v) for v in x["Conditions"].values())
+            bullish+=int(passed/len(x["Conditions"])*30)
+            if x["Pass"]:
+                reasons.append("Daily trend fully confirmed")
+            else:
+                warnings.append(f"Daily trend {passed}/10")
+
+    elif name=="Multi-Timeframe":
+        if r>w:
+            bullish+=10
+            reasons.append("Daily RSI/WMA bullish")
+        else:
+            bearish+=10
+            warnings.append("Daily RSI/WMA bearish")
+
+        weekly=rsi_wma_signal_asof(
+            df,
+            df.index[-1],
+            50,
+            "Weekly"
+        )
+        if weekly and weekly["Pass"]:
+            bullish+=15
+            reasons.append("Weekly RSI/WMA confirmed")
+        else:
+            bearish+=5
+
+    elif name=="Top 20 Momentum":
+        if c>float(sma50.iloc[-1]):
+            bullish+=10
+            reasons.append("Momentum above SMA50")
+        else:
+            bearish+=10
+            warnings.append("Momentum below SMA50")
+
+    bullish=max(0,min(100,bullish))
+    bearish=max(0,min(100,bearish))
+    net=bullish-bearish
+
+    if net>=45 and bullish>=60:
+        signal="🟢 STRONG BUY"
+    elif net>=20 and bullish>=45:
+        signal="🟢 BUY"
+    elif net<=-45 and bearish>=50:
+        signal="🔴 STRONG SELL"
+    elif net<=-20 and bearish>=35:
+        signal="🔴 SELL"
+    else:
+        signal="🟡 WATCH / HOLD"
+
+    strength=max(0,min(100,int(50+net)))
+
+    trade=None
+    if signal in ["🟢 BUY","🟢 STRONG BUY"]:
+        try:
+            trade=calculate_trade_plan(df)
+        except Exception:
+            trade=None
+
+    return {
+        "Signal":signal,
+        "Signal Strength":strength,
+        "Bullish Score":bullish,
+        "Bearish Score":bearish,
+        "Net Score":net,
+        "RSI9":round(r,2) if not pd.isna(r) else np.nan,
+        "WMA21":round(w,2) if not pd.isna(w) else np.nan,
+        "Reasons":reasons,
+        "Warnings":warnings,
+        "Trade Plan":trade
+    }
+
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 
@@ -3807,6 +4077,7 @@ module = st.sidebar.radio(
         "🚀 Smart Breakout Scanner",
         "📈 120-Day High Breakout Scanner",
         "⚡ Hourly Donchian Breakout Scanner",
+        "🎯 Buy / Sell Signal Engine",
         "📡 RSI/WMA Timeframe Scanner",
         "📅 Weekly Trend Scanner",
         "📈 Daily Trend 50/150/200 Scanner",
@@ -5409,6 +5680,261 @@ elif module == "⚡ Hourly Donchian Breakout Scanner":
 
                 st.dataframe(
                     result_df,
+                    width="stretch",
+                    hide_index=True
+                )
+
+
+
+# ============================================================
+# BUY / SELL SIGNAL ENGINE MODULE
+# ============================================================
+
+elif module == "🎯 Buy / Sell Signal Engine":
+
+    st.header(
+        "🎯 Scanner Behaviour → BUY / SELL Signal Engine"
+    )
+
+    st.caption(
+        "Select a scanner and universe. The engine evaluates "
+        "the selected scanner's behaviour and produces a "
+        "BUY / SELL / WATCH signal."
+    )
+
+    scanner_name=st.sidebar.selectbox(
+        "Scanner Behaviour",
+        [
+            "Smart Breakout",
+            "120-Day High Breakout",
+            "Hourly Donchian Breakout",
+            "Daily RSI(9)/WMA(21)",
+            "Weekly Trend",
+            "Daily Trend",
+            "Multi-Timeframe",
+            "Top 20 Momentum"
+        ],
+        key="signal_engine_scanner"
+    )
+
+    st.sidebar.subheader("Signal Engine Universe")
+
+    st.caption("Loading stock universes...")
+
+    nse_stocks=load_nse_equity_universe()
+    nifty500=load_nifty500()
+    fno_stocks=load_fno_stocks()
+    nifty_midcap100=load_nifty_midcap100()
+    nifty_smallcap250=load_nifty_smallcap250()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="signal_engine_universe"
+    )
+
+    stocks=resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    max_stocks=st.sidebar.slider(
+        "Maximum Stocks",
+        10,
+        min(500,max(10,len(stocks))),
+        min(100,max(10,len(stocks))),
+        10,
+        key="signal_engine_max_stocks"
+    )
+
+    run_signal=st.sidebar.button(
+        "🎯 GENERATE BUY / SELL SIGNALS",
+        type="primary",
+        key="signal_engine_run"
+    )
+
+    if not stocks:
+        st.error(
+            f"No stocks available for {universe}."
+        )
+        st.stop()
+
+    if run_signal:
+
+        selected=stocks[:max_stocks]
+
+        with st.spinner(
+            "Downloading daily market data..."
+        ):
+
+            daily_market=download_batches(
+                selected,
+                "1y",
+                50
+            )
+
+        hourly_market={}
+
+        if scanner_name=="Hourly Donchian Breakout":
+
+            with st.spinner(
+                "Downloading recent hourly data..."
+            ):
+
+                hourly_market=download_rsi_wma_batches(
+                    selected,
+                    "Hourly",
+                    50
+                )
+
+        rows=[]
+
+        for symbol in selected:
+
+            daily_data=daily_market.get(symbol)
+
+            if daily_data is None or daily_data.empty:
+                continue
+
+            result=generate_scanner_signal(
+                daily_data,
+                scanner_name,
+                hourly_market.get(symbol)
+            )
+
+            if result is None:
+                continue
+
+            trade=result["Trade Plan"]
+
+            rows.append(
+                {
+                    "Stock":symbol,
+                    "Signal":result["Signal"],
+                    "Strength":result["Signal Strength"],
+                    "Bullish":result["Bullish Score"],
+                    "Bearish":result["Bearish Score"],
+                    "Net":result["Net Score"],
+                    "Close":round(
+                        float(daily_data["Close"].iloc[-1]),
+                        2
+                    ),
+                    "RSI(9)":result["RSI9"],
+                    "RSI WMA21":result["WMA21"],
+                    "Entry":(
+                        round(trade["Entry"],2)
+                        if trade else np.nan
+                    ),
+                    "Stop Loss":(
+                        round(trade["Stop Loss"],2)
+                        if trade else np.nan
+                    ),
+                    "Target 1":(
+                        round(trade["Target 1"],2)
+                        if trade else np.nan
+                    ),
+                    "Target 2":(
+                        round(trade["Target 2"],2)
+                        if trade else np.nan
+                    ),
+                    "R:R":"1:2 / 1:3" if trade else "—"
+                }
+            )
+
+        result_df=pd.DataFrame(rows)
+
+        if result_df.empty:
+
+            st.warning(
+                "No usable market data was returned."
+            )
+
+        else:
+
+            counts=result_df["Signal"].value_counts()
+
+            a,b,c,d,e=st.columns(5)
+
+            a.metric(
+                "🟢 Strong Buy",
+                int(counts.get("🟢 STRONG BUY",0))
+            )
+
+            b.metric(
+                "🟢 Buy",
+                int(counts.get("🟢 BUY",0))
+            )
+
+            c.metric(
+                "🟡 Watch",
+                int(counts.get("🟡 WATCH / HOLD",0))
+            )
+
+            d.metric(
+                "🔴 Sell",
+                int(counts.get("🔴 SELL",0))
+            )
+
+            e.metric(
+                "🔴 Strong Sell",
+                int(counts.get("🔴 STRONG SELL",0))
+            )
+
+            actionable=result_df[
+                result_df["Signal"].isin(
+                    [
+                        "🟢 STRONG BUY",
+                        "🟢 BUY",
+                        "🔴 SELL",
+                        "🔴 STRONG SELL"
+                    ]
+                )
+            ].sort_values(
+                "Strength",
+                ascending=False
+            )
+
+            st.subheader(
+                "🎯 Current BUY / SELL Signals"
+            )
+
+            if actionable.empty:
+                st.info(
+                    "No actionable BUY/SELL signal currently."
+                )
+            else:
+                st.dataframe(
+                    actionable,
+                    width="stretch",
+                    hide_index=True
+                )
+
+            st.download_button(
+                "⬇️ Download All Signals",
+                result_df.to_csv(index=False),
+                "Buy_Sell_Signal_Engine.csv",
+                "text/csv"
+            )
+
+            with st.expander(
+                "📋 All Stocks"
+            ):
+                st.dataframe(
+                    result_df.sort_values(
+                        "Strength",
+                        ascending=False
+                    ),
                     width="stretch",
                     hide_index=True
                 )
