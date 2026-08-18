@@ -675,8 +675,20 @@ def _load_nse_index_with_multiple_sources(
     show_spinner=False
 )
 def load_nifty500():
+    """
+    Load Nifty 500 with multiple fallbacks.
 
-    urls=[
+    Priority:
+      1. Official NSE/Nifty Indices CSV
+      2. GitHub-hosted symbol snapshot
+      3. NSE API
+
+    The GitHub snapshot is used only as a connectivity fallback
+    because Streamlit Cloud can intermittently receive a blocked
+    response from NSE's CSV endpoint.
+    """
+
+    official_urls=[
         "https://nsearchives.nseindia.com/"
         "content/indices/ind_nifty500list.csv",
 
@@ -687,11 +699,96 @@ def load_nifty500():
         "IndexConstituent/ind_nifty500list.csv"
     ]
 
-    return _load_nse_index_with_multiple_sources(
+    # Stable fallback snapshot containing Nifty 500 symbols.
+    # It is intentionally capped to 500 symbols after parsing.
+    fallback_urls=[
+        "https://raw.githubusercontent.com/"
+        "ganeshbiyer/Nse_Historical_Data/main/"
+        "nifty500_symbols.csv"
+    ]
+
+    symbols=_load_nse_index_with_multiple_sources(
         "NIFTY 500",
-        urls,
+        official_urls,
         400
     )
+
+    if symbols:
+        return sorted(set(symbols))[:500]
+
+    # --------------------------------------------------------
+    # GitHub fallback
+    # --------------------------------------------------------
+    headers={
+        "User-Agent":(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept":"text/csv,text/plain,*/*"
+    }
+
+    for url in fallback_urls:
+        try:
+
+            response=requests.get(
+                url,
+                headers=headers,
+                timeout=30
+            )
+
+            if response.status_code!=200:
+                continue
+
+            df=pd.read_csv(
+                StringIO(response.text)
+            )
+
+            df.columns=[
+                str(c).strip().upper()
+                for c in df.columns
+            ]
+
+            if "SYMBOL" not in df.columns:
+                continue
+
+            symbols=(
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+
+            symbols=symbols[
+                ~symbols.isin([
+                    "","NAN","NONE","NULL"
+                ])
+            ]
+
+            symbols=sorted(
+                symbols.drop_duplicates().tolist()
+            )
+
+            # This fallback currently contains 501 rows in the
+            # source file; the app must expose exactly 500.
+            if len(symbols)>=500:
+                return symbols[:500]
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # Final NSE API fallback
+    # --------------------------------------------------------
+    symbols=_load_nse_index_from_api(
+        "NIFTY 500",
+        400
+    )
+
+    if symbols:
+        return sorted(set(symbols))[:500]
+
+    return []
 
 
 # ============================================================
@@ -9123,7 +9220,10 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
     if stock_count<=0:
         st.error(
             f"No stocks could be loaded for **{universe}**. "
-            "Please try another universe or reload the app."
+            "The universe loader could not reach any configured "
+            "constituent source. Please reload the app; if the "
+            "problem persists, check the universe loader status "
+            "shown below."
         )
 
     scan_tab, backtest_tab = st.tabs(
