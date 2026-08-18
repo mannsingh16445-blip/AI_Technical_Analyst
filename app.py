@@ -5476,6 +5476,90 @@ def cci_ema_rsi_exit_condition(row):
 
 
 
+
+def add_cci_ema_rsi_legacy_conditions(
+    df,
+    ema200_near_pct=3.0,
+    rsi_wma_50_tolerance=2.0
+):
+    """
+    Previous-style baseline used only for comparison.
+
+    Entry:
+      - EMA9 and EMA21 are near EMA200 (absolute distance)
+      - Close > EMA200
+      - CCI20 > 100
+      - RSI9 between 60 and 70
+      - RSI9 > WMA21
+
+    Exit:
+      - EMA9 and EMA21 both slope down
+      OR
+      - WMA21 > RSI9 and both RSI9/WMA21 are around 50.
+
+    This function is isolated from the new strategy.
+    """
+
+    out=df.copy()
+
+    out["EMA9_PREV"]=out["EMA9"].shift(1)
+    out["EMA21_PREV"]=out["EMA21"].shift(1)
+    out["EMA200_PREV"]=out["EMA200"].shift(1)
+
+    ema9_distance=(
+        (out["EMA9"]-out["EMA200"])
+        /out["EMA200"].abs()*100.0
+    )
+
+    ema21_distance=(
+        (out["EMA21"]-out["EMA200"])
+        /out["EMA200"].abs()*100.0
+    )
+
+    out["LEGACY_ENTRY_SIGNAL"]=(
+        (ema9_distance.abs()<=ema200_near_pct)
+        &
+        (ema21_distance.abs()<=ema200_near_pct)
+        &
+        (out["Close"]>out["EMA200"])
+        &
+        (out["CCI20"]>100.0)
+        &
+        (out["RSI9"]>60.0)
+        &
+        (out["RSI9"]<70.0)
+        &
+        (out["RSI9"]>out["RSI9_WMA21"])
+    )
+
+    ema9_down=(
+        out["EMA9"]<out["EMA9_PREV"]
+    )
+
+    ema21_down=(
+        out["EMA21"]<out["EMA21_PREV"]
+    )
+
+    around_50=(
+        (out["RSI9"]-50.0).abs()
+        <=rsi_wma_50_tolerance
+    ) & (
+        (out["RSI9_WMA21"]-50.0).abs()
+        <=rsi_wma_50_tolerance
+    )
+
+    out["LEGACY_EXIT_SIGNAL"]=(
+        (ema9_down & ema21_down)
+        |
+        (
+            (out["RSI9_WMA21"]>out["RSI9"])
+            & around_50
+        )
+    )
+
+    return out
+
+
 def add_cci_ema_rsi_conditions(
     df,
     ema200_near_pct=2.0,
@@ -5552,7 +5636,8 @@ def backtest_cci_ema_rsi_strategy(
     target2_booking_pct=25.0,
     improved_exit_enabled=False,
     improved_exit_activation_pct=5.0,
-    ema200_breakdown_exit_enabled=False
+    ema200_breakdown_exit_enabled=False,
+    strategy_mode="new"
 ):
     """
     Strategy-specific backtest.
@@ -5581,11 +5666,29 @@ def backtest_cci_ema_rsi_strategy(
     if df.empty:
         return {"Trades":[],"Data":df}
 
-    df=add_cci_ema_rsi_conditions(
-        df,
-        ema200_near_pct,
-        rsi_wma_50_tolerance
-    )
+    if strategy_mode=="legacy":
+        df=add_cci_ema_rsi_legacy_conditions(
+            df,
+            ema200_near_pct,
+            (
+                rsi_wma_50_tolerance
+                if rsi_wma_50_tolerance is not None
+                else 2.0
+            )
+        )
+
+        entry_signal_column="LEGACY_ENTRY_SIGNAL"
+        exit_signal_column="LEGACY_EXIT_SIGNAL"
+
+    else:
+        df=add_cci_ema_rsi_conditions(
+            df,
+            ema200_near_pct,
+            rsi_wma_50_tolerance
+        )
+
+        entry_signal_column="ENTRY_SIGNAL"
+        exit_signal_column="EXIT_SIGNAL"
 
     df["EMA9_PREV"]=df["EMA9"].shift(1)
     df["EMA21_PREV"]=df["EMA21"].shift(1)
@@ -5620,7 +5723,7 @@ def backtest_cci_ema_rsi_strategy(
 
         if not in_position:
 
-            if bool(row["ENTRY_SIGNAL"]):
+            if bool(row[entry_signal_column]):
 
                 entry_pos=i+1
 
@@ -5921,7 +6024,7 @@ def backtest_cci_ema_rsi_strategy(
             # ------------------------------------------------
             # 6. ORIGINAL TECHNICAL EXIT
             # ------------------------------------------------
-            original_exit=bool(row["EXIT_SIGNAL"])
+            original_exit=bool(row[exit_signal_column])
 
             if (
                 original_exit
@@ -6089,6 +6192,118 @@ def backtest_cci_ema_rsi_strategy(
         "Data":df
     }
 
+
+
+
+def compare_cci_ema_rsi_strategies(
+    market,
+    new_ema_range_pct=2.0,
+    legacy_ema_range_pct=3.0,
+    legacy_rsi_50_tolerance=2.0,
+    max_holding_days=120,
+    max_loss_pct=20.0
+):
+    """
+    Run the previous-style and new strategy over the exact same
+    market data and risk settings, with trailing/profit booking/
+    optional additional exits disabled.
+
+    This isolates the effect of the new entry/exit rules.
+    """
+
+    rows=[]
+    new_trades=[]
+    legacy_trades=[]
+
+    for symbol,data in market.items():
+
+        if data is None or data.empty:
+            continue
+
+        new_bt=backtest_cci_ema_rsi_strategy(
+            data,
+            new_ema_range_pct,
+            None,
+            max_holding_days,
+            max_loss_pct,
+            False,
+            10.0,
+            10.0,
+            False,
+            15.0,
+            25.0,
+            25.0,
+            25.0,
+            False,
+            5.0,
+            False,
+            "new"
+        )
+
+        old_bt=backtest_cci_ema_rsi_strategy(
+            data,
+            legacy_ema_range_pct,
+            legacy_rsi_50_tolerance,
+            max_holding_days,
+            max_loss_pct,
+            False,
+            10.0,
+            10.0,
+            False,
+            15.0,
+            25.0,
+            25.0,
+            25.0,
+            False,
+            5.0,
+            False,
+            "legacy"
+        )
+
+        nt=new_bt["Trades"]
+        ot=old_bt["Trades"]
+
+        new_trades.extend(
+            [
+                dict(t,Stock=symbol)
+                for t in nt
+            ]
+        )
+
+        legacy_trades.extend(
+            [
+                dict(t,Stock=symbol)
+                for t in ot
+            ]
+        )
+
+        ns=summarize_cci_ema_rsi_backtest(nt)
+        os=summarize_cci_ema_rsi_backtest(ot)
+
+        rows.append({
+            "Stock":symbol,
+            "New Trades":ns["Trades"],
+            "Previous Trades":os["Trades"],
+            "New Return %":ns["Net Return %"],
+            "Previous Return %":os["Net Return %"],
+            "New Max DD %":ns["Max Drawdown %"],
+            "Previous Max DD %":os["Max Drawdown %"],
+            "New Win Rate %":ns["Win Rate %"],
+            "Previous Win Rate %":os["Win Rate %"],
+            "New Profit Factor":ns["Profit Factor"],
+            "Previous Profit Factor":os["Profit Factor"]
+        })
+
+    new_summary=summarize_cci_ema_rsi_backtest(new_trades)
+    old_summary=summarize_cci_ema_rsi_backtest(legacy_trades)
+
+    return {
+        "New Summary":new_summary,
+        "Previous Summary":old_summary,
+        "Stock Comparison":pd.DataFrame(rows),
+        "New Trades":new_trades,
+        "Previous Trades":legacy_trades
+    }
 
 
 def summarize_cci_ema_rsi_backtest(trades):
@@ -8570,6 +8785,37 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
             "shown below."
         )
 
+
+        st.sidebar.markdown("### 🔬 Strategy Comparison")
+
+        previous_baseline_enabled=st.sidebar.checkbox(
+            "Enable Previous vs New comparison",
+            value=True,
+            help=(
+                "Runs both strategies on the same stocks and "
+                "period with trailing/profit booking disabled, "
+                "so the entry/exit rule change can be isolated."
+            ),
+            key="cci_ema_rsi_compare_enabled"
+        )
+
+        previous_ema_range=st.sidebar.slider(
+            "Previous strategy EMA range (%)",
+            1.0,5.0,3.0,0.5,
+            help=(
+                "Previous-style baseline uses absolute distance "
+                "from EMA200, allowing EMA9/EMA21 either above "
+                "or below EMA200."
+            ),
+            key="cci_ema_rsi_previous_ema_range"
+        )
+
+        previous_rsi50_tolerance=st.sidebar.slider(
+            "Previous exit RSI/WMA tolerance around 50",
+            0.5,5.0,2.0,0.5,
+            key="cci_ema_rsi_previous_rsi50_tolerance"
+        )
+
     scan_tab, backtest_tab = st.tabs(
         [
             "🔎 Live Scanner",
@@ -8762,6 +9008,151 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
             index=1,
             key="cci_ema_rsi_bt_period"
         )
+
+        if previous_baseline_enabled:
+
+            run_compare=st.button(
+                "🔬 COMPARE PREVIOUS vs NEW STRATEGY",
+                key="cci_ema_rsi_compare_button"
+            )
+
+            if run_compare:
+
+                selected=stocks[:max_stocks]
+
+                with st.spinner(
+                    "Running Previous vs New comparison..."
+                ):
+
+                    market=download_batches(
+                        selected,
+                        years,
+                        50
+                    )
+
+                comparison=compare_cci_ema_rsi_strategies(
+                    market,
+                    new_ema_range_pct=ema200_near_pct,
+                    legacy_ema_range_pct=previous_ema_range,
+                    legacy_rsi_50_tolerance=previous_rsi50_tolerance,
+                    max_holding_days=max_holding_days,
+                    max_loss_pct=max_loss_pct
+                )
+
+                new_s=comparison["New Summary"]
+                old_s=comparison["Previous Summary"]
+
+                st.subheader(
+                    "🔬 Previous vs New Strategy"
+                )
+
+                comparison_summary=pd.DataFrame([
+                    {
+                        "Metric":"Trades",
+                        "Previous":old_s["Trades"],
+                        "New":new_s["Trades"],
+                        "Change":new_s["Trades"]-old_s["Trades"]
+                    },
+                    {
+                        "Metric":"Net Return %",
+                        "Previous":old_s["Net Return %"],
+                        "New":new_s["Net Return %"],
+                        "Change":round(
+                            new_s["Net Return %"]-
+                            old_s["Net Return %"],2
+                        )
+                    },
+                    {
+                        "Metric":"Max Drawdown %",
+                        "Previous":old_s["Max Drawdown %"],
+                        "New":new_s["Max Drawdown %"],
+                        "Change":round(
+                            new_s["Max Drawdown %"]-
+                            old_s["Max Drawdown %"],2
+                        )
+                    },
+                    {
+                        "Metric":"Win Rate %",
+                        "Previous":old_s["Win Rate %"],
+                        "New":new_s["Win Rate %"],
+                        "Change":round(
+                            new_s["Win Rate %"]-
+                            old_s["Win Rate %"],2
+                        )
+                    },
+                    {
+                        "Metric":"Profit Factor",
+                        "Previous":old_s["Profit Factor"],
+                        "New":new_s["Profit Factor"],
+                        "Change":(
+                            round(
+                                new_s["Profit Factor"]-
+                                old_s["Profit Factor"],2
+                            )
+                            if (
+                                np.isfinite(
+                                    new_s["Profit Factor"]
+                                )
+                                and
+                                np.isfinite(
+                                    old_s["Profit Factor"]
+                                )
+                            )
+                            else np.nan
+                        )
+                    },
+                    {
+                        "Metric":"Average Trade %",
+                        "Previous":old_s["Average Trade %"],
+                        "New":new_s["Average Trade %"],
+                        "Change":round(
+                            new_s["Average Trade %"]-
+                            old_s["Average Trade %"],2
+                        )
+                    }
+                ])
+
+                st.dataframe(
+                    comparison_summary,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.info(
+                    "Comparison uses identical stock universe, "
+                    "historical period, maximum holding period and "
+                    "20% maximum-loss setting. Trailing, partial "
+                    "profit booking and additional exits are OFF. "
+                    "This isolates the effect of the strategy rules."
+                )
+
+                stock_compare=comparison[
+                    "Stock Comparison"
+                ]
+
+                if not stock_compare.empty:
+
+                    st.subheader(
+                        "📊 Stock-by-Stock Comparison"
+                    )
+
+                    st.dataframe(
+                        stock_compare.sort_values(
+                            "New Return %",
+                            ascending=False
+                        ),
+                        width="stretch",
+                        hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Strategy Comparison",
+                        stock_compare.to_csv(
+                            index=False
+                        ),
+                        "CCI_EMA_RSI_Previous_vs_New.csv",
+                        "text/csv"
+                    )
 
         run_bt=st.button(
             "📊 RUN CCI/EMA/RSI BACKTEST",
