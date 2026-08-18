@@ -8867,7 +8867,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
                 prepared=add_cci_ema_rsi_conditions(
                     prepared,
                     ema200_near_pct,
-                    rsi_50_tolerance
+                    None
                 )
 
                 last=prepared.iloc[-1]
