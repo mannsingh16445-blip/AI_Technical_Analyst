@@ -803,31 +803,205 @@ def load_nifty_index_constituents(
     index_key,
     minimum_count=1
 ):
+    """
+    Robust index constituent loader.
+
+    Source order:
+      1. NSE official archive
+      2. Nifty Indices CSV
+      3. PKScreener GitHub cache
+      4. NSE API
+
+    The GitHub cache is a dedicated fallback for Streamlit Cloud
+    because NSE can reject automated requests intermittently.
+    """
+
     url_map={
         "NIFTY_MIDCAP_100":[
             "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftymidcap100list.csv",
+
             "https://archives.nseindia.com/"
             "content/indices/ind_niftymidcap100list.csv",
+
             "https://www.niftyindices.com/"
             "IndexConstituent/ind_niftymidcap100list.csv"
         ],
+
         "NIFTY_SMALLCAP_250":[
             "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftysmallcap250list.csv",
+
             "https://archives.nseindia.com/"
             "content/indices/ind_niftysmallcap250list.csv",
+
             "https://www.niftyindices.com/"
             "IndexConstituent/ind_niftysmallcap250list.csv"
         ]
     }
 
-    return _load_nse_index_with_multiple_sources(
-        index_key.replace("_"," "),
-        url_map.get(index_key,[]),
+    repo_map={
+        "NIFTY_MIDCAP_100":
+            "https://raw.githubusercontent.com/"
+            "pkjmesra/PKScreener/actions-data-download/"
+            "results/Indices/ind_niftymidcap100list.csv",
+
+        "NIFTY_SMALLCAP_250":
+            "https://raw.githubusercontent.com/"
+            "pkjmesra/PKScreener/actions-data-download/"
+            "results/Indices/ind_niftysmallcap250list.csv"
+    }
+
+    headers={
+        "User-Agent":(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept":"text/csv,text/plain,application/json,*/*",
+        "Accept-Language":"en-US,en;q=0.9",
+        "Referer":"https://www.nseindia.com/"
+    }
+
+    def parse_symbols(response_text):
+
+        # First try normal CSV parsing with a SYMBOL column.
+        try:
+
+            df=pd.read_csv(
+                StringIO(response_text)
+            )
+
+            df.columns=[
+                str(c).strip().upper()
+                for c in df.columns
+            ]
+
+            if "SYMBOL" in df.columns:
+
+                symbols=(
+                    df["SYMBOL"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                symbols=symbols[
+                    ~symbols.isin([
+                        "","NAN","NONE","NULL"
+                    ])
+                ]
+
+                return sorted(
+                    symbols.drop_duplicates().tolist()
+                )
+
+        except Exception:
+            pass
+
+        # Fallback for NSE CSV layouts where SYMBOL is the
+        # third column, matching the PKNSETools implementation.
+        try:
+
+            reader=csv.reader(
+                response_text.strip().splitlines()
+            )
+
+            next(reader)
+
+            symbols=[]
+
+            for row in reader:
+
+                if len(row)<3:
+                    continue
+
+                symbol=str(row[2]).strip().upper()
+
+                if symbol in {
+                    "","NAN","NONE","NULL"
+                }:
+                    continue
+
+                symbols.append(symbol)
+
+            return sorted(set(symbols))
+
+        except Exception:
+            return []
+
+    # --------------------------------------------------------
+    # 1 + 2. Official sources
+    # --------------------------------------------------------
+    for url in url_map.get(index_key,[]):
+
+        try:
+
+            response=requests.get(
+                url,
+                headers=headers,
+                timeout=30
+            )
+
+            if response.status_code!=200:
+                continue
+
+            symbols=parse_symbols(response.text)
+
+            if len(symbols)>=minimum_count:
+                return symbols
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # 3. PKScreener GitHub cache
+    #
+    # This is the important new fallback.
+    # PKNSETools documents the same REPO_INDEX_MAP approach
+    # for reliable constituent retrieval.
+    # --------------------------------------------------------
+    repo_url=repo_map.get(index_key)
+
+    if repo_url:
+
+        try:
+
+            response=requests.get(
+                repo_url,
+                headers={
+                    "User-Agent":"Mozilla/5.0",
+                    "Accept":"text/csv,text/plain,*/*"
+                },
+                timeout=30
+            )
+
+            if response.status_code==200:
+
+                symbols=parse_symbols(
+                    response.text
+                )
+
+                if len(symbols)>=minimum_count:
+                    return symbols
+
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # 4. NSE API
+    # --------------------------------------------------------
+    api_name=index_key.replace("_"," ")
+
+    symbols=_load_nse_index_from_api(
+        api_name,
         minimum_count
     )
 
+    if symbols:
+        return symbols
+
+    return []
 
 
 def load_nifty_midcap100():
@@ -843,26 +1017,6 @@ def load_nifty_smallcap250():
         200
     )
 
-
-
-def load_nifty_midcap100():
-    """
-    Current Nifty Midcap 100 constituents.
-    """
-    return load_nifty_index_constituents(
-        "NIFTY_MIDCAP_100",
-        80
-    )
-
-
-def load_nifty_smallcap250():
-    """
-    Current Nifty Smallcap 250 constituents.
-    """
-    return load_nifty_index_constituents(
-        "NIFTY_SMALLCAP_250",
-        200
-    )
 
 
 def resolve_stock_universe(
