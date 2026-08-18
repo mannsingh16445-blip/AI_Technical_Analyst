@@ -5383,100 +5383,109 @@ def prepare_cci_ema_rsi_strategy(data):
 
 def cci_ema_rsi_entry_condition(
     row,
-    ema200_near_pct=3.0
+    ema200_near_pct=2.0
 ):
     """
-    Exact user-specified entry logic:
+    NEW ENTRY RULES — ALL 5 CONDITIONS MUST PASS
 
-    1. CCI > 100
-    2. EMA9 and EMA21 are near EMA200
-    3. RSI9 > 60 and < 70
-    4. RSI9 > WMA21
+    1. EMA9 and EMA21 must both be ABOVE EMA200.
+       Neither EMA is allowed below EMA200.
+       Both must also be within the configured upper
+       distance from EMA200. Default = 2%.
 
-    'Near' is explicitly configurable. Default = within 3%
-    of EMA200 for BOTH EMA9 and EMA21.
+    2. Closing price > EMA200.
+
+    3. Daily CCI(20) > 100.
+
+    4. RSI(9) > 60 and RSI(9) < 70.
+
+    5. RSI(9) > WMA(21) of RSI(9).
     """
 
     ema200=float(row["EMA200"])
 
-    if ema200==0:
+    if ema200<=0:
         return False
 
-    ema9_near=(
-        abs(
-            float(row["EMA9"])-ema200
-        )/abs(ema200)*100
-        <=ema200_near_pct
+    ema9=float(row["EMA9"])
+    ema21=float(row["EMA21"])
+    close=float(row["Close"])
+
+    ema9_distance=(
+        (ema9-ema200)/ema200*100.0
     )
 
-    ema21_near=(
-        abs(
-            float(row["EMA21"])-ema200
-        )/abs(ema200)*100
-        <=ema200_near_pct
+    ema21_distance=(
+        (ema21-ema200)/ema200*100.0
+    )
+
+    ema_position_ok=(
+        ema9>ema200
+        and
+        ema21>ema200
+        and
+        0.0<=ema9_distance<=ema200_near_pct
+        and
+        0.0<=ema21_distance<=ema200_near_pct
     )
 
     return bool(
-        float(row["CCI20"])>100
-        and ema9_near
-        and ema21_near
-        and float(row["RSI9"])>60
-        and float(row["RSI9"])<70
+        ema_position_ok
+        and close>ema200
+        and float(row["CCI20"])>100.0
+        and float(row["RSI9"])>60.0
+        and float(row["RSI9"])<70.0
         and float(row["RSI9"])>float(row["RSI9_WMA21"])
     )
 
 
-def cci_ema_rsi_exit_condition(
-    row,
-    rsi_wma_50_tolerance=2.0
-):
+def cci_ema_rsi_exit_condition(row):
     """
-    Exact user-specified exit logic:
+    NEW EXIT RULES — AT LEAST 2 OF 3 CONDITIONS MUST PASS
 
-    1. EMA9 and EMA21 both slope downward.
-    2. WMA21 > RSI9 and both are trading around 50.
+    X1. EMA9 crosses EMA200 from above in a downward direction.
+        Previous EMA9 >= previous EMA200 AND
+        current EMA9 < current EMA200.
 
-    'Around 50' is configurable. Default = 48 to 52 for BOTH.
+    X2. WMA(21) of RSI(9) > RSI(9).
+
+    X3. CCI(20) < 100.
+
+    EXIT when the number of satisfied conditions >= 2.
     """
 
-    ema9_down=(
-        float(row["EMA9"])
-        <
-        float(row["EMA9_PREV"])
-    )
-
-    ema21_down=(
-        float(row["EMA21"])
-        <
-        float(row["EMA21_PREV"])
-    )
-
-    rsi=float(row["RSI9"])
-    wma=float(row["RSI9_WMA21"])
-
-    both_near_50=(
-        abs(rsi-50)<=rsi_wma_50_tolerance
+    x1=(
+        float(row["EMA9"])<float(row["EMA200"])
         and
-        abs(wma-50)<=rsi_wma_50_tolerance
+        float(row["EMA9_PREV"])>=float(row["EMA200_PREV"])
     )
 
-    return bool(
-        ema9_down
-        and ema21_down
-        and wma>rsi
-        and both_near_50
+    x2=(
+        float(row["RSI9_WMA21"])
+        >
+        float(row["RSI9"])
     )
+
+    x3=(
+        float(row["CCI20"])<100.0
+    )
+
+    exit_count=int(x1)+int(x2)+int(x3)
+
+    return bool(exit_count>=2)
+
 
 
 def add_cci_ema_rsi_conditions(
     df,
-    ema200_near_pct=3.0,
-    rsi_wma_50_tolerance=2.0
+    ema200_near_pct=2.0,
+    rsi_wma_50_tolerance=None
 ):
     out=df.copy()
 
     out["EMA9_PREV"]=out["EMA9"].shift(1)
     out["EMA21_PREV"]=out["EMA21"].shift(1)
+    out["EMA200_PREV"]=out["EMA200"].shift(1)
 
     out["ENTRY_SIGNAL"]=out.apply(
         lambda r:cci_ema_rsi_entry_condition(
@@ -5486,39 +5495,57 @@ def add_cci_ema_rsi_conditions(
         axis=1
     )
 
-    out["EXIT_SIGNAL"]=out.apply(
-        lambda r:cci_ema_rsi_exit_condition(
-            r,
-            rsi_wma_50_tolerance
-        ),
-        axis=1
+    # Individual exit conditions are exposed for transparency.
+    out["EXIT_X1_EMA9_CROSS_200"]=(
+        (out["EMA9"]<out["EMA200"])
+        &
+        (out["EMA9_PREV"]>=out["EMA200_PREV"])
+    )
+
+    out["EXIT_X2_WMA_ABOVE_RSI"]=(
+        out["RSI9_WMA21"]>out["RSI9"]
+    )
+
+    out["EXIT_X3_CCI_BELOW_100"]=(
+        out["CCI20"]<100.0
+    )
+
+    out["EXIT_CONDITION_COUNT"]=(
+        out["EXIT_X1_EMA9_CROSS_200"].astype(int)
+        +
+        out["EXIT_X2_WMA_ABOVE_RSI"].astype(int)
+        +
+        out["EXIT_X3_CCI_BELOW_100"].astype(int)
+    )
+
+    out["EXIT_SIGNAL"]=(
+        out["EXIT_CONDITION_COUNT"]>=2
     )
 
     out["EMA9_DISTANCE_EMA200_%"]=(
-        abs(
-            out["EMA9"]-out["EMA200"]
-        )/out["EMA200"].abs()*100
+        (out["EMA9"]-out["EMA200"])
+        /out["EMA200"].abs()*100
     )
 
     out["EMA21_DISTANCE_EMA200_%"]=(
-        abs(
-            out["EMA21"]-out["EMA200"]
-        )/out["EMA200"].abs()*100
+        (out["EMA21"]-out["EMA200"])
+        /out["EMA200"].abs()*100
     )
 
     return out
 
 
+
 def backtest_cci_ema_rsi_strategy(
     data,
-    ema200_near_pct=3.0,
-    rsi_wma_50_tolerance=2.0,
+    ema200_near_pct=2.0,
+    rsi_wma_50_tolerance=None,
     max_holding_days=120,
     max_loss_pct=20.0,
-    trailing_enabled=True,
+    trailing_enabled=False,
     trail_activation_pct=10.0,
     trailing_stop_pct=10.0,
-    profit_booking_enabled=True,
+    profit_booking_enabled=False,
     target1_pct=15.0,
     target1_booking_pct=25.0,
     target2_pct=25.0,
@@ -5897,9 +5924,9 @@ def backtest_cci_ema_rsi_strategy(
             original_exit=bool(row["EXIT_SIGNAL"])
 
             if (
-                ema200_breakdown_exit
+                original_exit
+                or ema200_breakdown_exit
                 or improved_exit
-                or original_exit
             ):
 
                 exit_pos=i+1
@@ -5929,7 +5956,7 @@ def backtest_cci_ema_rsi_strategy(
                     )
                 else:
                     exit_reason=(
-                        "Original Strategy Exit"
+                        "CCI+EMA+RSI 2-of-3 Exit"
                     )
 
                 trades.append(
@@ -8268,21 +8295,24 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
 
     st.markdown(
         """
-        ### Entry
-        1. **CCI(20) > 100**
-        2. **EMA(9) and EMA(21) are near EMA(200)**
-        3. **RSI(9) > 60 and < 70**
-        4. **RSI(9) > WMA(21)**
+        ### Entry — ALL 5 conditions required
 
-        ### Exit
-        1. **EMA(9) and EMA(21) are both sloping downward**
-        2. **WMA(21) > RSI(9), with both around 50**
+        1. **EMA(9) and EMA(21) are above EMA(200)** and
+           each is within the configured 1–2% upper range.
+           If either EMA is below EMA(200), there is **NO ENTRY**.
+        2. **Close > EMA(200)**
+        3. **Daily CCI(20) > 100**
+        4. **RSI(9) > 60 and < 70**
+        5. **RSI(9) > WMA(21)**
 
-        ### Optional EMA200 Breakdown Exit
-        - **WMA(21) > RSI(9)**
-        - **EMA9 OR EMA21 crosses below EMA200**
-        - **Close < EMA200**
-        - **EMA9 and EMA21 both slope downward**
+        ### Exit — ANY 2 OF 3 conditions required
+
+        1. **EMA(9) crosses below EMA(200)** from above
+        2. **WMA(21) > RSI(9)**
+        3. **CCI(20) < 100**
+
+        The core exit is triggered only when **at least 2 of the
+        3 exit conditions are true on the same completed daily bar**.
         """
     )
 
@@ -8324,30 +8354,21 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
         key="cci_ema_rsi_timeframe"
     )
 
-    ema200_near_pct=st.sidebar.slider(
-        "EMA9 & EMA21 distance from EMA200 (%)",
-        1.0,
-        10.0,
-        3.0,
-        0.5,
+    ema200_near_pct=st.sidebar.select_slider(
+        "EMA9 & EMA21 range above EMA200 (%)",
+        options=[1.0,2.0],
+        value=2.0,
         help=(
-            "Both EMA9 and EMA21 must be within this "
-            "percentage of EMA200."
+            "Both EMA9 and EMA21 must be above EMA200 and "
+            "no more than the selected percentage above it. "
+            "If either EMA is below EMA200, entry is rejected."
         ),
         key="cci_ema_rsi_near_pct"
     )
 
-    rsi_50_tolerance=st.sidebar.slider(
-        "Exit: RSI/WMA tolerance around 50",
-        0.5,
-        5.0,
-        2.0,
-        0.5,
-        help=(
-            "Default 2 means both RSI9 and WMA21 must "
-            "be between 48 and 52."
-        ),
-        key="cci_ema_rsi_50_tol"
+    st.sidebar.info(
+        "Exit = at least 2 of 3 conditions: "
+        "EMA9 cross below EMA200, WMA21 > RSI9, CCI < 100."
     )
 
     max_holding_days=st.sidebar.slider(
@@ -8381,7 +8402,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
 
     trailing_enabled=st.sidebar.checkbox(
         "Enable trailing profit",
-        value=True,
+        value=False,
         help=(
             "When OFF, the trail activation and trailing "
             "stop are completely disabled. The original "
@@ -8422,7 +8443,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
 
     profit_booking_enabled=st.sidebar.checkbox(
         "Enable partial profit booking",
-        value=True,
+        value=False,
         help=(
             "Book part of the position at Target 1 and "
             "Target 2 while allowing the remaining position "
@@ -8462,7 +8483,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
     st.sidebar.markdown("### 🛡️ Improved Exit")
 
     improved_exit_enabled=st.sidebar.checkbox(
-        "Enable profit-protection exit",
+        "Enable additional profit-protection exit",
         value=False,
         help=(
             "After the trade first reaches the selected profit "
@@ -8480,7 +8501,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
     )
 
     ema200_breakdown_exit_enabled=st.sidebar.checkbox(
-        "Enable EMA200 breakdown exit",
+        "Enable additional EMA200 breakdown exit",
         value=False,
         help=(
             "Exit when WMA21 > RSI9 AND either EMA9 or EMA21 "
@@ -8775,7 +8796,7 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
                 bt=backtest_cci_ema_rsi_strategy(
                     data,
                     ema200_near_pct,
-                    rsi_50_tolerance,
+                    None,
                     max_holding_days,
                     max_loss_pct,
                     trailing_enabled,
