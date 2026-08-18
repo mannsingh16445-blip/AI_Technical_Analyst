@@ -354,72 +354,159 @@ NIFTY50 = [
 )
 def load_nse_equity_universe():
 
-    url = (
+    url=(
         "https://nsearchives.nseindia.com/"
         "content/equities/EQUITY_L.csv"
     )
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
+    headers={
+        "User-Agent":(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
         ),
-        "Accept": "text/csv,*/*",
-        "Referer": "https://www.nseindia.com/"
+        "Accept":"text/csv,*/*",
+        "Referer":"https://www.nseindia.com/"
     }
 
+    # CSV with session/cookies.
     try:
 
-        response = requests.get(
+        session=requests.Session()
+        session.headers.update(headers)
+
+        try:
+            session.get(
+                "https://www.nseindia.com/",
+                timeout=15
+            )
+        except Exception:
+            pass
+
+        response=session.get(
             url,
-            headers=headers,
             timeout=30
         )
 
         response.raise_for_status()
 
-        df = pd.read_csv(
+        df=pd.read_csv(
             StringIO(response.text)
         )
 
-        df.columns = [
+        df.columns=[
             str(c).strip().upper()
             for c in df.columns
         ]
 
-        if "SYMBOL" not in df.columns:
+        if "SYMBOL" in df.columns:
 
-            return []
+            symbols=(
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
 
-        symbols = (
-            df["SYMBOL"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        symbols = symbols[
-            ~symbols.isin(
-                [
+            symbols=symbols[
+                ~symbols.isin([
                     "",
                     "NAN",
-                    "NONE"
-                ]
+                    "NONE",
+                    "NULL"
+                ])
+            ]
+
+            symbols=sorted(
+                symbols.drop_duplicates().tolist()
             )
-        ]
 
-        symbols = sorted(
-            symbols.drop_duplicates().tolist()
-        )
-
-        return symbols
+            if len(symbols)>=500:
+                return symbols
 
     except Exception:
+        pass
 
-        return []
+    # NSE equity-master API fallback.
+    # The endpoint returns the currently active equity universe.
+    for api_url in [
+        "https://www.nseindia.com/api/equity-master",
+        "https://www.nseindia.com/api/equity-stockIndices"
+        "?index=NIFTY%20500"
+    ]:
+
+        try:
+
+            session=requests.Session()
+            session.headers.update({
+                "User-Agent":(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0 Safari/537.36"
+                ),
+                "Accept":"application/json,text/plain,*/*",
+                "Accept-Language":"en-US,en;q=0.9",
+                "Referer":"https://www.nseindia.com/"
+            })
+
+            session.get(
+                "https://www.nseindia.com/",
+                timeout=20
+            )
+
+            response=session.get(
+                api_url,
+                timeout=30
+            )
+
+            if response.status_code!=200:
+                continue
+
+            payload=response.json()
+
+            data=payload.get("data",[])
+
+            symbols=[]
+
+            for item in data:
+
+                if not isinstance(item,dict):
+                    continue
+
+                symbol=(
+                    item.get("symbol")
+                    or item.get("SYMBOL")
+                )
+
+                if symbol is None:
+                    continue
+
+                symbol=str(symbol).strip().upper()
+
+                if symbol in {
+                    "",
+                    "NAN",
+                    "NONE",
+                    "NULL",
+                    "NIFTY",
+                    "NIFTY 50",
+                    "NIFTY 500"
+                }:
+                    continue
+
+                symbols.append(symbol)
+
+            symbols=sorted(set(symbols))
+
+            if len(symbols)>=500:
+                return symbols
+
+        except Exception:
+            continue
+
+    return []
+
+
 
 
 # ============================================================
@@ -432,74 +519,22 @@ def load_nse_equity_universe():
 )
 def load_nifty500():
 
-    urls = [
-
+    urls=[
         "https://nsearchives.nseindia.com/"
+        "content/indices/ind_nifty500list.csv",
+
+        "https://archives.nseindia.com/"
         "content/indices/ind_nifty500list.csv",
 
         "https://www.niftyindices.com/"
         "IndexConstituent/ind_nifty500list.csv"
-
     ]
 
-    headers = {
-        "User-Agent":
-            "Mozilla/5.0"
-    }
-
-    for url in urls:
-
-        try:
-
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=30
-            )
-
-            if response.status_code != 200:
-                continue
-
-            df = pd.read_csv(
-                StringIO(response.text)
-            )
-
-            df.columns = [
-                str(c).strip().upper()
-                for c in df.columns
-            ]
-
-            if "SYMBOL" not in df.columns:
-                continue
-
-            symbols = (
-                df["SYMBOL"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-
-            symbols = symbols[
-                ~symbols.isin(
-                    [
-                        "",
-                        "NAN",
-                        "NONE"
-                    ]
-                )
-            ]
-
-            if len(symbols) >= 400:
-
-                return sorted(
-                    symbols.drop_duplicates().tolist()
-                )
-
-        except Exception:
-
-            continue
-
-    return []
+    return _load_nse_index_with_multiple_sources(
+        "NIFTY 500",
+        urls,
+        400
+    )
 
 
 # ============================================================
@@ -515,21 +550,16 @@ def load_nifty_index_constituents(
     minimum_count=1
 ):
     """
-    Load current constituents from official NSE/Nifty Indices
-    CSV endpoints.
+    Robust current constituent loader.
 
-    Supported:
-      NIFTY_MIDCAP_100  -> 100 constituents
-      NIFTY_SMALLCAP_250 -> 250 constituents
-
-    A small fallback set of official endpoint variants is used
-    because NSE/Nifty Indices occasionally changes archive hosts.
+    CSV/archive endpoints are tried first. If Streamlit Cloud
+    receives an NSE rejection, the NSE equity-stockIndices API
+    is used as a fallback.
     """
 
-    url_map = {
-
-        "NIFTY_MIDCAP_100": [
-            "https://www.nsearchives.nseindia.com/"
+    url_map={
+        "NIFTY_MIDCAP_100":[
+            "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftymidcap100list.csv",
 
             "https://archives.nseindia.com/"
@@ -539,8 +569,8 @@ def load_nifty_index_constituents(
             "IndexConstituent/ind_niftymidcap100list.csv"
         ],
 
-        "NIFTY_SMALLCAP_250": [
-            "https://www.nsearchives.nseindia.com/"
+        "NIFTY_SMALLCAP_250":[
+            "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftysmallcap250list.csv",
 
             "https://archives.nseindia.com/"
@@ -551,80 +581,26 @@ def load_nifty_index_constituents(
         ]
     }
 
-    urls = url_map.get(
-        index_key,
-        []
+    return _load_nse_index_with_multiple_sources(
+        index_key.replace("_"," "),
+        url_map.get(index_key,[]),
+        minimum_count
     )
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/131.0 Safari/537.36"
-        ),
-        "Referer":
-            "https://www.niftyindices.com/",
-        "Accept":
-            "text/csv,text/plain,*/*"
-    }
 
-    for url in urls:
+def load_nifty_midcap100():
+    return load_nifty_index_constituents(
+        "NIFTY_MIDCAP_100",
+        80
+    )
 
-        try:
 
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=30
-            )
+def load_nifty_smallcap250():
+    return load_nifty_index_constituents(
+        "NIFTY_SMALLCAP_250",
+        200
+    )
 
-            if response.status_code != 200:
-                continue
-
-            df = pd.read_csv(
-                StringIO(
-                    response.text
-                )
-            )
-
-            df.columns = [
-                str(c).strip().upper()
-                for c in df.columns
-            ]
-
-            if "SYMBOL" not in df.columns:
-                continue
-
-            symbols = (
-                df["SYMBOL"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-
-            symbols = symbols[
-                ~symbols.isin([
-                    "",
-                    "NAN",
-                    "NONE",
-                    "NULL"
-                ])
-            ]
-
-            symbols = sorted(
-                symbols.drop_duplicates().tolist()
-            )
-
-            if len(symbols) >= minimum_count:
-
-                return symbols
-
-        except Exception:
-            continue
-
-    return []
 
 
 def load_nifty_midcap100():
@@ -669,7 +645,7 @@ def resolve_stock_universe(
         return list(nifty_midcap100)[:100]
 
     if universe == "Nifty Smallcap 250":
-        return list(nifty_smallcap250)[:500]
+        return list(nifty_smallcap250)[:250]
 
     if universe == "NSE F&O Stocks":
         return list(fno_stocks)
