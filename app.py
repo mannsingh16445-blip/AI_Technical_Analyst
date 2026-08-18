@@ -509,6 +509,163 @@ def load_nse_equity_universe():
 
 
 
+
+# ============================================================
+# NSE INDEX LOADING HELPERS
+# ============================================================
+
+def _load_nse_index_from_api(index_name, minimum_count=1):
+    """Load an NSE index constituent list through the NSE API."""
+    try:
+        session=requests.Session()
+        session.headers.update({
+            "User-Agent":(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0 Safari/537.36"
+            ),
+            "Accept":"application/json,text/plain,*/*",
+            "Accept-Language":"en-US,en;q=0.9",
+            "Referer":"https://www.nseindia.com/"
+        })
+
+        try:
+            session.get(
+                "https://www.nseindia.com/",
+                timeout=15
+            )
+        except Exception:
+            pass
+
+        url=(
+            "https://www.nseindia.com/api/equity-stockIndices"
+            "?index="+requests.utils.quote(index_name)
+        )
+
+        response=session.get(
+            url,
+            timeout=30
+        )
+
+        if response.status_code!=200:
+            return []
+
+        payload=response.json()
+        data=payload.get("data",[])
+
+        symbols=[]
+
+        for item in data:
+            if not isinstance(item,dict):
+                continue
+
+            symbol=item.get("symbol") or item.get("SYMBOL")
+
+            if symbol is None:
+                continue
+
+            symbol=str(symbol).strip().upper()
+
+            if symbol in {
+                "","NAN","NONE","NULL",
+                "NIFTY","BANKNIFTY","FINNIFTY",
+                "MIDCPNIFTY","NIFTYNXT50"
+            }:
+                continue
+
+            symbols.append(symbol)
+
+        symbols=sorted(set(symbols))
+
+        return symbols if len(symbols)>=minimum_count else []
+
+    except Exception:
+        return []
+
+
+def _load_nse_index_with_multiple_sources(
+    index_name,
+    csv_urls,
+    minimum_count=1
+):
+    """
+    Try archive CSV endpoints first and then the NSE API.
+    Returns [] only when all sources fail.
+    """
+
+    headers={
+        "User-Agent":(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept":"text/csv,text/plain,application/json,*/*",
+        "Accept-Language":"en-US,en;q=0.9",
+        "Referer":"https://www.nseindia.com/"
+    }
+
+    for url in csv_urls:
+        try:
+            session=requests.Session()
+            session.headers.update(headers)
+
+            try:
+                session.get(
+                    "https://www.nseindia.com/",
+                    timeout=15
+                )
+            except Exception:
+                pass
+
+            response=session.get(
+                url,
+                timeout=30
+            )
+
+            if response.status_code!=200:
+                continue
+
+            df=pd.read_csv(
+                StringIO(response.text)
+            )
+
+            df.columns=[
+                str(c).strip().upper()
+                for c in df.columns
+            ]
+
+            if "SYMBOL" not in df.columns:
+                continue
+
+            symbols=(
+                df["SYMBOL"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+
+            symbols=symbols[
+                ~symbols.isin([
+                    "","NAN","NONE","NULL"
+                ])
+            ]
+
+            symbols=sorted(
+                symbols.drop_duplicates().tolist()
+            )
+
+            if len(symbols)>=minimum_count:
+                return symbols
+
+        except Exception:
+            continue
+
+    return _load_nse_index_from_api(
+        index_name,
+        minimum_count
+    )
+
+
 # ============================================================
 # LOAD NIFTY 500
 # ============================================================
@@ -549,33 +706,20 @@ def load_nifty_index_constituents(
     index_key,
     minimum_count=1
 ):
-    """
-    Robust current constituent loader.
-
-    CSV/archive endpoints are tried first. If Streamlit Cloud
-    receives an NSE rejection, the NSE equity-stockIndices API
-    is used as a fallback.
-    """
-
     url_map={
         "NIFTY_MIDCAP_100":[
             "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftymidcap100list.csv",
-
             "https://archives.nseindia.com/"
             "content/indices/ind_niftymidcap100list.csv",
-
             "https://www.niftyindices.com/"
             "IndexConstituent/ind_niftymidcap100list.csv"
         ],
-
         "NIFTY_SMALLCAP_250":[
             "https://nsearchives.nseindia.com/"
             "content/indices/ind_niftysmallcap250list.csv",
-
             "https://archives.nseindia.com/"
             "content/indices/ind_niftysmallcap250list.csv",
-
             "https://www.niftyindices.com/"
             "IndexConstituent/ind_niftysmallcap250list.csv"
         ]
@@ -586,6 +730,7 @@ def load_nifty_index_constituents(
         url_map.get(index_key,[]),
         minimum_count
     )
+
 
 
 def load_nifty_midcap100():
