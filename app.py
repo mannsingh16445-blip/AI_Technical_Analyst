@@ -8786,35 +8786,38 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
         )
 
 
-        st.sidebar.markdown("### 🔬 Strategy Comparison")
+    # Strategy comparison controls MUST be outside the
+    # stock_count<=0 block. Otherwise these variables do not
+    # exist when a normal universe loads.
+    st.sidebar.markdown("### 🔬 Strategy Comparison")
 
-        previous_baseline_enabled=st.sidebar.checkbox(
-            "Enable Previous vs New comparison",
-            value=True,
-            help=(
-                "Runs both strategies on the same stocks and "
-                "period with trailing/profit booking disabled, "
-                "so the entry/exit rule change can be isolated."
-            ),
-            key="cci_ema_rsi_compare_enabled"
-        )
+    previous_baseline_enabled=st.sidebar.checkbox(
+        "Enable Previous vs New comparison",
+        value=True,
+        help=(
+            "Runs both strategies on the same stocks and "
+            "period with trailing/profit booking disabled, "
+            "so the entry/exit rule change can be isolated."
+        ),
+        key="cci_ema_rsi_compare_enabled"
+    )
 
-        previous_ema_range=st.sidebar.slider(
-            "Previous strategy EMA range (%)",
-            1.0,5.0,3.0,0.5,
-            help=(
-                "Previous-style baseline uses absolute distance "
-                "from EMA200, allowing EMA9/EMA21 either above "
-                "or below EMA200."
-            ),
-            key="cci_ema_rsi_previous_ema_range"
-        )
+    previous_ema_range=st.sidebar.slider(
+        "Previous strategy EMA range (%)",
+        1.0,5.0,3.0,0.5,
+        help=(
+            "Previous-style baseline uses absolute distance "
+            "from EMA200, allowing EMA9/EMA21 either above "
+            "or below EMA200."
+        ),
+        key="cci_ema_rsi_previous_ema_range"
+    )
 
-        previous_rsi50_tolerance=st.sidebar.slider(
-            "Previous exit RSI/WMA tolerance around 50",
-            0.5,5.0,2.0,0.5,
-            key="cci_ema_rsi_previous_rsi50_tolerance"
-        )
+    previous_rsi50_tolerance=st.sidebar.slider(
+        "Previous exit RSI/WMA tolerance around 50",
+        0.5,5.0,2.0,0.5,
+        key="cci_ema_rsi_previous_rsi50_tolerance"
+    )
 
     scan_tab, backtest_tab = st.tabs(
         [
