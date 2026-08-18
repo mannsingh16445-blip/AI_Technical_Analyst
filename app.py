@@ -8949,14 +8949,61 @@ elif module == "🎯 CCI + EMA + RSI Strategy":
         key="cci_ema_rsi_ema200_breakdown_exit"
     )
 
-    max_stocks=st.sidebar.slider(
-        "Maximum Stocks",
-        10,
-        min(500,max(10,len(stocks))),
-        min(100,max(10,len(stocks))),
-        10,
-        key="cci_ema_rsi_max_stocks"
-    )
+    # --------------------------------------------
+    # Safe stock-count selector
+    #
+    # The previous slider reused one widget value across
+    # different universes. For example, switching from a
+    # 100-stock universe to a smaller universe could leave
+    # the old value (e.g. 100) in session state while the
+    # new slider maximum was smaller, causing:
+    # StreamlitAPIException from st.slider().
+    #
+    # Each universe now gets its own widget state and the
+    # slider bounds are always valid.
+    # --------------------------------------------
+    stock_count=len(stocks)
+
+    if stock_count<=0:
+
+        st.sidebar.warning(
+            "No stocks are currently available for this universe."
+        )
+
+        max_stocks=0
+
+    else:
+
+        max_stock_limit=min(
+            500,
+            stock_count
+        )
+
+        default_max_stocks=min(
+            100,
+            max_stock_limit
+        )
+
+        slider_step=(
+            10
+            if max_stock_limit>=10
+            else 1
+        )
+
+        max_stocks=st.sidebar.slider(
+            "Maximum Stocks",
+            min_value=1,
+            max_value=max_stock_limit,
+            value=default_max_stocks,
+            step=slider_step,
+            key=f"cci_ema_rsi_max_stocks_{universe}"
+        )
+
+    if stock_count<=0:
+        st.error(
+            f"No stocks could be loaded for **{universe}**. "
+            "Please try another universe or reload the app."
+        )
 
     scan_tab, backtest_tab = st.tabs(
         [
