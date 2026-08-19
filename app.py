@@ -8365,6 +8365,160 @@ def _options_phase2_snapshot(df):
     }
 
 
+
+# ============================================================
+# OPTIONS PHASE 3: CONFLUENCE + CONFLICT + MARKET REGIME
+# ============================================================
+
+def _options_phase3_confluence(row):
+    call=put=sell=0.0
+    bullish=[]; bearish=[]; neutral=[]; conflicts=[]
+
+    position=str(row.get("Position",""))
+    oi_trend=str(row.get("OI Trend",""))
+    chg=float(row.get("Daily Chg %",np.nan))
+    trend=str(row.get("Trend",""))
+    close=float(row.get("Close",np.nan))
+    ema20=float(row.get("EMA20",np.nan))
+    ema50=float(row.get("EMA50",np.nan))
+    ema200=float(row.get("EMA200",np.nan))
+
+    if position=="Long Buildup": call+=20; bullish.append("Long buildup")
+    elif position=="Short Covering": call+=14; bullish.append("Short covering")
+    elif position=="Short Buildup": put+=20; bearish.append("Short buildup")
+    elif position=="Long Unwinding": put+=14; bearish.append("Long unwinding")
+
+    if "AggressiveNewLong" in oi_trend:
+        call+=5; bullish.append("Aggressive new long")
+    elif "AggressiveNewShort" in oi_trend:
+        put+=5; bearish.append("Aggressive new short")
+
+    ema_bull=all(np.isfinite(x) for x in [close,ema20,ema50,ema200]) and close>ema20>ema50>ema200
+    ema_bear=all(np.isfinite(x) for x in [close,ema20,ema50,ema200]) and close<ema20<ema50<ema200
+
+    if ema_bull: call+=15; bullish.append("EMA20 > EMA50 > EMA200")
+    elif ema_bear: put+=15; bearish.append("EMA20 < EMA50 < EMA200")
+    elif trend=="Bullish": call+=9; bullish.append("Bullish trend")
+    elif trend=="Bearish": put+=9; bearish.append("Bearish trend")
+
+    bb_state=str(row.get("BB State",""))
+    if "Upper Band Breakout" in bb_state:
+        call+=10; bullish.append("Upper Bollinger breakout")
+    elif "Lower Band Breakdown" in bb_state:
+        put+=10; bearish.append("Lower Bollinger breakdown")
+    elif "Above BB Midline" in bb_state:
+        call+=5; bullish.append("Above Bollinger midline")
+    elif "Below BB Midline" in bb_state:
+        put+=5; bearish.append("Below Bollinger midline")
+    if "Squeeze Release" in bb_state:
+        if "Upper" in bb_state: call+=3
+        elif "Lower" in bb_state: put+=3
+
+    adx=float(row.get("ADX14",np.nan)); plus=float(row.get("+DI14",np.nan)); minus=float(row.get("-DI14",np.nan))
+    adx_rising=bool(row.get("ADX Rising",False))
+    if np.isfinite(adx) and adx>=25:
+        if plus>minus: call+=10; bullish.append(f"ADX {adx:.1f} +DI dominant")
+        elif minus>plus: put+=10; bearish.append(f"ADX {adx:.1f} -DI dominant")
+    elif np.isfinite(adx) and adx>=20 and adx_rising:
+        if plus>minus: call+=6; bullish.append("Developing ADX +DI dominant")
+        elif minus>plus: put+=6; bearish.append("Developing ADX -DI dominant")
+    elif np.isfinite(adx) and adx<20:
+        sell+=5; neutral.append("ADX below 20")
+
+    support=float(row.get("Fib Support Price",np.nan)); resistance=float(row.get("Fib Resistance Price",np.nan))
+    if np.isfinite(close) and np.isfinite(support):
+        d=(close-support)/close*100
+        if 0<=d<=2: call+=10; bullish.append("Within 2% of Fib support")
+        elif 0<=d<=4: call+=5
+    if np.isfinite(close) and np.isfinite(resistance):
+        d=(resistance-close)/close*100
+        if 0<=d<=2: put+=10; bearish.append("Within 2% of Fib resistance")
+        elif 0<=d<=4: put+=5
+
+    pcr=float(row.get("PCR",np.nan)); pcrchg=float(row.get("PCR Chg 1D",np.nan))
+    call_oi=float(row.get("Call OI",np.nan)); put_oi=float(row.get("Put OI",np.nan))
+    if np.isfinite(pcr):
+        if pcr>=1.10: call+=5; bullish.append(f"PCR bullish ({pcr:.2f})")
+        elif pcr<=0.70: put+=5; bearish.append(f"PCR bearish ({pcr:.2f})")
+        elif .85<=pcr<=1.15: sell+=2; neutral.append("PCR near balance")
+    if np.isfinite(pcrchg):
+        if pcrchg>0: call+=3; bullish.append("PCR improving")
+        elif pcrchg<0: put+=3; bearish.append("PCR declining")
+    if np.isfinite(call_oi) and np.isfinite(put_oi) and call_oi>0 and put_oi>0:
+        share=put_oi/(call_oi+put_oi)
+        if share>=.60: call+=2; bullish.append("Put OI dominance")
+        elif share<=.40: put+=2; bearish.append("Call OI dominance")
+
+    vol=float(row.get("Volume x",np.nan)); delivery=float(row.get("Delivery x",np.nan))
+    if np.isfinite(vol) and vol>=1.5:
+        if chg>0: call+=5; bullish.append("High volume with positive price")
+        elif chg<0: put+=5; bearish.append("High volume with negative price")
+    if np.isfinite(delivery) and delivery>=1.5:
+        if chg>0: call+=3
+        elif chg<0: put+=3
+
+    squeeze=bool(row.get("BB Squeeze",False))
+    if squeeze: sell+=5; neutral.append("Bollinger squeeze")
+    if np.isfinite(adx) and adx<20: sell+=5
+
+    if position in ("Long Buildup","Short Covering") and ("Lower Band Breakdown" in bb_state or (np.isfinite(adx) and adx>=25 and minus>plus)):
+        conflicts.append("Bullish derivatives conflict with bearish momentum")
+    if position in ("Short Buildup","Long Unwinding") and ("Upper Band Breakout" in bb_state or (np.isfinite(adx) and adx>=25 and plus>minus)):
+        conflicts.append("Bearish derivatives conflict with bullish momentum")
+    if np.isfinite(pcr) and pcr>=1.10 and (bb_state.startswith("Lower") or ema_bear):
+        conflicts.append("Bullish PCR conflicts with bearish technical structure")
+    if np.isfinite(pcr) and pcr<=.70 and (bb_state.startswith("Upper") or ema_bull):
+        conflicts.append("Bearish PCR conflicts with bullish technical structure")
+
+    penalty=min(15,5*len(conflicts))
+    call=max(0,call-penalty); put=max(0,put-penalty)
+
+    if ema_bull and np.isfinite(adx) and adx>=25 and plus>minus and ("Upper" in bb_state or "Squeeze Release" in bb_state):
+        regime="🚀 Trending Bull"
+    elif ema_bear and np.isfinite(adx) and adx>=25 and minus>plus and ("Lower" in bb_state or "Squeeze Release" in bb_state):
+        regime="🔻 Trending Bear"
+    elif squeeze and np.isfinite(adx) and adx<20:
+        regime="🟡 Range / Compression"
+    elif np.isfinite(adx) and adx<20:
+        regime="🟡 Weak / Range"
+    elif trend=="Bullish":
+        regime="🟢 Bullish Developing"
+    elif trend=="Bearish":
+        regime="🔴 Bearish Developing"
+    else:
+        regime="⚪ Mixed / Neutral"
+
+    return {
+        "Phase 3 Call Score":round(min(100,call),1),
+        "Phase 3 Put Score":round(min(100,put),1),
+        "Phase 3 Selling Score":round(min(100,sell),1),
+        "Market Regime":regime,
+        "Conflict Status":"No major conflict" if not conflicts else f"⚠️ {len(conflicts)} conflict(s)",
+        "Conflict Details":" | ".join(conflicts) if conflicts else "None",
+        "Bullish Factors":" | ".join(bullish),
+        "Bearish Factors":" | ".join(bearish),
+        "Neutral Factors":" | ".join(neutral),
+        "Conflict Count":len(conflicts)
+    }
+
+
+def _options_phase3_final_signal(row):
+    c=float(row.get("Phase 3 Call Score",0) or 0)
+    p=float(row.get("Phase 3 Put Score",0) or 0)
+    s=float(row.get("Phase 3 Selling Score",0) or 0)
+    conflicts=int(row.get("Conflict Count",0) or 0)
+    regime=str(row.get("Market Regime",""))
+    if conflicts>=2: return "⚠️ Conflicted / Wait"
+    if c>=80 and c>p+8 and regime in ("🚀 Trending Bull","🟢 Bullish Developing"):
+        return "🟢 Strong Call Candidate"
+    if p>=80 and p>c+8 and regime in ("🔻 Trending Bear","🔴 Bearish Developing"):
+        return "🔴 Strong Put Candidate"
+    if s>=75 and regime in ("🟡 Range / Compression","🟡 Weak / Range"):
+        return "🟡 Option Selling Candidate"
+    if max(c,p)>=65: return "🔵 Option Buying Candidate"
+    return "⚪ Avoid / Wait"
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -10379,6 +10533,21 @@ elif module == "📊 Options Next-Day Analyzer":
                                 +option_result["Phase 2 Selling Confirm"].astype(float)
                             ).round(1)
 
+                        # Phase 3: confluence, conflict detection and regime.
+                        phase3_df=pd.DataFrame([
+                            _options_phase3_confluence(r)
+                            for _,r in option_result.iterrows()
+                        ])
+                        if not phase3_df.empty:
+                            for col in phase3_df.columns:
+                                option_result[col]=phase3_df[col].values
+                            option_result["Phase 3 Signal"]=option_result.apply(
+                                _options_phase3_final_signal,axis=1
+                            )
+                            option_result["Final Confluence Score"]=option_result[
+                                ["Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score"]
+                            ].max(axis=1).round(1)
+
                         # Phase 1: explain the signal and build
                         # underlying-based entry/SL/target levels.
                         plan_df=pd.DataFrame(
@@ -10495,6 +10664,25 @@ elif module == "📊 Options Next-Day Analyzer":
                             ])
                         ].head(20)
 
+                        st.subheader("🧠 Phase 3 — Confluence & Market Regime")
+
+                        regime_counts=option_result["Market Regime"].value_counts()
+                        d1,d2,d3,d4=st.columns(4)
+                        d1.metric("🚀 Trending Bull",int(regime_counts.get("🚀 Trending Bull",0)))
+                        d2.metric("🔻 Trending Bear",int(regime_counts.get("🔻 Trending Bear",0)))
+                        d3.metric("🟡 Range / Compression",int(regime_counts.get("🟡 Range / Compression",0)+regime_counts.get("🟡 Weak / Range",0)))
+                        d4.metric("⚠️ Conflicted",int((option_result["Conflict Count"]>=1).sum()))
+                        st.caption("Phase 3 combines derivatives, trend, Bollinger, ADX/DI, Fibonacci and participation. Conflicts reduce directional confidence.")
+
+                        phase3_cols=[
+                            "Stock","Symbol","Market Regime",
+                            "Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score",
+                            "Conflict Status","Phase 3 Signal",
+                            "Bullish Factors","Bearish Factors","Conflict Details"
+                        ]
+                        phase3_cols=[c for c in phase3_cols if c in option_result.columns]
+                        st.dataframe(option_result[phase3_cols].head(50),width="stretch",hide_index=True)
+
                         st.subheader("📐 Bollinger + ADX + ATR Analysis")
 
                         if not explanation_pool.empty:
@@ -10554,6 +10742,13 @@ elif module == "📊 Options Next-Day Analyzer":
                             e3.metric("Put Score",f'{selected["Put Score"]:.1f}')
                             e4.metric("Selling Score",f'{selected["Selling Score"]:.1f}')
 
+                            st.markdown("**Phase 3 confluence**")
+                            st.write(f'**Market regime:** {selected.get("Market Regime","N/A")}')
+                            st.write(f'**Phase 3 signal:** {selected.get("Phase 3 Signal","N/A")}')
+                            st.write(f'**Conflict:** {selected.get("Conflict Status","N/A")}')
+                            if str(selected.get("Conflict Details","None"))!="None":
+                                st.warning(selected.get("Conflict Details",""))
+
                             st.markdown("**Contributing factors**")
                             for reason in str(selected["Why Signal"]).split(" | "):
                                 if reason:
@@ -10562,7 +10757,9 @@ elif module == "📊 Options Next-Day Analyzer":
                             p1,p2=st.columns(2)
                             with p1:
                                 st.markdown("**Next-day plan**")
-                                st.write(f'**Direction:** {selected["Direction"]}')
+                                st.write(f'**Direction:** {selected[ "Market Regime","Phase 3 Call Score","Phase 3 Put Score",
+                            "Phase 3 Selling Score","Conflict Status","Phase 3 Signal",
+                            "Direction"]}')
                                 st.write(f'**Preferred:** {selected["Preferred Contract"]}')
                                 if np.isfinite(selected["Underlying Trigger"]):
                                     st.write(f'**Trigger:** {selected["Underlying Trigger"]:.2f}')
