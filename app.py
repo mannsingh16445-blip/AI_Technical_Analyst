@@ -7519,6 +7519,66 @@ st.sidebar.success(
 # ============================================================
 
 
+
+# Local indicator helpers for the independent Options Analyzer.
+# These deliberately do not depend on the Minervini module.
+
+def _options_rsi(series, period=14):
+    s=pd.to_numeric(series,errors="coerce")
+    delta=s.diff()
+    gain=delta.clip(lower=0)
+    loss=-delta.clip(upper=0)
+    avg_gain=gain.ewm(
+        alpha=1/period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+    avg_loss=loss.ewm(
+        alpha=1/period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+    rs=avg_gain/avg_loss.replace(0,np.nan)
+    rsi=100-(100/(1+rs))
+    rsi= rsi.where(avg_loss.ne(0), 100.0)
+    rsi= rsi.where(~((avg_gain==0)&(avg_loss==0)), 50.0)
+    return rsi
+
+
+def _options_atr(df, period=14):
+    high=pd.to_numeric(df["High"],errors="coerce")
+    low=pd.to_numeric(df["Low"],errors="coerce")
+    close=pd.to_numeric(df["Close"],errors="coerce")
+    prev_close=close.shift(1)
+
+    tr=pd.concat([
+        high-low,
+        (high-prev_close).abs(),
+        (low-prev_close).abs()
+    ],axis=1).max(axis=1)
+
+    return tr.ewm(
+        alpha=1/period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+
+def _options_cci(df, period=20):
+    high=pd.to_numeric(df["High"],errors="coerce")
+    low=pd.to_numeric(df["Low"],errors="coerce")
+    close=pd.to_numeric(df["Close"],errors="coerce")
+
+    tp=(high+low+close)/3
+    sma=tp.rolling(period,min_periods=period).mean()
+    mad=tp.rolling(period,min_periods=period).apply(
+        lambda x: np.mean(np.abs(x-np.mean(x))),
+        raw=True
+    )
+
+    return (tp-sma)/(0.015*mad.replace(0,np.nan))
+
+
 # ============================================================
 # OPTIONS NEXT-DAY ANALYZER
 # ============================================================
@@ -7673,9 +7733,9 @@ def _options_technical_snapshot(df, fib_lookback=60):
     x["EMA20"]=x["Close"].ewm(span=20,adjust=False).mean()
     x["EMA50"]=x["Close"].ewm(span=50,adjust=False).mean()
     x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
-    x["RSI14"]=_rsi(x["Close"],14)
-    x["CCI20"]=_cci(x,20)
-    x["ATR14"]=_atr(x,14)
+    x["RSI14"]=_options_rsi(x["Close"],14)
+    x["CCI20"]=_options_cci(x,20)
+    x["ATR14"]=_options_atr(x,14)
     x["VOL_SMA20"]=x["Volume"].rolling(20).mean()
 
     r=x.iloc[-1]
