@@ -10486,6 +10486,15 @@ elif module == "📊 Options Next-Day Analyzer":
                             hide_index=True
                         )
 
+                        explanation_pool=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(20)
+
                         st.subheader("📐 Bollinger + ADX + ATR Analysis")
 
                         if not explanation_pool.empty:
@@ -10528,15 +10537,6 @@ elif module == "📊 Options Next-Day Analyzer":
                             )
 
                         st.subheader("🔎 Why This Signal?")
-
-                        explanation_pool=option_result[
-                            option_result["Signal"].isin([
-                                "🟢 Strong Call Candidate",
-                                "🔴 Strong Put Candidate",
-                                "🟡 Option Selling Candidate",
-                                "🔵 Option Buying Candidate"
-                            ])
-                        ].head(20)
 
                         if not explanation_pool.empty:
                             selected_symbol=st.selectbox(
