@@ -7517,6 +7517,481 @@ st.sidebar.success(
 # TECHNICAL CHART
 # ============================================================
 
+
+# ============================================================
+# OPTIONS NEXT-DAY ANALYZER
+# ============================================================
+
+def _read_derivative_eod_csv(uploaded_file):
+    """Read the user's end-of-day derivatives CSV.
+    The supplied format contains four metadata lines before the header.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame(), {}
+
+    raw=uploaded_file.getvalue()
+    meta={}
+    lines=raw.decode("utf-8-sig",errors="replace").splitlines()
+
+    for line in lines[:4]:
+        if ":" in line:
+            k,v=line.split(":",1)
+            meta[k.strip()]=v.strip().rstrip(",")
+
+    # Detect the actual header instead of hard-coding skiprows.
+    header_idx=None
+    for i,line in enumerate(lines[:15]):
+        if "Stock Name" in line and "Cumulative Future OI" in line:
+            header_idx=i
+            break
+
+    if header_idx is None:
+        raise ValueError(
+            "Could not find the derivatives CSV header. "
+            "Expected fields such as Stock Name, Symbol, "
+            "Cumulative Future OI and Cumulative Call OI."
+        )
+
+    data=pd.read_csv(
+        StringIO("\n".join(lines[header_idx:])),
+        engine="python"
+    )
+
+    data.columns=[
+        str(c).strip()
+        for c in data.columns
+    ]
+
+    numeric_cols=[
+        "Close","Chg %","Lot Size","Cumulative Future OI",
+        "OI Chg %","Volume (Times)","Delivery (Times)",
+        "Cumulative Call OI","Cumulative Put OI",
+        "Put Call Ratio (PCR)","PCR Change 1D"
+    ]
+
+    for c in numeric_cols:
+        if c in data.columns:
+            data[c]=pd.to_numeric(
+                data[c].astype(str).str.replace(",","",regex=False)
+                .str.replace("%","",regex=False),
+                errors="coerce"
+            )
+
+    if "Symbol" in data.columns:
+        data["Symbol"]=(
+            data["Symbol"].astype(str).str.upper().str.strip()
+        )
+
+    return data,meta
+
+
+def _options_position_class(price_change, oi_change):
+    """Classic futures price/OI interpretation."""
+    if pd.isna(price_change) or pd.isna(oi_change):
+        return "Unknown"
+
+    if price_change>0 and oi_change>0:
+        return "Long Buildup"
+    if price_change<0 and oi_change>0:
+        return "Short Buildup"
+    if price_change>0 and oi_change<0:
+        return "Short Covering"
+    if price_change<0 and oi_change<0:
+        return "Long Unwinding"
+
+    return "Neutral"
+
+
+def _options_fib_levels(df, lookback=60):
+    if df is None or df.empty or "High" not in df or "Low" not in df:
+        return {}
+
+    x=df.tail(int(lookback)).copy()
+    if len(x)<10:
+        return {}
+
+    hi=float(x["High"].max())
+    lo=float(x["Low"].min())
+
+    hi_idx=x["High"].idxmax()
+    lo_idx=x["Low"].idxmin()
+
+    # Latest dominant swing: determine whether low preceded high.
+    bullish=lo_idx<hi_idx
+
+    rng=hi-lo
+    if rng<=0:
+        return {}
+
+    if bullish:
+        levels={
+            "Fib 23.6":hi-rng*0.236,
+            "Fib 38.2":hi-rng*0.382,
+            "Fib 50.0":hi-rng*0.500,
+            "Fib 61.8":hi-rng*0.618,
+            "Fib 78.6":hi-rng*0.786,
+            "Swing High":hi,
+            "Swing Low":lo
+        }
+    else:
+        # For a recent downward swing, retracement levels are measured
+        # upward from the low.
+        levels={
+            "Fib 23.6":lo+rng*0.236,
+            "Fib 38.2":lo+rng*0.382,
+            "Fib 50.0":lo+rng*0.500,
+            "Fib 61.8":lo+rng*0.618,
+            "Fib 78.6":lo+rng*0.786,
+            "Swing High":hi,
+            "Swing Low":lo
+        }
+
+    levels["Swing Direction"]="Bullish Swing" if bullish else "Bearish Swing"
+    return levels
+
+
+def _options_technical_snapshot(df, fib_lookback=60):
+    if df is None or df.empty:
+        return {}
+
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+
+    req=["Open","High","Low","Close","Volume"]
+    if any(c not in x.columns for c in req):
+        return {}
+
+    x=x.dropna(subset=req).copy()
+    if len(x)<220:
+        return {}
+
+    for c in req:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+
+    x["EMA20"]=x["Close"].ewm(span=20,adjust=False).mean()
+    x["EMA50"]=x["Close"].ewm(span=50,adjust=False).mean()
+    x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
+    x["RSI14"]=_rsi(x["Close"],14)
+    x["CCI20"]=_cci(x,20)
+    x["ATR14"]=_atr(x,14)
+    x["VOL_SMA20"]=x["Volume"].rolling(20).mean()
+
+    r=x.iloc[-1]
+    prev=x.iloc[-2]
+
+    fib=_options_fib_levels(x,fib_lookback)
+    close=float(r["Close"])
+    ema20=float(r["EMA20"])
+    ema50=float(r["EMA50"])
+    ema200=float(r["EMA200"])
+    rsi=float(r["RSI14"])
+    cci=float(r["CCI20"])
+    atr=float(r["ATR14"])
+
+    trend_points=0
+    if close>ema200:
+        trend_points+=8
+    if ema50>ema200:
+        trend_points+=5
+    if ema20>ema50:
+        trend_points+=4
+    if close>ema20:
+        trend_points+=3
+    if ema200>float(x["EMA200"].iloc[-21]):
+        trend_points+=5
+
+    trend="Bullish" if trend_points>=18 else (
+        "Bearish" if trend_points<=8 else "Neutral"
+    )
+
+    # Find closest Fibonacci levels above and below current price.
+    fib_numeric={
+        k:v for k,v in fib.items()
+        if isinstance(v,(int,float,np.floating))
+        and k.startswith("Fib")
+    }
+
+    supports=[
+        (k,v) for k,v in fib_numeric.items()
+        if v<=close
+    ]
+    resistances=[
+        (k,v) for k,v in fib_numeric.items()
+        if v>=close
+    ]
+
+    support=max(supports,key=lambda z:z[1]) if supports else None
+    resistance=min(resistances,key=lambda z:z[1]) if resistances else None
+
+    support_score=0
+    resistance_score=0
+
+    if support:
+        dist=(close-support[1])/close*100
+        if dist<=2: support_score=10
+        elif dist<=4: support_score=7
+        elif dist<=7: support_score=4
+
+    if resistance:
+        dist=(resistance[1]-close)/close*100
+        if dist<=2: resistance_score=10
+        elif dist<=4: resistance_score=7
+        elif dist<=7: resistance_score=4
+
+    return {
+        "Close":close,
+        "EMA20":ema20,
+        "EMA50":ema50,
+        "EMA200":ema200,
+        "RSI14":rsi,
+        "CCI20":cci,
+        "ATR14":atr,
+        "Trend":trend,
+        "Trend Points":trend_points,
+        "Fib":fib,
+        "Fib Support":support[0] if support else "",
+        "Fib Support Price":support[1] if support else np.nan,
+        "Fib Resistance":resistance[0] if resistance else "",
+        "Fib Resistance Price":resistance[1] if resistance else np.nan,
+        "Fib Support Score":support_score,
+        "Fib Resistance Score":resistance_score,
+        "Volume Ratio":(
+            float(r["Volume"])/float(r["VOL_SMA20"])
+            if float(r["VOL_SMA20"])>0 else np.nan
+        ),
+        "Bullish Momentum":(
+            close>ema20 and ema20>ema50 and rsi>=55
+        ),
+        "Bearish Momentum":(
+            close<ema20 and ema20<ema50 and rsi<=45
+        )
+    }
+
+
+def _options_score_row(row, tech):
+    """Generate deterministic next-day Call/Put/Selling scores.
+    No option premium/IV is assumed when it is absent from the CSV.
+    """
+
+    chg=float(row.get("Chg %",np.nan))
+    oi_chg=float(row.get("OI Chg %",np.nan))
+    pcr=float(row.get("Put Call Ratio (PCR)",np.nan))
+    pcr_chg=float(row.get("PCR Change 1D",np.nan))
+    call_oi=float(row.get("Cumulative Call OI",np.nan))
+    put_oi=float(row.get("Cumulative Put OI",np.nan))
+    vol_mult=float(row.get("Volume (Times)",np.nan))
+    del_mult=float(row.get("Delivery (Times)",np.nan))
+
+    pos=_options_position_class(chg,oi_chg)
+    oi_trend=str(row.get("OI Trend","")).strip()
+
+    call=0.0
+    put=0.0
+    sell=0.0
+
+    # ---------------- Technical layer: 35 points ----------------
+    if tech:
+        trend=tech.get("Trend")
+        if trend=="Bullish":
+            call+=15
+        elif trend=="Bearish":
+            put+=15
+
+        if tech.get("Bullish Momentum"):
+            call+=10
+        if tech.get("Bearish Momentum"):
+            put+=10
+
+        call+=float(tech.get("Fib Support Score",0))
+        put+=float(tech.get("Fib Resistance Score",0))
+
+    # ---------------- Futures positioning: 25 points ----------------
+    if pos=="Long Buildup":
+        call+=20
+    elif pos=="Short Covering":
+        call+=14
+    elif pos=="Short Buildup":
+        put+=20
+    elif pos=="Long Unwinding":
+        put+=14
+
+    if "AggressiveNewLong" in oi_trend:
+        call+=5
+    elif "AggressiveNewShort" in oi_trend:
+        put+=5
+    elif "NewLong" in oi_trend:
+        call+=3
+    elif "NewShort" in oi_trend:
+        put+=3
+
+    # ---------------- OI / PCR structure: 25 points ----------------
+    if not pd.isna(pcr):
+        if pcr>=1.10:
+            call+=8
+        elif pcr>=0.90:
+            call+=4
+
+        if pcr<=0.70:
+            put+=8
+        elif pcr<=0.90:
+            put+=4
+
+    if not pd.isna(pcr_chg):
+        if pcr_chg>0:
+            call+=min(5,abs(pcr_chg)*100)
+        elif pcr_chg<0:
+            put+=min(5,abs(pcr_chg)*100)
+
+    if call_oi>0 and put_oi>0:
+        # Relative put/call positioning gives a modest confirmation,
+        # not the entire signal.
+        total=call_oi+put_oi
+        put_share=put_oi/total
+        if put_share>=0.60:
+            call+=5
+        elif put_share<=0.40:
+            put+=5
+
+    # ---------------- Participation: 15 points ----------------
+    if not pd.isna(vol_mult):
+        if vol_mult>=1.5:
+            if chg>0: call+=5
+            elif chg<0: put+=5
+        elif vol_mult>=1.0:
+            if chg>0: call+=3
+            elif chg<0: put+=3
+
+    if not pd.isna(del_mult):
+        if del_mult>=1.5:
+            if chg>0: call+=3
+            elif chg<0: put+=3
+
+    # Selling score: range-bound + balanced positioning + OI.
+    if tech and tech.get("Trend")=="Neutral":
+        sell+=20
+
+    if not pd.isna(pcr) and 0.85<=pcr<=1.15:
+        sell+=15
+
+    if not pd.isna(oi_chg) and abs(oi_chg)>=5:
+        sell+=10
+
+    if not pd.isna(vol_mult) and vol_mult<1.0:
+        sell+=10
+
+    if tech:
+        # Near Fib boundaries/range without momentum favours defined
+        # resistance/support selling setups.
+        if tech.get("Fib Support Score",0)>=7:
+            sell+=5
+        if tech.get("Fib Resistance Score",0)>=7:
+            sell+=5
+
+    call=min(100,round(call,1))
+    put=min(100,round(put,1))
+    sell=min(100,round(sell,1))
+
+    if call>=80 and call>put and call>sell:
+        signal="🟢 Strong Call Candidate"
+    elif put>=80 and put>call and put>sell:
+        signal="🔴 Strong Put Candidate"
+    elif sell>=75 and sell>call and sell>put:
+        signal="🟡 Option Selling Candidate"
+    elif max(call,put)>=65:
+        signal="🔵 Option Buying Candidate"
+    else:
+        signal="⚪ Avoid / Wait"
+
+    return {
+        "Position":pos,
+        "Call Score":call,
+        "Put Score":put,
+        "Selling Score":sell,
+        "Signal":signal
+    }
+
+
+def run_options_next_day_analysis(option_df, market_data,
+                                  fib_lookback=60):
+    """Combine the uploaded EOD derivatives file with latest OHLCV."""
+    rows=[]
+
+    if option_df is None or option_df.empty:
+        return pd.DataFrame()
+
+    for _,row in option_df.iterrows():
+        symbol=str(row.get("Symbol","")).strip().upper()
+        if not symbol:
+            continue
+
+        price=float(row["Close"]) if not pd.isna(row.get("Close",np.nan)) else np.nan
+        tech=_options_technical_snapshot(
+            market_data.get(symbol),
+            fib_lookback
+        )
+
+        scores=_options_score_row(row,tech)
+
+        out={
+            "Stock":row.get("Stock Name",symbol),
+            "Symbol":symbol,
+            "EOD Date":row.get("Date",""),
+            "Close":price,
+            "Daily Chg %":row.get("Chg %",np.nan),
+            "Future OI Chg %":row.get("OI Chg %",np.nan),
+            "PCR":row.get("Put Call Ratio (PCR)",np.nan),
+            "PCR Chg 1D":row.get("PCR Change 1D",np.nan),
+            "OI Trend":row.get("OI Trend",""),
+            "Call OI":row.get("Cumulative Call OI",np.nan),
+            "Put OI":row.get("Cumulative Put OI",np.nan),
+            "Volume x":row.get("Volume (Times)",np.nan),
+            "Delivery x":row.get("Delivery (Times)",np.nan),
+            "Position":scores["Position"],
+            "Call Score":scores["Call Score"],
+            "Put Score":scores["Put Score"],
+            "Selling Score":scores["Selling Score"],
+            "Signal":scores["Signal"],
+        }
+
+        if tech:
+            out.update({
+                "Trend":tech["Trend"],
+                "RSI14":round(tech["RSI14"],2),
+                "CCI20":round(tech["CCI20"],2),
+                "EMA20":round(tech["EMA20"],2),
+                "EMA50":round(tech["EMA50"],2),
+                "EMA200":round(tech["EMA200"],2),
+                "Fib Support":tech["Fib Support"],
+                "Fib Support Price":tech["Fib Support Price"],
+                "Fib Resistance":tech["Fib Resistance"],
+                "Fib Resistance Price":tech["Fib Resistance Price"],
+                "ATR14":round(tech["ATR14"],2),
+                "Volume Ratio":round(tech["Volume Ratio"],2),
+            })
+
+        rows.append(out)
+
+    result=pd.DataFrame(rows)
+
+    if not result.empty:
+        # Prioritize actionable signals, then score.
+        priority={
+            "🟢 Strong Call Candidate":4,
+            "🔴 Strong Put Candidate":4,
+            "🟡 Option Selling Candidate":3,
+            "🔵 Option Buying Candidate":2,
+            "⚪ Avoid / Wait":1
+        }
+        result["_priority"]=result["Signal"].map(priority).fillna(0)
+        result=result.sort_values(
+            ["_priority","Call Score","Put Score","Selling Score"],
+            ascending=[False,False,False,False]
+        ).drop(columns=["_priority"])
+
+    return result
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -9474,7 +9949,7 @@ elif module == "🏆 Minervini SEPA + VCP Scanner":
         key="minervini_bt_max_stocks"
     )
 
-    scan_col, bt_col = st.columns(2)
+    scan_col, bt_col, opt_col = st.columns(3)
 
     with scan_col:
         run=st.button(
@@ -9489,6 +9964,235 @@ elif module == "🏆 Minervini SEPA + VCP Scanner":
             type="secondary",
             key="minervini_backtest_run"
         )
+
+    with opt_col:
+        run_options=st.button(
+            "📤 OPTIONS NEXT-DAY ANALYZER",
+            type="secondary",
+            key="minervini_options_analyzer_run"
+        )
+
+
+    # ========================================================
+    # OPTIONS NEXT-DAY ANALYZER
+    # ========================================================
+    st.markdown("---")
+    st.subheader("📤 Options Next-Day Analyzer")
+
+    st.caption(
+        "Upload the EOD derivatives CSV after market close. "
+        "The analyzer combines that day's futures/OI positioning "
+        "with the latest underlying OHLCV and Fibonacci levels "
+        "to create the next trading day's directional candidates."
+    )
+
+    options_file=st.file_uploader(
+        "Upload EOD derivatives CSV",
+        type=["csv"],
+        key="minervini_options_csv"
+    )
+
+    oc1,oc2,oc3=st.columns(3)
+
+    with oc1:
+        options_fib_lookback=st.select_slider(
+            "Fibonacci lookback (days)",
+            options=[40,50,60,80,100],
+            value=60,
+            key="options_fib_lookback"
+        )
+
+    with oc2:
+        min_call_score=st.slider(
+            "Strong Call threshold",
+            70,95,80,1,
+            key="options_call_threshold"
+        )
+
+    with oc3:
+        min_put_score=st.slider(
+            "Strong Put threshold",
+            70,95,80,1,
+            key="options_put_threshold"
+        )
+
+    if options_file is not None:
+        try:
+            option_df,option_meta=_read_derivative_eod_csv(options_file)
+
+            if option_df.empty:
+                st.warning("The uploaded CSV contains no stock rows.")
+            else:
+                d1,d2,d3,d4=st.columns(4)
+                d1.metric("Stocks",len(option_df))
+                d2.metric(
+                    "EOD Date",
+                    str(option_meta.get(
+                        "Date",
+                        option_df["Date"].iloc[0]
+                        if "Date" in option_df.columns else ""
+                    ))
+                )
+                d3.metric(
+                    "OI Trend",
+                    "Available"
+                    if "OI Trend" in option_df.columns
+                    else "Missing"
+                )
+                d4.metric(
+                    "PCR",
+                    "Available"
+                    if "Put Call Ratio (PCR)" in option_df.columns
+                    else "Missing"
+                )
+
+                if st.button(
+                    "🔍 ANALYZE FOR NEXT TRADING DAY",
+                    type="primary",
+                    key="options_analyze_button"
+                ):
+                    symbols=[
+                        str(s).strip().upper()
+                        for s in option_df["Symbol"].dropna().unique()
+                    ]
+
+                    with st.spinner(
+                        "Downloading underlying charts and calculating "
+                        "Fibonacci + option positioning..."
+                    ):
+                        options_market=download_batches(
+                            symbols,
+                            period,
+                            50
+                        )
+
+                        option_result=run_options_next_day_analysis(
+                            option_df,
+                            options_market,
+                            options_fib_lookback
+                        )
+
+                    if option_result.empty:
+                        st.warning(
+                            "No technical analysis could be calculated. "
+                            "Try a longer market-data period."
+                        )
+                    else:
+                        def _threshold_signal(r):
+                            c=float(r["Call Score"])
+                            p=float(r["Put Score"])
+                            s=float(r["Selling Score"])
+
+                            if c>=min_call_score and c>p and c>s:
+                                return "🟢 Strong Call Candidate"
+                            if p>=min_put_score and p>c and p>s:
+                                return "🔴 Strong Put Candidate"
+                            if s>=75 and s>c and s>p:
+                                return "🟡 Option Selling Candidate"
+                            if max(c,p)>=65:
+                                return "🔵 Option Buying Candidate"
+                            return "⚪ Avoid / Wait"
+
+                        option_result["Signal"]=option_result.apply(
+                            _threshold_signal,axis=1
+                        )
+
+                        st.session_state[
+                            "minervini_options_result"
+                        ]=option_result
+
+                        calls=option_result[
+                            option_result["Signal"]==
+                            "🟢 Strong Call Candidate"
+                        ]
+                        puts=option_result[
+                            option_result["Signal"]==
+                            "🔴 Strong Put Candidate"
+                        ]
+                        sellers=option_result[
+                            option_result["Signal"]==
+                            "🟡 Option Selling Candidate"
+                        ]
+                        buyers=option_result[
+                            option_result["Signal"]==
+                            "🔵 Option Buying Candidate"
+                        ]
+
+                        a,b,c,d=st.columns(4)
+                        a.metric("🟢 Strong Calls",len(calls))
+                        b.metric("🔴 Strong Puts",len(puts))
+                        c.metric("🟡 Selling",len(sellers))
+                        d.metric("🔵 Buying",len(buyers))
+
+                        st.subheader(
+                            "📈 Next-Day Options Candidates"
+                        )
+
+                        display=[
+                            "Stock","Symbol","Close","Trend",
+                            "Call Score","Put Score","Selling Score",
+                            "Signal","Position","OI Trend","PCR",
+                            "Future OI Chg %","Fib Support Price",
+                            "Fib Resistance Price"
+                        ]
+                        display=[
+                            c for c in display
+                            if c in option_result.columns
+                        ]
+
+                        st.dataframe(
+                            option_result[display],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        st.download_button(
+                            "⬇️ Download Next-Day Options Report",
+                            option_result.to_csv(index=False),
+                            "Options_Next_Day_Analysis.csv",
+                            "text/csv"
+                        )
+
+                        st.subheader("⭐ Strong Candidates")
+
+                        top_cols=[
+                            "Stock","Symbol","Close",
+                            "Call Score","Put Score","Selling Score",
+                            "Signal","Trend","Position","OI Trend","PCR",
+                            "Fib Support Price","Fib Resistance Price"
+                        ]
+                        top_cols=[
+                            c for c in top_cols
+                            if c in option_result.columns
+                        ]
+
+                        top=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(30)
+
+                        st.dataframe(
+                            top[top_cols],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        st.info(
+                            "The uploaded file is treated as EOD information "
+                            "for the next trading session. This is a research "
+                            "signal, not an automatic order. IV, option premium "
+                            "and bid/ask spread are not scored unless those "
+                            "fields are present in the CSV."
+                        )
+
+        except Exception as exc:
+            st.error(
+                f"Could not analyze the uploaded derivatives CSV: {exc}"
+            )
 
     if run:
         with st.spinner("Scanning Minervini Trend Template + VCP setups..."):
