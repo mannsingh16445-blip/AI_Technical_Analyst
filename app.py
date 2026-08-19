@@ -7497,7 +7497,8 @@ module = st.sidebar.radio(
     "Select Module",
     [
         "🎯 CCI + EMA + RSI Strategy",
-        "🏆 Minervini SEPA + VCP Scanner",
+        "📊 Options Next-Day Analyzer",
+            "🏆 Minervini SEPA + VCP Scanner",
         "🚀 Smart Breakout Scanner",
         "🎯 Buy / Sell Signal Engine",
         "📐 Chart Pattern Scanner",
@@ -7522,7 +7523,7 @@ st.sidebar.success(
 # OPTIONS NEXT-DAY ANALYZER
 # ============================================================
 
-def _read_derivative_eod_csv(uploaded_file):
+def _read_options_eod_csv(uploaded_file):
     """Read the user's end-of-day derivatives CSV.
     The supplied format contains four metadata lines before the header.
     """
@@ -7585,7 +7586,7 @@ def _read_derivative_eod_csv(uploaded_file):
     return data,meta
 
 
-def _options_position_class(price_change, oi_change):
+def _options_position_classification(price_change, oi_change):
     """Classic futures price/OI interpretation."""
     if pd.isna(price_change) or pd.isna(oi_change):
         return "Unknown"
@@ -7602,7 +7603,7 @@ def _options_position_class(price_change, oi_change):
     return "Neutral"
 
 
-def _options_fib_levels(df, lookback=60):
+def _options_fibonacci_levels(df, lookback=60):
     if df is None or df.empty or "High" not in df or "Low" not in df:
         return {}
 
@@ -7680,7 +7681,7 @@ def _options_technical_snapshot(df, fib_lookback=60):
     r=x.iloc[-1]
     prev=x.iloc[-2]
 
-    fib=_options_fib_levels(x,fib_lookback)
+    fib=_options_fibonacci_levels(x,fib_lookback)
     close=float(r["Close"])
     ema20=float(r["EMA20"])
     ema50=float(r["EMA50"])
@@ -7783,7 +7784,7 @@ def _options_score_row(row, tech):
     vol_mult=float(row.get("Volume (Times)",np.nan))
     del_mult=float(row.get("Delivery (Times)",np.nan))
 
-    pos=_options_position_class(chg,oi_chg)
+    pos=_options_position_classification(chg,oi_chg)
     oi_trend=str(row.get("OI Trend","")).strip()
 
     call=0.0
@@ -7990,6 +7991,7 @@ def run_options_next_day_analysis(option_df, market_data,
         ).drop(columns=["_priority"])
 
     return result
+
 
 
 if module == "🚀 Smart Breakout Scanner":
@@ -9823,6 +9825,262 @@ elif module == "📐 Chart Pattern Scanner":
 # MINERVINI SEPA + VCP SCANNER MODULE
 # ============================================================
 
+
+elif module == "📊 Options Next-Day Analyzer":
+
+    st.header("📊 Options Next-Day Analyzer")
+
+    st.markdown(
+        """
+        Upload your **end-of-day derivatives CSV** after market close.
+        The analyzer combines futures/OI positioning with the latest
+        underlying price/volume data and Fibonacci support/resistance
+        to generate a plan for the **next trading session**.
+
+        **This module is independent of the Minervini SEPA/VCP scanner.**
+        """
+    )
+
+    st.sidebar.subheader("📊 Options Analyzer Settings")
+
+    options_universe=st.sidebar.selectbox(
+        "Underlying Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="options_universe"
+    )
+
+    options_period=st.sidebar.selectbox(
+        "Underlying Market Data Period",
+        ["1y","2y","3y","5y"],
+        index=1,
+        key="options_period"
+    )
+
+    options_fib_lookback=st.sidebar.select_slider(
+        "Fibonacci lookback (days)",
+        options=[40,50,60,80,100],
+        value=60,
+        key="options_fib_lookback"
+    )
+
+    min_call_score=st.sidebar.slider(
+        "Strong Call threshold",
+        70,95,80,1,
+        key="options_call_threshold_independent"
+    )
+
+    min_put_score=st.sidebar.slider(
+        "Strong Put threshold",
+        70,95,80,1,
+        key="options_put_threshold_independent"
+    )
+
+    options_file=st.file_uploader(
+        "📤 Upload EOD derivatives CSV",
+        type=["csv"],
+        key="options_eod_csv_independent"
+    )
+
+    if options_file is not None:
+        try:
+            option_df,option_meta=_read_options_eod_csv(options_file)
+
+            if option_df.empty:
+                st.warning("The uploaded CSV contains no stock rows.")
+            else:
+                c1,c2,c3,c4=st.columns(4)
+
+                c1.metric("Stocks in CSV",len(option_df))
+                c2.metric(
+                    "EOD Date",
+                    str(option_meta.get(
+                        "Date",
+                        option_df["Date"].iloc[0]
+                        if "Date" in option_df.columns else ""
+                    ))
+                )
+                c3.metric(
+                    "OI Trend",
+                    "Available"
+                    if "OI Trend" in option_df.columns
+                    else "Missing"
+                )
+                c4.metric(
+                    "PCR",
+                    "Available"
+                    if "Put Call Ratio (PCR)" in option_df.columns
+                    else "Missing"
+                )
+
+                st.info(
+                    "The uploaded EOD file is treated as information "
+                    "available after the market close. Signals are "
+                    "intended for the next trading session."
+                )
+
+                if st.button(
+                    "🔍 ANALYZE FOR NEXT TRADING DAY",
+                    type="primary",
+                    key="options_analyze_independent"
+                ):
+                    # Load only stocks present in the uploaded CSV.
+                    symbols=[
+                        str(s).strip().upper()
+                        for s in option_df["Symbol"].dropna().unique()
+                    ]
+
+                    with st.spinner(
+                        "Analyzing underlying trend, Fibonacci levels "
+                        "and derivatives positioning..."
+                    ):
+                        options_market=download_batches(
+                            symbols,
+                            options_period,
+                            50
+                        )
+
+                        option_result=run_options_next_day_analysis(
+                            option_df,
+                            options_market,
+                            options_fib_lookback
+                        )
+
+                    if option_result.empty:
+                        st.warning(
+                            "No candidates could be calculated. "
+                            "Check the CSV symbols and market-data availability."
+                        )
+                    else:
+                        def _options_final_signal(r):
+                            call=float(r["Call Score"])
+                            put=float(r["Put Score"])
+                            sell=float(r["Selling Score"])
+
+                            if (
+                                call>=min_call_score
+                                and call>put
+                                and call>sell
+                            ):
+                                return "🟢 Strong Call Candidate"
+
+                            if (
+                                put>=min_put_score
+                                and put>call
+                                and put>sell
+                            ):
+                                return "🔴 Strong Put Candidate"
+
+                            if sell>=75 and sell>call and sell>put:
+                                return "🟡 Option Selling Candidate"
+
+                            if max(call,put)>=65:
+                                return "🔵 Option Buying Candidate"
+
+                            return "⚪ Avoid / Wait"
+
+                        option_result["Signal"]=option_result.apply(
+                            _options_final_signal,
+                            axis=1
+                        )
+
+                        calls=option_result[
+                            option_result["Signal"]==
+                            "🟢 Strong Call Candidate"
+                        ]
+                        puts=option_result[
+                            option_result["Signal"]==
+                            "🔴 Strong Put Candidate"
+                        ]
+                        sellers=option_result[
+                            option_result["Signal"]==
+                            "🟡 Option Selling Candidate"
+                        ]
+                        buyers=option_result[
+                            option_result["Signal"]==
+                            "🔵 Option Buying Candidate"
+                        ]
+
+                        a,b,c,d=st.columns(4)
+                        a.metric("🟢 Strong Calls",len(calls))
+                        b.metric("🔴 Strong Puts",len(puts))
+                        c.metric("🟡 Selling",len(sellers))
+                        d.metric("🔵 Buying",len(buyers))
+
+                        st.subheader("📈 Next-Day Options Analysis")
+
+                        display_cols=[
+                            "Stock","Symbol","Close","Trend",
+                            "Call Score","Put Score","Selling Score",
+                            "Signal","Position","OI Trend","PCR",
+                            "Future OI Chg %","Fib Support Price",
+                            "Fib Resistance Price"
+                        ]
+                        display_cols=[
+                            c for c in display_cols
+                            if c in option_result.columns
+                        ]
+
+                        st.dataframe(
+                            option_result[display_cols],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        st.download_button(
+                            "⬇️ Download Next-Day Options Report",
+                            option_result.to_csv(index=False),
+                            "Options_Next_Day_Analysis.csv",
+                            "text/csv",
+                            key="options_download_independent"
+                        )
+
+                        st.subheader("⭐ Strong Candidates")
+
+                        top=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(30)
+
+                        top_cols=[
+                            "Stock","Symbol","Close","Call Score",
+                            "Put Score","Selling Score","Signal",
+                            "Trend","Position","OI Trend","PCR",
+                            "Fib Support Price","Fib Resistance Price"
+                        ]
+                        top_cols=[
+                            c for c in top_cols
+                            if c in top.columns
+                        ]
+
+                        st.dataframe(
+                            top[top_cols],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        st.info(
+                            "IV, option premium, bid/ask spread and "
+                            "strike-specific analysis are not included "
+                            "unless those fields are present in your CSV."
+                        )
+
+        except Exception as exc:
+            st.error(
+                f"Could not analyze the uploaded derivatives CSV: {exc}"
+            )
+
+
 elif module == "🏆 Minervini SEPA + VCP Scanner":
 
     st.header("🏆 Minervini SEPA + VCP Leadership Scanner")
@@ -10018,7 +10276,7 @@ elif module == "🏆 Minervini SEPA + VCP Scanner":
 
     if options_file is not None:
         try:
-            option_df,option_meta=_read_derivative_eod_csv(options_file)
+            option_df,option_meta=_read_options_eod_csv(options_file)
 
             if option_df.empty:
                 st.warning("The uploaded CSV contains no stock rows.")
