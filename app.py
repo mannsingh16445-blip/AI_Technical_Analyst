@@ -6642,6 +6642,369 @@ def generate_scanner_signal(
 
 
 # ============================================================
+# MINERVINI SEPA + VCP TECHNICAL SCANNER
+# ============================================================
+
+def _minervini_prepare(df):
+    """Prepare daily OHLCV data for the mechanical SEPA/VCP scan.
+
+    Fundamentals are deliberately NOT fabricated here. This module uses
+    the book-supported technical/price-volume portion of SEPA. Fundamental
+    fields are shown as unavailable until a reliable quarterly fundamentals
+    source is connected.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+
+    required=["Open","High","Low","Close","Volume"]
+    if any(c not in x.columns for c in required):
+        return pd.DataFrame()
+
+    x=x.dropna(subset=required).copy()
+    for c in required:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=required)
+
+    x["SMA50"]=x["Close"].rolling(50).mean()
+    x["SMA150"]=x["Close"].rolling(150).mean()
+    x["SMA200"]=x["Close"].rolling(200).mean()
+    x["VOL_SMA50"]=x["Volume"].rolling(50).mean()
+    x["HIGH_252"]=x["High"].rolling(252).max()
+    x["LOW_252"]=x["Low"].rolling(252).min()
+
+    x["RET_63"]=x["Close"].pct_change(63)
+    x["RET_126"]=x["Close"].pct_change(126)
+    x["RET_252"]=x["Close"].pct_change(252)
+
+    # Relative-strength line versus Nifty 50 is filled by the scanner when
+    # a benchmark series is available.
+    x["RS_LINE"]=np.nan
+    x["RS_LINE_20D_SLOPE"]=np.nan
+    x["RS_LINE_50D_SLOPE"]=np.nan
+
+    return x
+
+
+def _minervini_vcp_metrics(df, window_days=60):
+    """Mechanical approximation of successive VCP contractions.
+
+    The books describe progressively smaller contractions and declining
+    volume. The implementation uses four equal recent segments so the
+    result is deterministic and backtestable rather than subjective chart
+    drawing.
+    """
+    result={
+        "VCP Valid":False,
+        "VCP Score":0,
+        "Base Days":0,
+        "T1 %":np.nan,
+        "T2 %":np.nan,
+        "T3 %":np.nan,
+        "T4 %":np.nan,
+        "Volume T1":np.nan,
+        "Volume T2":np.nan,
+        "Volume T3":np.nan,
+        "Volume T4":np.nan,
+        "Final Tightness %":np.nan,
+        "Pivot":np.nan,
+        "Pivot Distance %":np.nan,
+        "VCP Reason":""
+    }
+
+    if df is None or len(df)<max(220,window_days):
+        result["VCP Reason"]="Insufficient history"
+        return result
+
+    x=df.tail(window_days).copy()
+    n=len(x)
+    seg=max(5,n//4)
+    chunks=[x.iloc[i*seg:(i+1)*seg] for i in range(3)]
+    chunks.append(x.iloc[3*seg:])
+    if any(len(c)<5 for c in chunks):
+        result["VCP Reason"]="Insufficient contraction segments"
+        return result
+
+    depths=[]
+    vols=[]
+    for c in chunks:
+        hi=float(c["High"].max())
+        lo=float(c["Low"].min())
+        depth=(hi-lo)/hi*100 if hi else np.nan
+        depths.append(depth)
+        vols.append(float(c["Volume"].mean()))
+
+    t1,t2,t3,t4=depths
+    v1,v2,v3,v4=vols
+    final_tight=t4
+
+    contraction_ok=bool(
+        np.isfinite(t1) and np.isfinite(t2) and np.isfinite(t3) and np.isfinite(t4)
+        and t1>t2>t3
+        and t4<=t3
+    )
+    strong_contraction=bool(
+        contraction_ok and t2<=0.80*t1 and t3<=0.80*t2
+    )
+    volume_contracting=bool(v1>v2>v3 and v4<=v3)
+    final_dryup=bool(v4<=0.70*v1)
+    tight=bool(final_tight<=8.0)
+    very_tight=bool(final_tight<=5.0)
+
+    pivot=float(chunks[-1]["High"].max())
+    close=float(x["Close"].iloc[-1])
+    pivot_distance=(close/pivot-1)*100 if pivot else np.nan
+
+    score=0
+    score += 8 if contraction_ok else 0
+    score += 4 if strong_contraction else 0
+    score += 5 if volume_contracting else 0
+    score += 3 if final_dryup else 0
+    score += 3 if very_tight else (2 if tight else 0)
+    score += 2 if -3<=pivot_distance<=3 else 0
+
+    valid=bool(contraction_ok and volume_contracting and tight)
+    reason=[]
+    if contraction_ok: reason.append("T1>T2>T3>T4")
+    if strong_contraction: reason.append("strong contraction")
+    if volume_contracting: reason.append("volume contracting")
+    if final_dryup: reason.append("final volume dry-up")
+    if very_tight: reason.append("final range <=5%")
+
+    result.update({
+        "VCP Valid":valid,
+        "VCP Score":min(25,score),
+        "Base Days":n,
+        "T1 %":t1,
+        "T2 %":t2,
+        "T3 %":t3,
+        "T4 %":t4,
+        "Volume T1":v1,
+        "Volume T2":v2,
+        "Volume T3":v3,
+        "Volume T4":v4,
+        "Final Tightness %":final_tight,
+        "Pivot":pivot,
+        "Pivot Distance %":pivot_distance,
+        "VCP Reason":", ".join(reason) if reason else "VCP not confirmed"
+    })
+    return result
+
+
+def _minervini_score_row(df, rs_rank, benchmark=None, window_days=60,
+                         min_volume_lakhs=5.0, breakout_volume_mult=1.20,
+                         chase_pct=3.0):
+    x=_minervini_prepare(df)
+    if x.empty or len(x)<252:
+        return None
+
+    # Benchmark-relative RS line.
+    if benchmark is not None and not benchmark.empty:
+        b=benchmark.copy()
+        if isinstance(b.columns,pd.MultiIndex):
+            b.columns=b.columns.get_level_values(0)
+        if "Close" in b.columns:
+            bclose=pd.to_numeric(b["Close"],errors="coerce").dropna()
+            aligned=bclose.reindex(x.index).ffill()
+            x["RS_LINE"]=x["Close"]/aligned
+            x["RS_LINE_20D_SLOPE"]=x["RS_LINE"]/x["RS_LINE"].shift(20)-1
+            x["RS_LINE_50D_SLOPE"]=x["RS_LINE"]/x["RS_LINE"].shift(50)-1
+
+    r=x.iloc[-1]
+    prev=x.iloc[-2]
+
+    # ----- Trend Template: hard gate -----
+    t1=bool(r["Close"]>r["SMA150"])
+    t2=bool(r["Close"]>r["SMA200"])
+    t3=bool(r["SMA150"]>r["SMA200"])
+    t4=bool(r["SMA200"]>x["SMA200"].iloc[-21])
+    t5=bool(r["SMA50"]>r["SMA150"] and r["SMA50"]>r["SMA200"])
+    t6=bool(r["Close"]>r["SMA50"])
+    t7=bool(r["Close"]>=1.30*r["LOW_252"])
+    t8=bool(r["Close"]>=0.75*r["HIGH_252"])
+    trend_pass=all([t1,t2,t3,t4,t5,t6,t7,t8])
+
+    # ----- RS / leadership -----
+    rs_rank=float(rs_rank) if pd.notna(rs_rank) else 0.0
+    rs_score=(
+        10 if rs_rank>=95 else
+        9 if rs_rank>=90 else
+        7 if rs_rank>=85 else
+        5 if rs_rank>=80 else
+        3 if rs_rank>=75 else
+        1 if rs_rank>=70 else 0
+    )
+    rs20=float(r.get("RS_LINE_20D_SLOPE",np.nan))
+    rs50=float(r.get("RS_LINE_50D_SLOPE",np.nan))
+    rsline_score=(2 if pd.notna(rs20) and rs20>0 else 0)+(2 if pd.notna(rs50) and rs50>0 else 0)
+    if pd.notna(r.get("RS_LINE",np.nan)) and pd.notna(x["RS_LINE"].tail(252).max()):
+        if r["RS_LINE"]>=x["RS_LINE"].tail(252).max()*0.98:
+            rsline_score+=1
+
+    dist_high=(1-r["Close"]/r["HIGH_252"])*100 if r["HIGH_252"] else np.nan
+    price_score=(5 if dist_high<=5 else 4 if dist_high<=10 else 3 if dist_high<=15 else 2 if dist_high<=20 else 1 if dist_high<=25 else 0)
+
+    # ----- VCP -----
+    vcp=_minervini_vcp_metrics(x,window_days)
+    vcp_score=int(vcp["VCP Score"])
+
+    # ----- Pivot / breakout -----
+    pivot=vcp["Pivot"]
+    close=float(r["Close"])
+    vol=float(r["Volume"])
+    vol50=float(r["VOL_SMA50"])
+    vol_ratio=vol/vol50 if vol50 and np.isfinite(vol50) else np.nan
+    breakout=bool(pd.notna(pivot) and close>pivot)
+    in_entry_zone=bool(pd.notna(pivot) and pivot>0 and close<=pivot*(1+chase_pct/100))
+    breakout_volume_score=(5 if pd.notna(vol_ratio) and vol_ratio>=2 else 4 if pd.notna(vol_ratio) and vol_ratio>=1.5 else 3 if pd.notna(vol_ratio) and vol_ratio>=1.2 else 1 if pd.notna(vol_ratio) and vol_ratio>=1 else 0)
+    pivot_quality=3 if pd.notna(pivot) and abs(close/pivot-1)<=0.03 else 2 if pd.notna(pivot) and abs(close/pivot-1)<=0.05 else 0
+    distance_score=5 if pd.notna(pivot) and 0<=close/pivot-1<=0.03 else 4 if pd.notna(pivot) and -0.03<=close/pivot-1<0 else 1 if pd.notna(pivot) else 0
+    pivot_score=min(15,pivot_quality+breakout_volume_score+distance_score)
+
+    # ----- Market/liquidity -----
+    liquidity_lakhs=(vol*close)/100000 if pd.notna(vol) else 0
+    liquidity_score=5 if liquidity_lakhs>=50 else 4 if liquidity_lakhs>=25 else 3 if liquidity_lakhs>=10 else 2 if liquidity_lakhs>=min_volume_lakhs else 0
+    market_score=5 if t4 and t2 else 3 if t2 else 0
+
+    # Technical 100-point implementation. Fundamental fields are kept out
+    # rather than inventing data; see UI note in the scanner.
+    total=int(min(100,25*int(trend_pass)+20+vcp_score+pivot_score+liquidity_score+market_score))
+    # Leadership contributes up to 20, but if trend is not passed the stock
+    # is rejected regardless of score.
+    leadership=min(20,rs_score+rsline_score+price_score)
+    total=int(min(100,25*int(trend_pass)+leadership+vcp_score+pivot_score+liquidity_score+market_score))
+
+    breakout_confirmed=bool(
+        trend_pass and vcp["VCP Valid"] and breakout and
+        pd.notna(vol_ratio) and vol_ratio>=breakout_volume_mult and
+        in_entry_zone
+    )
+    watch=bool(
+        trend_pass and vcp["VCP Valid"] and
+        pd.notna(pivot) and close<=pivot*(1+chase_pct/100)
+    )
+    if breakout_confirmed and total>=80:
+        status="🚀 BUY"
+    elif breakout and not in_entry_zone:
+        status="⚠️ BREAKOUT — DON'T CHASE"
+    elif watch and total>=70:
+        status="🟡 VCP WATCH"
+    elif trend_pass and total>=70:
+        status="🟢 SEPA QUALIFIED"
+    elif trend_pass:
+        status="🟠 TREND PASS — WEAK SETUP"
+    else:
+        status="🔴 REJECT"
+
+    return {
+        "Score":total,
+        "Trend Template":"PASS" if trend_pass else "FAIL",
+        "RS Rank":round(rs_rank,1),
+        "RS Line":"Rising" if pd.notna(rs20) and rs20>0 else "Weak/Flat",
+        "6M Return %":round(float(r["RET_126"])*100,2) if pd.notna(r["RET_126"]) else np.nan,
+        "12M Return %":round(float(r["RET_252"])*100,2) if pd.notna(r["RET_252"]) else np.nan,
+        "52W High Distance %":round(dist_high,2) if pd.notna(dist_high) else np.nan,
+        "VCP":"PASS" if vcp["VCP Valid"] else "FAIL",
+        "VCP Score":vcp_score,
+        "Contractions":f'{vcp["T1 %"]:.1f}% → {vcp["T2 %"]:.1f}% → {vcp["T3 %"]:.1f}% → {vcp["T4 %"]:.1f}%' if all(pd.notna(vcp[k]) for k in ["T1 %","T2 %","T3 %","T4 %"]) else "-",
+        "Final Tightness %":round(vcp["Final Tightness %"],2) if pd.notna(vcp["Final Tightness %"]) else np.nan,
+        "Pivot":round(pivot,2) if pd.notna(pivot) else np.nan,
+        "Pivot Distance %":round((close/pivot-1)*100,2) if pd.notna(pivot) and pivot else np.nan,
+        "Volume / SMA50":round(vol_ratio,2) if pd.notna(vol_ratio) else np.nan,
+        "Liquidity ₹L":round(liquidity_lakhs,1),
+        "Status":status,
+        "Close":round(close,2),
+        "Trend Score":25 if trend_pass else 0,
+        "Leadership Score":leadership,
+        "VCP Component":vcp_score,
+        "Pivot Component":pivot_score,
+        "Market/Liquidity":market_score+liquidity_score,
+        "VCP Detail":vcp["VCP Reason"],
+        "Breakout Confirmed":breakout_confirmed,
+        "Chase Warning":bool(breakout and not in_entry_zone),
+    }
+
+
+def run_minervini_scanner(market, benchmark=None, window_days=60,
+                          min_volume_lakhs=5.0, breakout_volume_mult=1.20,
+                          chase_pct=3.0):
+    """Run the technical SEPA/VCP scanner and compute universe RS ranks."""
+    prepared={}
+    momentum=[]
+    for symbol,raw in market.items():
+        x=_minervini_prepare(raw)
+        if x.empty or len(x)<252:
+            continue
+        momentum.append({
+            "Symbol":symbol,
+            "M3":x["RET_63"].iloc[-1],
+            "M6":x["RET_126"].iloc[-1],
+            "M12":x["RET_252"].iloc[-1]
+        })
+        prepared[symbol]=x
+
+    if not momentum:
+        return pd.DataFrame()
+
+    m=pd.DataFrame(momentum).set_index("Symbol")
+    p3=m["M3"].rank(pct=True)*100
+    p6=m["M6"].rank(pct=True)*100
+    p12=m["M12"].rank(pct=True)*100
+    m["RS_Rank"]=0.40*p3+0.35*p6+0.25*p12
+
+    rows=[]
+    for symbol,x in prepared.items():
+        try:
+            out=_minervini_score_row(
+                x,
+                m.loc[symbol,"RS_Rank"],
+                benchmark=benchmark,
+                window_days=window_days,
+                min_volume_lakhs=min_volume_lakhs,
+                breakout_volume_mult=breakout_volume_mult,
+                chase_pct=chase_pct
+            )
+            if out:
+                out["Stock"]=symbol
+                rows.append(out)
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    result=pd.DataFrame(rows)
+    order={"🚀 BUY":0,"🟡 VCP WATCH":1,"🟢 SEPA QUALIFIED":2,"⚠️ BREAKOUT — DON'T CHASE":3,"🟠 TREND PASS — WEAK SETUP":4,"🔴 REJECT":5}
+    result["_order"]=result["Status"].map(order).fillna(9)
+    result=result.sort_values(["_order","Score","RS Rank"],ascending=[True,False,False]).drop(columns=["_order"])
+    return result.reset_index(drop=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def download_nifty50_benchmark(period="2y"):
+    """Serial benchmark download; avoids thread-heavy calls on Streamlit Cloud."""
+    try:
+        d=yf.download(
+            tickers="^NSEI",
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False
+        )
+        if isinstance(d,pd.DataFrame) and not d.empty:
+            if isinstance(d.columns,pd.MultiIndex):
+                d.columns=d.columns.get_level_values(0)
+            return d
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 
@@ -6653,6 +7016,7 @@ module = st.sidebar.radio(
     "Select Module",
     [
         "🎯 CCI + EMA + RSI Strategy",
+        "🏆 Minervini SEPA + VCP Scanner",
         "🚀 Smart Breakout Scanner",
         "🎯 Buy / Sell Signal Engine",
         "📐 Chart Pattern Scanner",
@@ -8497,6 +8861,198 @@ elif module == "📐 Chart Pattern Scanner":
                 )
 
 
+
+
+# ============================================================
+# MINERVINI SEPA + VCP SCANNER MODULE
+# ============================================================
+
+elif module == "🏆 Minervini SEPA + VCP Scanner":
+
+    st.header("🏆 Minervini SEPA + VCP Leadership Scanner")
+
+    st.markdown(
+        """
+        **Mechanical technical implementation of the Minervini framework:**
+        Trend Template → Relative Strength → VCP/base quality → volume
+        contraction → pivot → breakout.
+
+        **Important:** the current app's market-data layer does not provide
+        reliable historical quarterly fundamentals. Therefore this version
+        does **not invent EPS/sales/margin values**. Fundamental SEPA scoring
+        is intentionally left out until a reliable fundamentals source is
+        connected. The scanner below is the technical/price-volume portion.
+        """
+    )
+
+    st.sidebar.subheader("🏆 Minervini SEPA + VCP Settings")
+
+    nse_stocks=load_nse_equity_universe()
+    nifty500=load_nifty500()
+    fno_stocks=load_fno_stocks()
+    nifty_midcap100=load_nifty_midcap100()
+    nifty_smallcap250=load_nifty_smallcap250()
+
+    universe=st.sidebar.selectbox(
+        "Stock Universe",
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="minervini_universe"
+    )
+
+    stocks=resolve_stock_universe(
+        universe,
+        nse_stocks,
+        nifty500,
+        fno_stocks,
+        nifty_midcap100,
+        nifty_smallcap250
+    )
+
+    period=st.sidebar.selectbox(
+        "Market Data Period",
+        ["1y","2y","3y","5y"],
+        index=2,
+        key="minervini_period"
+    )
+
+    vcp_window=st.sidebar.select_slider(
+        "VCP analysis window (days)",
+        options=[40,50,60,70,80,90],
+        value=60,
+        key="minervini_vcp_window"
+    )
+
+    breakout_volume_mult=st.sidebar.slider(
+        "Breakout volume / SMA50",
+        1.0,2.5,1.2,0.1,
+        key="minervini_breakout_volume"
+    )
+
+    chase_pct=st.sidebar.slider(
+        "Maximum distance above pivot (%)",
+        1.0,5.0,3.0,0.5,
+        key="minervini_chase_pct"
+    )
+
+    min_liquidity=st.sidebar.slider(
+        "Minimum daily traded value (₹ lakh)",
+        1.0,100.0,5.0,1.0,
+        key="minervini_liquidity"
+    )
+
+    st.sidebar.info(
+        "Trend Template is a hard gate. A BUY requires Trend PASS + "
+        "valid VCP + pivot breakout + volume confirmation + score ≥80 "
+        "and price within the no-chase zone."
+    )
+
+    run=st.button(
+        "🔎 RUN MINERVINI SEPA + VCP SCANNER",
+        type="primary",
+        key="minervini_run"
+    )
+
+    if run:
+        with st.spinner("Scanning Minervini Trend Template + VCP setups..."):
+            market=download_batches(stocks,period,50)
+            benchmark=download_nifty50_benchmark(period)
+            result=run_minervini_scanner(
+                market,
+                benchmark=benchmark,
+                window_days=vcp_window,
+                min_volume_lakhs=min_liquidity,
+                breakout_volume_mult=breakout_volume_mult,
+                chase_pct=chase_pct
+            )
+
+        if result.empty:
+            st.warning(
+                "No valid technical candidates could be calculated. "
+                "Try a longer data period or another universe."
+            )
+        else:
+            buys=result[result["Status"]=="🚀 BUY"]
+            watches=result[result["Status"]=="🟡 VCP WATCH"]
+            qualified=result[result["Status"]=="🟢 SEPA QUALIFIED"]
+
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("🚀 BUY",len(buys))
+            c2.metric("🟡 VCP WATCH",len(watches))
+            c3.metric("🟢 SEPA QUALIFIED",len(qualified))
+            c4.metric("Stocks Scanned",len(result))
+
+            st.subheader("🏆 Minervini Scanner Results")
+
+            display_cols=[
+                "Stock","Score","Trend Template","RS Rank","RS Line",
+                "6M Return %","12M Return %","52W High Distance %",
+                "VCP","VCP Score","Contractions","Final Tightness %",
+                "Pivot","Pivot Distance %","Volume / SMA50",
+                "Liquidity ₹L","Status"
+            ]
+            display_cols=[c for c in display_cols if c in result.columns]
+
+            st.dataframe(
+                result[display_cols],
+                width="stretch",
+                hide_index=True
+            )
+
+            st.download_button(
+                "⬇️ Download Minervini Results",
+                result.to_csv(index=False),
+                "Minervini_SEPA_VCP_Scanner.csv",
+                "text/csv"
+            )
+
+            st.subheader("📌 Signal Logic")
+            st.markdown(
+                """
+                **🚀 BUY:** Trend Template PASS + valid VCP + price above pivot + """
+                f"breakout volume ≥ {breakout_volume_mult:.1f}× SMA50 + price no more than {chase_pct:.1f}% above pivot + score ≥80."
+                """
+                **🟡 VCP WATCH:** Trend Template PASS + valid VCP + waiting for a clean pivot breakout.
+
+                **🟢 SEPA QUALIFIED:** Trend Template PASS and technical leadership score ≥70, but VCP/breakout confirmation is incomplete.
+
+                **⚠️ BREAKOUT — DON'T CHASE:** price has broken the pivot but is already beyond the configured chase zone.
+                """
+            )
+
+            st.subheader("📖 Technical Score Breakdown")
+            st.caption(
+                "Technical 100-point implementation used by this module: "
+                "Trend Template 25 + RS/Leadership 20 + VCP 25 + Pivot/Breakout 15 + "
+                "Market/Liquidity 15. Fundamental points are not fabricated."
+            )
+
+            selected=st.selectbox(
+                "Inspect a stock",
+                result["Stock"].tolist(),
+                key="minervini_inspect_stock"
+            )
+            row=result[result["Stock"]==selected].iloc[0]
+
+            a,b,c,d,e=st.columns(5)
+            a.metric("Score",f'{row["Score"]:.0f}/100')
+            b.metric("RS Rank",f'{row["RS Rank"]:.1f}')
+            c.metric("VCP",row["VCP"])
+            d.metric("Pivot",f'₹{row["Pivot"]:.2f}' if pd.notna(row["Pivot"]) else "-")
+            e.metric("Status",row["Status"])
+
+            st.write(
+                f"**Contractions:** {row['Contractions']}  |  "
+                f"**Final tightness:** {row['Final Tightness %']}%  |  "
+                f"**Volume/SMA50:** {row['Volume / SMA50']}×  |  "
+                f"**Pivot distance:** {row['Pivot Distance %']}%"
+            )
 
 # ============================================================
 # CCI + EMA9/21/200 + RSI9/WMA21 STRATEGY MODULE
