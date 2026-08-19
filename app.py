@@ -8161,6 +8161,210 @@ def _options_phase1_rr(direction, entry, sl, t1, t2):
     return np.nan,np.nan
 
 
+
+# ============================================================
+# OPTIONS PHASE 2: BOLLINGER BANDS + ADX + ATR
+# ============================================================
+
+def _options_bollinger_bands(df, period=20, std_mult=2.0):
+    close=pd.to_numeric(df["Close"],errors="coerce")
+    mid=close.rolling(period,min_periods=period).mean()
+    std=close.rolling(period,min_periods=period).std(ddof=0)
+    upper=mid+(std_mult*std)
+    lower=mid-(std_mult*std)
+    width=(upper-lower)/mid.replace(0,np.nan)
+    percent_b=(close-lower)/(upper-lower).replace(0,np.nan)
+    return mid,upper,lower,width,percent_b
+
+
+def _options_adx(df, period=14):
+    high=pd.to_numeric(df["High"],errors="coerce")
+    low=pd.to_numeric(df["Low"],errors="coerce")
+    close=pd.to_numeric(df["Close"],errors="coerce")
+
+    up_move=high.diff()
+    down_move=-low.diff()
+
+    plus_dm=up_move.where(
+        (up_move>down_move)&(up_move>0),0.0
+    )
+    minus_dm=down_move.where(
+        (down_move>up_move)&(down_move>0),0.0
+    )
+
+    prev_close=close.shift(1)
+    tr=pd.concat([
+        high-low,
+        (high-prev_close).abs(),
+        (low-prev_close).abs()
+    ],axis=1).max(axis=1)
+
+    atr=tr.ewm(
+        alpha=1/period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+    plus_di=100*plus_dm.ewm(
+        alpha=1/period,adjust=False,min_periods=period
+    ).mean()/atr.replace(0,np.nan)
+
+    minus_di=100*minus_dm.ewm(
+        alpha=1/period,adjust=False,min_periods=period
+    ).mean()/atr.replace(0,np.nan)
+
+    dx=100*(plus_di-minus_di).abs()/(plus_di+minus_di).replace(0,np.nan)
+
+    adx=dx.ewm(
+        alpha=1/period,adjust=False,min_periods=period
+    ).mean()
+
+    return adx,plus_di,minus_di
+
+
+def _options_phase2_snapshot(df):
+    """Calculate BB(20,2), ADX(14), +DI/-DI and ATR(14)."""
+    if df is None or df.empty:
+        return {}
+
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+
+    required=["High","Low","Close"]
+    if any(c not in x.columns for c in required):
+        return {}
+
+    x=x.dropna(subset=required).copy()
+    if len(x)<60:
+        return {}
+
+    for c in required:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+
+    mid,upper,lower,width,pctb=_options_bollinger_bands(x,20,2.0)
+    adx,plus_di,minus_di=_options_adx(x,14)
+
+    # ATR is calculated with the same Wilder-style smoothing used
+    # in the existing independent Options Analyzer.
+    atr=_options_atr(x,14)
+
+    r=x.iloc[-1]
+    prev=x.iloc[-2]
+
+    vals={
+        "BB Middle":float(mid.iloc[-1]),
+        "BB Upper":float(upper.iloc[-1]),
+        "BB Lower":float(lower.iloc[-1]),
+        "BB Width":float(width.iloc[-1]),
+        "BB %B":float(pctb.iloc[-1]),
+        "BB Width 20D Percentile":float(
+            width.tail(120).rank(pct=True).iloc[-1]*100
+        ),
+        "ADX14":float(adx.iloc[-1]),
+        "+DI14":float(plus_di.iloc[-1]),
+        "-DI14":float(minus_di.iloc[-1]),
+        "ATR14":float(atr.iloc[-1]),
+        "ATR %":float(
+            atr.iloc[-1]/r["Close"]*100
+        ) if float(r["Close"]) else np.nan,
+        "BB Expansion":bool(
+            np.isfinite(width.iloc[-1])
+            and np.isfinite(width.iloc[-2])
+            and width.iloc[-1]>width.iloc[-2]
+        ),
+        "BB Squeeze":bool(
+            np.isfinite(width.iloc[-1])
+            and width.iloc[-1]<=
+            width.tail(120).quantile(0.20)
+        ),
+        "ADX Rising":bool(
+            np.isfinite(adx.iloc[-1])
+            and np.isfinite(adx.iloc[-2])
+            and adx.iloc[-1]>adx.iloc[-2]
+        ),
+        "DI Bullish":bool(plus_di.iloc[-1]>minus_di.iloc[-1]),
+        "DI Bearish":bool(minus_di.iloc[-1]>plus_di.iloc[-1])
+    }
+
+    close=float(r["Close"])
+
+    if close>vals["BB Upper"]:
+        bb_state="Upper Band Breakout"
+    elif close<vals["BB Lower"]:
+        bb_state="Lower Band Breakdown"
+    elif close>vals["BB Middle"]:
+        bb_state="Above BB Midline"
+    else:
+        bb_state="Below BB Midline"
+
+    if vals["BB Squeeze"] and vals["BB Expansion"]:
+        bb_state+=" + Squeeze Release"
+
+    if vals["ADX14"]>=25 and vals["ADX Rising"]:
+        adx_state="Strongening Trend"
+    elif vals["ADX14"]>=25:
+        adx_state="Strong Trend"
+    elif vals["ADX14"]>=20 and vals["ADX Rising"]:
+        adx_state="Developing Trend"
+    else:
+        adx_state="Weak / Range"
+
+    vals["BB State"]=bb_state
+    vals["ADX State"]=adx_state
+
+    # Phase-2 confluence points are kept separate from the original score.
+    bullish=0
+    bearish=0
+    selling=0
+
+    if close>vals["BB Middle"]:
+        bullish+=4
+    if close<vals["BB Middle"]:
+        bearish+=4
+    if close>=vals["BB Upper"]:
+        bullish+=5
+    if close<=vals["BB Lower"]:
+        bearish+=5
+
+    if vals["BB Expansion"]:
+        if close>vals["BB Middle"]:
+            bullish+=3
+        elif close<vals["BB Middle"]:
+            bearish+=3
+
+    if vals["BB Squeeze"]:
+        selling+=5
+        if vals["BB Expansion"]:
+            if close>vals["BB Middle"]:
+                bullish+=3
+            elif close<vals["BB Middle"]:
+                bearish+=3
+
+    if vals["ADX14"]>=25:
+        if vals["DI Bullish"]:
+            bullish+=5
+        elif vals["DI Bearish"]:
+            bearish+=5
+    elif vals["ADX14"]>=20 and vals["ADX Rising"]:
+        if vals["DI Bullish"]:
+            bullish+=3
+        elif vals["DI Bearish"]:
+            bearish+=3
+    else:
+        selling+=5
+
+    if vals["ADX14"]<20:
+        selling+=5
+
+    return {
+        **vals,
+        "BB Bullish Points":min(15,bullish),
+        "BB Bearish Points":min(15,bearish),
+        "BB/ADX Selling Points":min(15,selling)
+    }
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -10119,6 +10323,62 @@ elif module == "📊 Options Next-Day Analyzer":
                             options_fib_lookback
                         )
 
+                        # Phase 2: Bollinger Bands + ADX + ATR.
+                        phase2_rows=[]
+                        for _, _orow in option_result.iterrows():
+                            _sym=str(_orow["Symbol"]).strip().upper()
+                            _snap=_options_phase2_snapshot(
+                                options_market.get(_sym)
+                            )
+                            phase2_rows.append(_snap)
+
+                        phase2_df=pd.DataFrame(phase2_rows)
+
+                        if not phase2_df.empty:
+                            for _col in phase2_df.columns:
+                                option_result[_col]=phase2_df[_col].values
+
+                            # Keep the original score intact and create
+                            # a separate Phase-2 technical confluence score.
+                            option_result["Technical Confluence Score"]=(
+                                option_result["BB Bullish Points"].fillna(0)
+                                +option_result["BB Bearish Points"].fillna(0)
+                                +option_result["BB/ADX Selling Points"].fillna(0)
+                            )
+
+                            # Directional confirmation: only reward BB/ADX
+                            # points that agree with the existing signal.
+                            option_result["Phase 2 Bullish Confirm"]=(
+                                option_result["BB Bullish Points"].fillna(0)
+                            )
+                            option_result["Phase 2 Bearish Confirm"]=(
+                                option_result["BB Bearish Points"].fillna(0)
+                            )
+                            option_result["Phase 2 Selling Confirm"]=(
+                                option_result["BB/ADX Selling Points"].fillna(0)
+                            )
+
+                            # Add Phase-2 points to the relevant score with
+                            # a conservative cap. This avoids letting one
+                            # indicator dominate the original OI/Fib model.
+                            option_result["Call Score"]=np.minimum(
+                                100,
+                                option_result["Call Score"].astype(float)
+                                +option_result["Phase 2 Bullish Confirm"].astype(float)
+                            ).round(1)
+
+                            option_result["Put Score"]=np.minimum(
+                                100,
+                                option_result["Put Score"].astype(float)
+                                +option_result["Phase 2 Bearish Confirm"].astype(float)
+                            ).round(1)
+
+                            option_result["Selling Score"]=np.minimum(
+                                100,
+                                option_result["Selling Score"].astype(float)
+                                +option_result["Phase 2 Selling Confirm"].astype(float)
+                            ).round(1)
+
                         # Phase 1: explain the signal and build
                         # underlying-based entry/SL/target levels.
                         plan_df=pd.DataFrame(
@@ -10225,6 +10485,47 @@ elif module == "📊 Options Next-Day Analyzer":
                             width="stretch",
                             hide_index=True
                         )
+
+                        st.subheader("📐 Bollinger + ADX + ATR Analysis")
+
+                        if not explanation_pool.empty:
+                            _bb_row=explanation_pool.iloc[0]
+
+                            bc1,bc2,bc3,bc4,bc5=st.columns(5)
+                            bc1.metric(
+                                "BB State",
+                                str(_bb_row.get("BB State","N/A"))
+                            )
+                            bc2.metric(
+                                "BB Width",
+                                f'{float(_bb_row.get("BB Width",np.nan)):.4f}'
+                                if np.isfinite(float(_bb_row.get("BB Width",np.nan)))
+                                else "N/A"
+                            )
+                            bc3.metric(
+                                "ADX(14)",
+                                f'{float(_bb_row.get("ADX14",np.nan)):.1f}'
+                                if np.isfinite(float(_bb_row.get("ADX14",np.nan)))
+                                else "N/A"
+                            )
+                            bc4.metric(
+                                "ATR(14)",
+                                f'{float(_bb_row.get("ATR14",np.nan)):.2f}'
+                                if np.isfinite(float(_bb_row.get("ATR14",np.nan)))
+                                else "N/A"
+                            )
+                            bc5.metric(
+                                "ATR %",
+                                f'{float(_bb_row.get("ATR %",np.nan)):.2f}%'
+                                if np.isfinite(float(_bb_row.get("ATR %",np.nan)))
+                                else "N/A"
+                            )
+
+                            st.caption(
+                                "Phase 2 adds Bollinger Band state, ADX trend "
+                                "strength and ATR volatility confirmation to "
+                                "the existing derivatives + Fibonacci model."
+                            )
 
                         st.subheader("🔎 Why This Signal?")
 
