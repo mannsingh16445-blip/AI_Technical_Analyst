@@ -8054,6 +8054,113 @@ def run_options_next_day_analysis(option_df, market_data,
 
 
 
+
+# ============================================================
+# OPTIONS PHASE 1 HELPERS
+# ============================================================
+
+def _options_phase1_plan(row):
+    close=float(row.get("Close", np.nan))
+    atr=float(row.get("ATR14", np.nan))
+    support=float(row.get("Fib Support Price", np.nan))
+    resistance=float(row.get("Fib Resistance Price", np.nan))
+    call=float(row.get("Call Score",0) or 0)
+    put=float(row.get("Put Score",0) or 0)
+    sell=float(row.get("Selling Score",0) or 0)
+    trend=str(row.get("Trend",""))
+    position=str(row.get("Position",""))
+    pcr=float(row.get("PCR",np.nan))
+    pcrchg=float(row.get("PCR Chg 1D",np.nan))
+    volume=float(row.get("Volume x",np.nan))
+    delivery=float(row.get("Delivery x",np.nan))
+    oi_trend=str(row.get("OI Trend",""))
+
+    reasons=[]
+
+    if call>=put and call>=sell and call>=65:
+        direction="CALL"
+        preferred="ATM / nearest 1-step ITM CE"
+        trigger=close+(0.20*atr if np.isfinite(atr) and atr>0 else close*0.005)
+        invalidation=support if np.isfinite(support) and support>0 else close-(atr if np.isfinite(atr) and atr>0 else close*0.02)
+        target1=resistance if np.isfinite(resistance) and resistance>trigger else close+(atr if np.isfinite(atr) and atr>0 else close*0.02)
+        target2=target1+(atr if np.isfinite(atr) and atr>0 else close*0.02)
+
+        if trend=="Bullish": reasons.append(("Bullish trend structure",15))
+        if position in ("Long Buildup","Short Covering"): reasons.append((position,15))
+        if "AggressiveNewLong" in oi_trend: reasons.append(("Aggressive new long",5))
+        if np.isfinite(pcr) and pcr>=1.10: reasons.append(("PCR bullish (>1.10)",8))
+        elif np.isfinite(pcr) and pcr>=0.90: reasons.append(("PCR supportive",4))
+        if np.isfinite(pcrchg) and pcrchg>0: reasons.append(("PCR improving",min(5,round(abs(pcrchg)*100,1))))
+        if np.isfinite(support) and close>support: reasons.append(("Price above Fib support",7))
+        if np.isfinite(volume) and volume>=1.5: reasons.append(("Strong volume participation",5))
+        if np.isfinite(delivery) and delivery>=1.5: reasons.append(("Strong delivery participation",3))
+
+    elif put>call and put>=sell and put>=65:
+        direction="PUT"
+        preferred="ATM / nearest 1-step ITM PE"
+        trigger=close-(0.20*atr if np.isfinite(atr) and atr>0 else close*0.005)
+        invalidation=resistance if np.isfinite(resistance) and resistance>0 else close+(atr if np.isfinite(atr) and atr>0 else close*0.02)
+        target1=support if np.isfinite(support) and support<trigger else close-(atr if np.isfinite(atr) and atr>0 else close*0.02)
+        target2=target1-(atr if np.isfinite(atr) and atr>0 else close*0.02)
+
+        if trend=="Bearish": reasons.append(("Bearish trend structure",15))
+        if position in ("Short Buildup","Long Unwinding"): reasons.append((position,15))
+        if "AggressiveNewShort" in oi_trend: reasons.append(("Aggressive new short",5))
+        if np.isfinite(pcr) and pcr<=0.70: reasons.append(("PCR bearish (<0.70)",8))
+        elif np.isfinite(pcr) and pcr<=0.90: reasons.append(("PCR bearish",4))
+        if np.isfinite(pcrchg) and pcrchg<0: reasons.append(("PCR declining",min(5,round(abs(pcrchg)*100,1))))
+        if np.isfinite(resistance) and close<resistance: reasons.append(("Price below Fib resistance",7))
+        if np.isfinite(volume) and volume>=1.5: reasons.append(("Strong volume participation",5))
+        if np.isfinite(delivery) and delivery>=1.5: reasons.append(("Strong delivery participation",3))
+
+    else:
+        direction="WAIT"
+        preferred="No contract until directional confirmation"
+        trigger=invalidation=target1=target2=np.nan
+        reasons.append(("Directional scores not sufficiently separated",10))
+
+    seen=set()
+    clean=[]
+    for reason,points in reasons:
+        if reason not in seen:
+            clean.append((reason,float(points)))
+            seen.add(reason)
+
+    return {
+        "Direction":direction,
+        "Preferred Contract":preferred,
+        "Underlying Trigger":trigger,
+        "Underlying Invalidation":invalidation,
+        "Underlying Target 1":target1,
+        "Underlying Target 2":target2,
+        "Why Signal":" | ".join(r for r,_ in clean),
+        "Explanation Points":round(sum(p for _,p in clean),1)
+    }
+
+
+def _options_phase1_contract_note(direction):
+    if direction=="CALL":
+        return "Prefer ATM or nearest 1-step ITM CE. Avoid far OTM contracts because premium/IV are unavailable."
+    if direction=="PUT":
+        return "Prefer ATM or nearest 1-step ITM PE. Avoid far OTM contracts because premium/IV are unavailable."
+    return "Wait for directional confirmation before selecting an option contract."
+
+
+def _options_phase1_rr(direction, entry, sl, t1, t2):
+    vals=[entry,sl,t1,t2]
+    if not all(np.isfinite(v) for v in vals):
+        return np.nan,np.nan
+    if direction=="CALL":
+        risk=entry-sl
+        return ((t1-entry)/risk if risk>0 else np.nan,
+                (t2-entry)/risk if risk>0 else np.nan)
+    if direction=="PUT":
+        risk=sl-entry
+        return ((entry-t1)/risk if risk>0 else np.nan,
+                (entry-t2)/risk if risk>0 else np.nan)
+    return np.nan,np.nan
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -10012,6 +10119,32 @@ elif module == "📊 Options Next-Day Analyzer":
                             options_fib_lookback
                         )
 
+                        # Phase 1: explain the signal and build
+                        # underlying-based entry/SL/target levels.
+                        plan_df=pd.DataFrame(
+                            option_result.apply(
+                                _options_phase1_plan, axis=1
+                            ).tolist()
+                        )
+                        for col in plan_df.columns:
+                            option_result[col]=plan_df[col].values
+
+                        rr=option_result.apply(
+                            lambda r: _options_phase1_rr(
+                                r["Direction"],
+                                r["Underlying Trigger"],
+                                r["Underlying Invalidation"],
+                                r["Underlying Target 1"],
+                                r["Underlying Target 2"]
+                            ),
+                            axis=1
+                        )
+                        option_result["RR Target 1"]=[x[0] for x in rr]
+                        option_result["RR Target 2"]=[x[1] for x in rr]
+                        option_result["Contract Guidance"]=option_result[
+                            "Direction"
+                        ].map(_options_phase1_contract_note)
+
                     if option_result.empty:
                         st.warning(
                             "No candidates could be calculated. "
@@ -10092,6 +10225,65 @@ elif module == "📊 Options Next-Day Analyzer":
                             width="stretch",
                             hide_index=True
                         )
+
+                        st.subheader("🔎 Why This Signal?")
+
+                        explanation_pool=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(20)
+
+                        if not explanation_pool.empty:
+                            selected_symbol=st.selectbox(
+                                "Select candidate",
+                                explanation_pool["Symbol"].tolist(),
+                                key="options_phase1_candidate"
+                            )
+                            selected=explanation_pool[
+                                explanation_pool["Symbol"]==selected_symbol
+                            ].iloc[0]
+
+                            e1,e2,e3,e4=st.columns(4)
+                            e1.metric("Signal",selected["Signal"])
+                            e2.metric("Call Score",f'{selected["Call Score"]:.1f}')
+                            e3.metric("Put Score",f'{selected["Put Score"]:.1f}')
+                            e4.metric("Selling Score",f'{selected["Selling Score"]:.1f}')
+
+                            st.markdown("**Contributing factors**")
+                            for reason in str(selected["Why Signal"]).split(" | "):
+                                if reason:
+                                    st.write("• "+reason)
+
+                            p1,p2=st.columns(2)
+                            with p1:
+                                st.markdown("**Next-day plan**")
+                                st.write(f'**Direction:** {selected["Direction"]}')
+                                st.write(f'**Preferred:** {selected["Preferred Contract"]}')
+                                if np.isfinite(selected["Underlying Trigger"]):
+                                    st.write(f'**Trigger:** {selected["Underlying Trigger"]:.2f}')
+                                    st.write(f'**Invalidation / SL:** {selected["Underlying Invalidation"]:.2f}')
+                            with p2:
+                                st.markdown("**Targets**")
+                                if np.isfinite(selected["Underlying Target 1"]):
+                                    st.write(f'**Target 1:** {selected["Underlying Target 1"]:.2f}')
+                                if np.isfinite(selected["Underlying Target 2"]):
+                                    st.write(f'**Target 2:** {selected["Underlying Target 2"]:.2f}')
+                                if np.isfinite(selected["RR Target 1"]):
+                                    st.write(f'**R:R to T1:** {selected["RR Target 1"]:.2f}')
+                                if np.isfinite(selected["RR Target 2"]):
+                                    st.write(f'**R:R to T2:** {selected["RR Target 2"]:.2f}')
+
+                            st.caption(selected["Contract Guidance"])
+                            st.warning(
+                                "Phase 1 uses underlying-stock levels. "
+                                "It does not invent option premiums or IV. "
+                                "Use the underlying trigger/invalidation to manage "
+                                "the selected ATM/near-ITM option."
+                            )
 
                         st.download_button(
                             "⬇️ Download Next-Day Options Report",
