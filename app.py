@@ -6983,6 +6983,487 @@ def run_minervini_scanner(market, benchmark=None, window_days=60,
     return result.reset_index(drop=True)
 
 
+
+def _minervini_historical_snapshot(
+    prepared,
+    benchmark,
+    asof,
+    window_days,
+    min_volume_lakhs,
+    breakout_volume_mult,
+    chase_pct
+):
+    """
+    Evaluate the EXACT same Minervini technical scanner rules
+    using data available only through `asof`.
+
+    This prevents look-ahead: the scanner never sees future bars.
+    """
+    rows=[]
+
+    # Universe-relative RS must also be historical.
+    momentum={}
+    for symbol,x in prepared.items():
+        if asof not in x.index:
+            continue
+        hist=x.loc[:asof]
+        if len(hist)<252:
+            continue
+        r=hist.iloc[-1]
+        if all(pd.notna(r.get(k,np.nan)) for k in
+               ["RET_63","RET_126","RET_252"]):
+            momentum[symbol]={
+                "M3":float(r["RET_63"]),
+                "M6":float(r["RET_126"]),
+                "M12":float(r["RET_252"])
+            }
+
+    if not momentum:
+        return pd.DataFrame()
+
+    m=pd.DataFrame(momentum).T
+    rs_rank=(
+        0.40*m["M3"].rank(pct=True)*100
+        +0.35*m["M6"].rank(pct=True)*100
+        +0.25*m["M12"].rank(pct=True)*100
+    )
+
+    for symbol in m.index:
+        hist=prepared[symbol].loc[:asof]
+        try:
+            bench_hist=(
+                benchmark.loc[:asof]
+                if benchmark is not None and not benchmark.empty
+                else benchmark
+            )
+            out=_minervini_score_row(
+                hist,
+                rs_rank.loc[symbol],
+                benchmark=bench_hist,
+                window_days=window_days,
+                min_volume_lakhs=min_volume_lakhs,
+                breakout_volume_mult=breakout_volume_mult,
+                chase_pct=chase_pct
+            )
+            if out:
+                out["Stock"]=symbol
+                rows.append(out)
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    result=pd.DataFrame(rows)
+    return result
+
+
+def backtest_minervini_sepa_vcp(
+    market,
+    benchmark=None,
+    window_days=60,
+    min_volume_lakhs=5.0,
+    breakout_volume_mult=1.20,
+    chase_pct=3.0,
+    stop_loss_pct=8.0,
+    max_holding_days=60,
+    starting_capital=1000000.0,
+    max_positions=10,
+    position_risk_pct=1.0
+):
+    """
+    Historical Minervini SEPA/VCP backtest.
+
+    ENTRY:
+      The same scanner BUY rules are evaluated on each completed
+      daily bar. When a BUY signal appears, the position is entered
+      at the NEXT day's open. This avoids look-ahead bias.
+
+    EXIT:
+      1) 8% (configurable) hard stop, reflecting the book's
+         risk-control philosophy.
+      2) Breakout failure: after entry, a daily close below the
+         breakout pivot.
+      3) If the trade is profitable, a close below the 50-day SMA
+         is treated as a trend-failure exit.
+      4) Maximum holding period.
+
+    If stop and another exit are both possible on the same bar,
+    the stop is assumed first (conservative).
+
+    Position sizing:
+      risk-based sizing using position_risk_pct of current equity,
+      capped by equal-capital allocation across max_positions.
+    """
+
+    prepared={}
+    for symbol,raw in market.items():
+        try:
+            x=_minervini_prepare(raw)
+            if len(x)>=252:
+                prepared[symbol]=x
+        except Exception:
+            continue
+
+    if not prepared:
+        return {
+            "trades":[],
+            "equity":pd.DataFrame(),
+            "summary":{}
+        }
+
+    # Build a common daily calendar from the prepared data.
+    all_dates=sorted(
+        set().union(
+            *[set(x.index) for x in prepared.values()]
+        )
+    )
+
+    if len(all_dates)<253:
+        return {
+            "trades":[],
+            "equity":pd.DataFrame(),
+            "summary":{}
+        }
+
+    equity=float(starting_capital)
+    cash=equity
+    open_positions={}
+    trades=[]
+    equity_rows=[]
+
+    # Cache scanner snapshots by date.
+    snapshot_cache={}
+
+    def get_snapshot(dt):
+        key=pd.Timestamp(dt)
+        if key not in snapshot_cache:
+            snapshot_cache[key]=_minervini_historical_snapshot(
+                prepared,
+                benchmark,
+                key,
+                window_days,
+                min_volume_lakhs,
+                breakout_volume_mult,
+                chase_pct
+            )
+        return snapshot_cache[key]
+
+    # Only dates for which all relevant lookback data can exist.
+    dates=all_dates
+
+    for i,dt in enumerate(dates[:-1]):
+
+        dt=pd.Timestamp(dt)
+        next_dt=pd.Timestamp(dates[i+1])
+
+        # ----------------------------------------------------
+        # EXIT OPEN POSITIONS USING TODAY'S COMPLETED BAR
+        # ----------------------------------------------------
+        for symbol in list(open_positions.keys()):
+
+            pos=open_positions[symbol]
+            x=prepared[symbol]
+
+            if dt not in x.index:
+                continue
+
+            r=x.loc[dt]
+            close=float(r["Close"])
+            low=float(r["Low"])
+            high=float(r["High"])
+
+            entry=float(pos["entry"])
+            shares=int(pos["shares"])
+            stop=float(pos["stop"])
+            pivot=float(pos["pivot"])
+            held=int(
+                (dt-pos["entry_date"]).days
+            )
+
+            exit_price=None
+            reason=None
+
+            # Conservative stop-first assumption.
+            if low<=stop:
+                exit_price=stop
+                reason="8% Risk Stop"
+            elif close<pivot:
+                exit_price=close
+                reason="Failed Breakout"
+            elif (
+                close>entry
+                and pd.notna(r.get("SMA50",np.nan))
+                and close<float(r["SMA50"])
+            ):
+                exit_price=close
+                reason="50 SMA Trend Failure"
+            elif held>=max_holding_days:
+                exit_price=close
+                reason="Maximum Holding Period"
+
+            if exit_price is not None:
+
+                proceeds=shares*exit_price
+                pnl=shares*(exit_price-entry)
+                pnl_pct=(exit_price/entry-1)*100
+
+                cash+=proceeds
+
+                trades.append({
+                    "Stock":symbol,
+                    "Entry Date":pos["entry_date"],
+                    "Exit Date":dt,
+                    "Entry":round(entry,2),
+                    "Exit":round(exit_price,2),
+                    "Shares":shares,
+                    "Pivot":round(pivot,2),
+                    "Stop":round(stop,2),
+                    "PnL":round(pnl,2),
+                    "Return %":round(pnl_pct,2),
+                    "Holding Days":held,
+                    "Score":pos["score"],
+                    "RS Rank":pos["rs_rank"],
+                    "VCP Score":pos["vcp_score"],
+                    "Exit Reason":reason
+                })
+
+                del open_positions[symbol]
+
+        # ----------------------------------------------------
+        # MARK-TO-MARKET EQUITY
+        # ----------------------------------------------------
+        mtm=cash
+
+        for symbol,pos in open_positions.items():
+            x=prepared[symbol]
+            if dt in x.index:
+                mtm+=pos["shares"]*float(x.loc[dt,"Close"])
+
+        equity=mtm
+        equity_rows.append({
+            "Date":dt,
+            "Equity":equity,
+            "Open Positions":len(open_positions)
+        })
+
+        # ----------------------------------------------------
+        # HISTORICAL SCANNER SIGNAL
+        # ----------------------------------------------------
+        snapshot=get_snapshot(dt)
+
+        if snapshot.empty:
+            continue
+
+        buys=snapshot[
+            snapshot["Status"]=="🚀 BUY"
+        ].copy()
+
+        if buys.empty:
+            continue
+
+        # Do not buy stocks already held.
+        buys=buys[
+            ~buys["Stock"].isin(open_positions.keys())
+        ]
+
+        if buys.empty:
+            continue
+
+        # Strongest signals first.
+        buys=buys.sort_values(
+            ["Score","RS Rank","VCP Score"],
+            ascending=False
+        )
+
+        available_slots=max(
+            0,
+            int(max_positions)-len(open_positions)
+        )
+
+        if available_slots<=0:
+            continue
+
+        for _,sig in buys.head(available_slots).iterrows():
+
+            symbol=sig["Stock"]
+
+            if symbol not in prepared:
+                continue
+
+            x=prepared[symbol]
+
+            if next_dt not in x.index:
+                continue
+
+            next_bar=x.loc[next_dt]
+            entry=float(next_bar["Open"])
+
+            if not np.isfinite(entry) or entry<=0:
+                continue
+
+            pivot=float(sig["Pivot"])
+
+            # Signal was generated at today's close, so the next
+            # day's open can gap above the configured chase zone.
+            # We still use the scanner's exact signal; we do not
+            # invent a new signal after the gap.
+            stop=entry*(1-stop_loss_pct/100)
+
+            # Risk-based position size.
+            risk_amount=equity*(position_risk_pct/100)
+            risk_per_share=entry-stop
+            risk_shares=(
+                int(risk_amount/risk_per_share)
+                if risk_per_share>0 else 0
+            )
+
+            capital_limit=equity/max(
+                1,
+                int(max_positions)
+            )
+            capital_shares=int(
+                capital_limit/entry
+            )
+
+            shares=max(
+                0,
+                min(risk_shares,capital_shares)
+            )
+
+            if shares<=0:
+                continue
+
+            cost=shares*entry
+
+            if cost>cash:
+                shares=int(cash/entry)
+
+            if shares<=0:
+                continue
+
+            cash-=shares*entry
+
+            open_positions[symbol]={
+                "entry_date":next_dt,
+                "entry":entry,
+                "shares":shares,
+                "stop":stop,
+                "pivot":pivot,
+                "score":float(sig["Score"]),
+                "rs_rank":float(sig["RS Rank"]),
+                "vcp_score":float(sig["VCP Score"])
+            }
+
+    # Close remaining positions on final available bar.
+    final_dt=pd.Timestamp(dates[-1])
+
+    for symbol,pos in list(open_positions.items()):
+
+        x=prepared[symbol]
+
+        if final_dt not in x.index:
+            continue
+
+        exit_price=float(x.loc[final_dt,"Close"])
+        shares=int(pos["shares"])
+
+        cash+=shares*exit_price
+
+        pnl=shares*(exit_price-pos["entry"])
+        pnl_pct=(exit_price/pos["entry"]-1)*100
+
+        held=int(
+            (final_dt-pos["entry_date"]).days
+        )
+
+        trades.append({
+            "Stock":symbol,
+            "Entry Date":pos["entry_date"],
+            "Exit Date":final_dt,
+            "Entry":round(pos["entry"],2),
+            "Exit":round(exit_price,2),
+            "Shares":shares,
+            "Pivot":round(pos["pivot"],2),
+            "Stop":round(pos["stop"],2),
+            "PnL":round(pnl,2),
+            "Return %":round(pnl_pct,2),
+            "Holding Days":held,
+            "Score":pos["score"],
+            "RS Rank":pos["rs_rank"],
+            "VCP Score":pos["vcp_score"],
+            "Exit Reason":"Backtest End"
+        })
+
+        del open_positions[symbol]
+
+    # Rebuild equity curve after final exits.
+    equity_df=pd.DataFrame(equity_rows)
+
+    if equity_df.empty:
+        equity_df=pd.DataFrame(
+            [{"Date":final_dt,"Equity":cash,"Open Positions":0}]
+        )
+    else:
+        equity_df.loc[
+            equity_df.index[-1],
+            "Equity"
+        ]=cash
+        equity_df.loc[
+            equity_df.index[-1],
+            "Open Positions"
+        ]=0
+
+    trades_df=pd.DataFrame(trades)
+
+    if trades_df.empty:
+        summary={
+            "Starting Capital":starting_capital,
+            "Ending Capital":cash,
+            "Net Profit":cash-starting_capital,
+            "Return %":(cash/starting_capital-1)*100,
+            "Trades":0,
+            "Win Rate %":0.0,
+            "Profit Factor":0.0,
+            "Max Drawdown %":0.0
+        }
+    else:
+        wins=trades_df[trades_df["PnL"]>0]["PnL"]
+        losses=trades_df[trades_df["PnL"]<0]["PnL"]
+
+        peak=equity_df["Equity"].cummax()
+        dd=(equity_df["Equity"]/peak-1)*100
+
+        summary={
+            "Starting Capital":starting_capital,
+            "Ending Capital":cash,
+            "Net Profit":cash-starting_capital,
+            "Return %":(cash/starting_capital-1)*100,
+            "Trades":len(trades_df),
+            "Win Rate %":(
+                (trades_df["PnL"]>0).mean()*100
+            ),
+            "Profit Factor":(
+                wins.sum()/abs(losses.sum())
+                if losses.sum()!=0 else np.inf
+            ),
+            "Max Drawdown %":float(dd.min()),
+            "Average Trade %":float(
+                trades_df["Return %"].mean()
+            ),
+            "Average Holding Days":float(
+                trades_df["Holding Days"].mean()
+            )
+        }
+
+    return {
+        "trades":trades,
+        "trades_df":trades_df,
+        "equity":equity_df,
+        "summary":summary
+    }
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def download_nifty50_benchmark(period="2y"):
     """Serial benchmark download; avoids thread-heavy calls on Streamlit Cloud."""
@@ -8953,11 +9434,61 @@ elif module == "🏆 Minervini SEPA + VCP Scanner":
         "and price within the no-chase zone."
     )
 
-    run=st.button(
-        "🔎 RUN MINERVINI SEPA + VCP SCANNER",
-        type="primary",
-        key="minervini_run"
+    st.sidebar.subheader("📊 Minervini Backtest")
+
+    backtest_stop=st.sidebar.slider(
+        "Risk stop (%)",
+        5.0,10.0,8.0,0.5,
+        key="minervini_bt_stop"
     )
+
+    backtest_max_hold=st.sidebar.slider(
+        "Maximum holding days",
+        20,120,60,10,
+        key="minervini_bt_max_hold"
+    )
+
+    backtest_capital=st.sidebar.number_input(
+        "Starting capital ₹",
+        min_value=100000.0,
+        value=1000000.0,
+        step=100000.0,
+        key="minervini_bt_capital"
+    )
+
+    backtest_max_positions=st.sidebar.slider(
+        "Maximum simultaneous positions",
+        1,20,10,1,
+        key="minervini_bt_max_positions"
+    )
+
+    backtest_risk=st.sidebar.slider(
+        "Risk per position (%)",
+        0.25,2.0,1.0,0.25,
+        key="minervini_bt_risk"
+    )
+
+    backtest_max_stocks=st.sidebar.slider(
+        "Maximum stocks for backtest",
+        25,500,100,25,
+        key="minervini_bt_max_stocks"
+    )
+
+    scan_col, bt_col = st.columns(2)
+
+    with scan_col:
+        run=st.button(
+            "🔎 RUN MINERVINI SEPA + VCP SCANNER",
+            type="primary",
+            key="minervini_run"
+        )
+
+    with bt_col:
+        run_backtest=st.button(
+            "📊 RUN MINERVINI BACKTEST",
+            type="secondary",
+            key="minervini_backtest_run"
+        )
 
     if run:
         with st.spinner("Scanning Minervini Trend Template + VCP setups..."):
@@ -9053,6 +9584,180 @@ elif module == "🏆 Minervini SEPA + VCP Scanner":
                 f"**Volume/SMA50:** {row['Volume / SMA50']}×  |  "
                 f"**Pivot distance:** {row['Pivot Distance %']}%"
             )
+
+    if run_backtest:
+
+        if not stocks:
+            st.error("No stocks available for the Minervini backtest.")
+            st.stop()
+
+        st.subheader("📊 Minervini SEPA + VCP Backtest")
+
+        st.info(
+            "The historical scanner is evaluated bar-by-bar using only "
+            "information available up to each completed day. A BUY signal "
+            "is entered at the following day's open. This prevents look-ahead bias."
+        )
+
+        progress=st.progress(
+            0,
+            text="Downloading historical data..."
+        )
+
+        bt_stocks=stocks[:int(backtest_max_stocks)]
+
+        st.caption(
+            f"Backtest universe: {len(bt_stocks)} of {len(stocks)} stocks."
+        )
+
+        market=download_batches(
+            bt_stocks,
+            period,
+            50
+        )
+
+        benchmark=download_nifty50_benchmark(period)
+
+        progress.progress(
+            25,
+            text="Preparing historical Minervini signals..."
+        )
+
+        bt_result=backtest_minervini_sepa_vcp(
+            market,
+            benchmark=benchmark,
+            window_days=vcp_window,
+            min_volume_lakhs=min_liquidity,
+            breakout_volume_mult=breakout_volume_mult,
+            chase_pct=chase_pct,
+            stop_loss_pct=backtest_stop,
+            max_holding_days=backtest_max_hold,
+            starting_capital=backtest_capital,
+            max_positions=backtest_max_positions,
+            position_risk_pct=backtest_risk
+        )
+
+        progress.progress(
+            100,
+            text="Backtest complete"
+        )
+
+        summary=bt_result["summary"]
+        equity=bt_result["equity"]
+        trades=bt_result["trades_df"]
+
+        c1,c2,c3,c4,c5=st.columns(5)
+
+        c1.metric(
+            "Return",
+            f'{summary.get("Return %",0):.2f}%'
+        )
+
+        c2.metric(
+            "Max Drawdown",
+            f'{summary.get("Max Drawdown %",0):.2f}%'
+        )
+
+        c3.metric(
+            "Trades",
+            int(summary.get("Trades",0))
+        )
+
+        c4.metric(
+            "Win Rate",
+            f'{summary.get("Win Rate %",0):.1f}%'
+        )
+
+        pf=summary.get("Profit Factor",0)
+        pf_text=(
+            "∞" if pf==np.inf
+            else f"{pf:.2f}"
+        )
+
+        c5.metric(
+            "Profit Factor",
+            pf_text
+        )
+
+        st.subheader("📈 Portfolio Equity Curve")
+
+        if not equity.empty:
+
+            fig=go.Figure()
+
+            fig.add_trace(
+                go.Scatter(
+                    x=equity["Date"],
+                    y=equity["Equity"],
+                    mode="lines",
+                    name="Portfolio Equity"
+                )
+            )
+
+            fig.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Portfolio Value ₹",
+                height=450
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
+
+        if not trades.empty:
+
+            st.subheader("📋 Trade Log")
+
+            trade_cols=[
+                "Stock","Entry Date","Exit Date",
+                "Entry","Exit","Shares","Pivot","Stop",
+                "PnL","Return %","Holding Days",
+                "Score","RS Rank","VCP Score","Exit Reason"
+            ]
+
+            trade_cols=[
+                c for c in trade_cols
+                if c in trades.columns
+            ]
+
+            st.dataframe(
+                trades[trade_cols],
+                width="stretch",
+                hide_index=True
+            )
+
+            st.download_button(
+                "⬇️ Download Minervini Backtest Trades",
+                trades.to_csv(index=False),
+                "Minervini_SEPA_VCP_Backtest_Trades.csv",
+                "text/csv"
+            )
+
+        st.subheader("📐 Backtest Rules")
+
+        st.markdown(
+            f"""
+            **Entry:** exactly the scanner's historical BUY condition:
+            Trend Template PASS + valid VCP + pivot breakout +
+            breakout volume ≥ {breakout_volume_mult:.1f}× SMA50 +
+            price within {chase_pct:.1f}% of pivot + score ≥80.
+
+            **Execution:** next day's open.
+
+            **Risk stop:** {backtest_stop:.1f}% below entry.
+
+            **Trend failure:** profitable position closing below SMA50.
+
+            **Breakout failure:** close below the original pivot.
+
+            **Maximum holding period:** {backtest_max_hold} days.
+
+            **Position sizing:** maximum {backtest_max_positions} positions,
+            with approximately {backtest_risk:.2f}% of current equity at risk per position.
+            """
+        )
+
 
 # ============================================================
 # CCI + EMA9/21/200 + RSI9/WMA21 STRATEGY MODULE
