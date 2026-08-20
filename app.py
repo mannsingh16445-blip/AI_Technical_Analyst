@@ -7497,6 +7497,7 @@ module = st.sidebar.radio(
     "Select Module",
     [
         "🎯 CCI + EMA + RSI Strategy",
+        "📚 Kratter Momentum Scanner",
         "📊 Options Next-Day Analyzer",
             "🏆 Minervini SEPA + VCP Scanner",
         "🚀 Smart Breakout Scanner",
@@ -8889,6 +8890,285 @@ def _options_normalize_columns(df):
         for c in x.columns
     ]
     return x
+
+
+
+# ============================================================
+# KRATTER MOMENTUM SCANNER
+# Based mechanically on "Learn to Trade Momentum Stocks"
+# by Matthew R. Kratter.
+# ============================================================
+
+def _kratter_prepare_ohlcv(df):
+    """Normalize and prepare daily OHLCV data for the book rules."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    x=df.copy()
+
+    if isinstance(x.columns,pd.MultiIndex):
+        cols=[]
+        for tup in x.columns.to_list():
+            vals=[str(v).strip() for v in tup
+                  if str(v).strip().lower() not in ("nan","none")]
+            cols.append(vals[-1] if vals else "")
+        x.columns=cols
+    else:
+        x.columns=[str(c).strip() for c in x.columns]
+
+    rename={}
+    for c in x.columns:
+        key=str(c).strip().lower()
+        if key in ("open","high","low","close","volume"):
+            rename[c]=key.title()
+        elif key in ("adj close","adj_close"):
+            rename[c]="Adj Close"
+        elif key in ("date","datetime","timestamp"):
+            rename[c]="Date"
+    x=x.rename(columns=rename)
+
+    if "Date" in x.columns:
+        x["Date"]=pd.to_datetime(x["Date"],errors="coerce")
+        x=x.dropna(subset=["Date"]).set_index("Date")
+    elif not isinstance(x.index,pd.DatetimeIndex):
+        try:
+            x.index=pd.to_datetime(x.index)
+        except Exception:
+            return pd.DataFrame()
+
+    needed=["Open","High","Low","Close"]
+    if any(c not in x.columns for c in needed):
+        return pd.DataFrame()
+
+    for c in needed+([ "Volume" ] if "Volume" in x.columns else []):
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+
+    x=x.dropna(subset=needed).sort_index()
+
+    if len(x)<205:
+        return pd.DataFrame()
+
+    x["SMA50"]=x["Close"].rolling(50,min_periods=50).mean()
+    x["SMA200"]=x["Close"].rolling(200,min_periods=200).mean()
+
+    # Exact book buy trigger:
+    # previous SMA50 <= previous SMA200 AND
+    # latest SMA50 > latest SMA200 AND
+    # latest close > latest SMA50.
+    x["Golden Cross"]=(
+        (x["SMA50"].shift(1)<=x["SMA200"].shift(1)) &
+        (x["SMA50"]>x["SMA200"])
+    )
+    x["Price Above SMA50"]=x["Close"]>x["SMA50"]
+
+    # Useful context, not an extra book rule.
+    x["SMA50 Slope %"]=(x["SMA50"]/x["SMA50"].shift(20)-1)*100
+    x["SMA200 Slope %"]=(x["SMA200"]/x["SMA200"].shift(20)-1)*100
+    x["52W High"]=x["Close"].rolling(252,min_periods=120).max()
+    x["Distance from 52W High %"]=(x["Close"]/x["52W High"]-1)*100
+
+    return x.dropna(subset=["SMA50","SMA200"])
+
+
+def _kratter_scan_one(symbol, df, revenue_growth=None,
+                      revenue_3y_growth=None, category=None):
+    x=_kratter_prepare_ohlcv(df)
+    if x.empty:
+        return None
+
+    row=x.iloc[-1]
+    signal=bool(row["Golden Cross"] and row["Price Above SMA50"])
+
+    annual_ok=(
+        revenue_growth is not None and
+        np.isfinite(revenue_growth) and
+        revenue_growth>20
+    )
+    three_year_ok=(
+        revenue_3y_growth is not None and
+        np.isfinite(revenue_3y_growth) and
+        revenue_3y_growth>20
+    )
+
+    # The book describes >20% annual revenue growth as the rule of thumb,
+    # with 3-year average growth >20% as ideal. These are kept separate.
+    fundamental_status=(
+        "Confirmed" if annual_ok and three_year_ok
+        else "Annual >20%" if annual_ok
+        else "Not supplied"
+    )
+
+    # Exact book candidate requires the technical buy signal.
+    if signal:
+        if annual_ok:
+            grade="🟢 BOOK MOMENTUM BUY"
+        else:
+            grade="🟡 TECHNICAL BUY — FUNDAMENTAL CHECK NEEDED"
+    else:
+        grade="—"
+
+    return {
+        "Symbol":symbol,
+        "Signal":grade,
+        "Signal Date":x.index[-1],
+        "Close":float(row["Close"]),
+        "SMA50":float(row["SMA50"]),
+        "SMA200":float(row["SMA200"]),
+        "50/200 Cross":bool(row["Golden Cross"]),
+        "Close > SMA50":bool(row["Price Above SMA50"]),
+        "Annual Revenue Growth %":(
+            float(revenue_growth) if revenue_growth is not None
+            and np.isfinite(revenue_growth) else np.nan
+        ),
+        "3Y Avg Revenue Growth %":(
+            float(revenue_3y_growth) if revenue_3y_growth is not None
+            and np.isfinite(revenue_3y_growth) else np.nan
+        ),
+        "Fundamental Status":fundamental_status,
+        "Company Type":category if category else "Not supplied",
+        "SMA50 Slope %":float(row["SMA50 Slope %"]),
+        "SMA200 Slope %":float(row["SMA200 Slope %"]),
+        "Distance from 52W High %":float(row["Distance from 52W High %"]),
+        "Technical Buy":signal,
+    }
+
+
+def _kratter_position_plan(entry_price, account_size, risk_pct=2.0):
+    """Book-style position sizing: risk a fixed % of account with a 15% stop."""
+    if not np.isfinite(entry_price) or entry_price<=0:
+        return {}
+    stop=entry_price*0.85
+    target=entry_price*4.0
+    risk_per_share=entry_price-stop
+    risk_amount=account_size*(risk_pct/100)
+    shares=int(np.floor(risk_amount/risk_per_share))
+    allocation=shares*entry_price
+    return {
+        "Entry":float(entry_price),
+        "Stop (-15%)":float(stop),
+        "Target (+300%)":float(target),
+        "Risk/Share":float(risk_per_share),
+        "Account Risk":float(risk_amount),
+        "Shares":max(0,shares),
+        "Capital Required":float(allocation),
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _kratter_download_batches(tickers, batch_size=40):
+    """Serial/batched Yahoo download with graceful failure."""
+    result={}
+    ticker_list=list(dict.fromkeys([str(x).strip() for x in tickers if str(x).strip()]))
+
+    for start in range(0,len(ticker_list),batch_size):
+        batch=ticker_list[start:start+batch_size]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
+        try:
+            d=yf.download(
+                tickers=yahoo,
+                period="2y",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="ticker"
+            )
+        except Exception:
+            continue
+
+        if d is None or d.empty:
+            continue
+
+        # Single ticker response.
+        if len(batch)==1:
+            symbol=batch[0]
+            stock=d.copy()
+            if isinstance(stock.columns,pd.MultiIndex):
+                level0=stock.columns.get_level_values(0)
+                level1=stock.columns.get_level_values(1)
+                if "Close" in level0:
+                    stock.columns=level0
+                elif "Close" in level1:
+                    stock.columns=level1
+            result[symbol]=stock
+            continue
+
+        # Multi-ticker response: extract each symbol independently.
+        if isinstance(d.columns,pd.MultiIndex):
+            for symbol,yahoo_symbol in zip(batch,yahoo):
+                candidates=[yahoo_symbol,symbol]
+                stock=None
+                for key in candidates:
+                    try:
+                        if key in d.columns.get_level_values(0):
+                            stock=d[key].copy()
+                            break
+                        if key in d.columns.get_level_values(1):
+                            stock=d.xs(key,axis=1,level=1).copy()
+                            break
+                    except Exception:
+                        pass
+                if stock is not None and not stock.empty:
+                    result[symbol]=stock
+        else:
+            # Rare fallback: only useful if one unnamed block was returned.
+            if len(batch)==1:
+                result[batch[0]]=d.copy()
+
+    return result
+
+
+def _kratter_read_fundamental_csv(uploaded_file):
+    """Optional CSV: Symbol, Annual Revenue Growth %, 3Y Avg Revenue Growth %, Company Type."""
+    try:
+        f=pd.read_csv(uploaded_file)
+        cols={str(c).strip().lower():c for c in f.columns}
+
+        sym_col=next((cols[k] for k in
+                      ["symbol","ticker","stock","code"] if k in cols),None)
+        if sym_col is None:
+            return {}
+
+        def find_col(keys):
+            for k in keys:
+                if k in cols:
+                    return cols[k]
+            return None
+
+        annual_col=find_col([
+            "annual revenue growth %",
+            "annual revenue growth",
+            "revenue growth %",
+            "revenue growth"
+        ])
+        avg3_col=find_col([
+            "3y avg revenue growth %",
+            "3 year average revenue growth %",
+            "3y revenue growth %",
+            "3-year average revenue growth"
+        ])
+        type_col=find_col(["company type","category","type"])
+
+        out={}
+        for _,r in f.iterrows():
+            sym=str(r[sym_col]).strip().upper()
+            if not sym or sym=="NAN":
+                continue
+            def num(col):
+                if col is None:
+                    return None
+                v=pd.to_numeric(r[col],errors="coerce")
+                return float(v) if pd.notna(v) else None
+            out[sym]={
+                "annual":num(annual_col),
+                "avg3":num(avg3_col),
+                "category":str(r[type_col]).strip() if type_col is not None
+                           and pd.notna(r[type_col]) else None
+            }
+        return out
+    except Exception:
+        return {}
+
 
 
 if module == "🚀 Smart Breakout Scanner":
@@ -10721,6 +11001,268 @@ elif module == "📐 Chart Pattern Scanner":
 # ============================================================
 # MINERVINI SEPA + VCP SCANNER MODULE
 # ============================================================
+
+
+
+elif module == "📚 Kratter Momentum Scanner":
+
+    st.header("📚 Kratter Momentum Scanner")
+    st.caption(
+        "Mechanical implementation of the trend-following rules in "
+        "Matthew R. Kratter's *Learn to Trade Momentum Stocks*."
+    )
+
+    st.info(
+        "Core book setup: the 50-day moving average closes above the "
+        "200-day moving average, while the stock is trading above its "
+        "50-day moving average. The book then buys the next morning."
+    )
+
+    with st.expander("📖 Book rules used by this scanner", expanded=False):
+        st.markdown("""
+        **Universe / watchlist**
+        - Focus on companies with rapidly growing revenues.
+        - The book gives **>20% annual revenue growth** as a rule of thumb.
+        - **3-year average revenue growth >20%** is described as ideal.
+        - It discusses New Technology Companies and Formula Companies.
+
+        **Buy**
+        1. 50-day SMA closes above 200-day SMA.
+        2. Stock is above its 50-day SMA when the crossover occurs.
+        3. Buy the next morning/open.
+
+        **Exit**
+        1. Emergency stop: **-15% from actual entry price**.
+        2. Exit when 50-day SMA closes below 200-day SMA.
+        3. Profit-taking option: **+300% from entry**.
+
+        **Position sizing**
+        - The book's example risks **2% of account equity** per trade.
+        - Shares = (account size × risk %) / (entry − stop).
+        """)
+        st.caption(
+            "Source: Matthew R. Kratter, 2nd edition; see the exact "
+            "buy/sell rules and risk example in the uploaded book."
+        )
+
+    st.subheader("1️⃣ Select universe")
+
+    universe_options={
+        "Nifty 50":"nifty50",
+        "Nifty 500":"nifty500",
+        "Nifty Midcap 100":"midcap100",
+        "Nifty Smallcap 250":"smallcap250",
+        "F&O Stocks":"fno",
+        "NSE Equity":"nse"
+    }
+
+    selected_universe=st.selectbox(
+        "Stock Universe",
+        list(universe_options.keys()),
+        key="kratter_universe"
+    )
+
+    universe_key=universe_options[selected_universe]
+
+    # Reuse the app's existing universe loaders.
+    try:
+        if universe_key=="nifty50":
+            stocks=load_nifty50()
+        elif universe_key=="nifty500":
+            stocks=load_nifty500()
+        elif universe_key=="midcap100":
+            stocks=load_nifty_midcap100()
+        elif universe_key=="smallcap250":
+            stocks=load_nifty_smallcap250()
+        elif universe_key=="fno":
+            stocks=load_fno_stocks()
+        else:
+            stocks=load_nse_equity_universe()
+    except Exception:
+        stocks=[]
+
+    stocks=list(stocks) if stocks is not None else []
+
+    if not stocks:
+        st.warning("No stocks could be loaded for this universe.")
+    else:
+        c1,c2,c3=st.columns(3)
+        c1.metric("Universe Stocks",len(stocks))
+
+        account_size=st.number_input(
+            "Account Size (₹)",
+            min_value=10000.0,
+            value=100000.0,
+            step=10000.0,
+            key="kratter_account"
+        )
+        risk_pct=st.number_input(
+            "Risk per Trade (%)",
+            min_value=0.1,
+            max_value=10.0,
+            value=2.0,
+            step=0.5,
+            key="kratter_risk"
+        )
+
+        st.subheader("2️⃣ Optional fundamental confirmation")
+
+        fund_file=st.file_uploader(
+            "Upload fundamentals CSV (optional)",
+            type=["csv"],
+            key="kratter_fundamentals"
+        )
+
+        st.caption(
+            "Recommended columns: Symbol, Annual Revenue Growth %, "
+            "3Y Avg Revenue Growth %, Company Type. Without this file, "
+            "the scanner can identify the exact technical crossover but "
+            "cannot claim the book's revenue-growth filter is satisfied."
+        )
+
+        fundamentals=_kratter_read_fundamental_csv(fund_file) if fund_file else {}
+
+        if st.button(
+            "🔎 RUN KRATTER MOMENTUM SCAN",
+            type="primary",
+            key="kratter_run"
+        ):
+            with st.spinner("Scanning for fresh 50/200 SMA momentum signals..."):
+                data_map=_kratter_download_batches(stocks)
+
+            rows=[]
+            failed=0
+
+            for symbol in stocks:
+                d=data_map.get(symbol)
+                if d is None or d.empty:
+                    failed+=1
+                    continue
+
+                f=fundamentals.get(str(symbol).upper(),{})
+                result=_kratter_scan_one(
+                    symbol,
+                    d,
+                    f.get("annual"),
+                    f.get("avg3"),
+                    f.get("category")
+                )
+                if result is not None:
+                    rows.append(result)
+
+            result_df=pd.DataFrame(rows)
+
+            if result_df.empty:
+                st.warning(
+                    "No technically valid stocks were returned. "
+                    "The scanner requires at least 200 daily bars."
+                )
+            else:
+                tech=result_df[result_df["Technical Buy"]==True].copy()
+
+                st.subheader("🎯 Fresh Book Buy Signals")
+
+                if tech.empty:
+                    st.info(
+                        "No fresh 50/200 SMA crossover signals today. "
+                        "This scanner is intentionally selective."
+                    )
+                else:
+                    # Add next-entry risk plan using the latest close as a
+                    # planning reference; actual book entry is next morning.
+                    plans=[]
+                    for _,r in tech.iterrows():
+                        plan=_kratter_position_plan(
+                            float(r["Close"]),
+                            account_size,
+                            risk_pct
+                        )
+                        plans.append(plan)
+
+                    plan_df=pd.DataFrame(plans,index=tech.index)
+                    display=tech.join(plan_df)
+
+                    cols=[
+                        "Symbol","Signal","Signal Date","Close","SMA50",
+                        "SMA200","Annual Revenue Growth %",
+                        "3Y Avg Revenue Growth %","Fundamental Status",
+                        "Company Type","Entry","Stop (-15%)",
+                        "Target (+300%)","Shares","Capital Required",
+                        "SMA50 Slope %","SMA200 Slope %",
+                        "Distance from 52W High %"
+                    ]
+                    cols=[c for c in cols if c in display.columns]
+                    st.dataframe(
+                        display[cols].sort_values(
+                            by=["Fundamental Status","SMA50 Slope %"],
+                            ascending=[True,False]
+                        ),
+                        width="stretch",
+                        hide_index=True
+                    )
+
+                    st.success(
+                        f"{len(tech)} fresh technical buy signal(s) found. "
+                        f"Stocks with annual revenue growth >20% are marked "
+                        f"as **🟢 BOOK MOMENTUM BUY**."
+                    )
+
+                st.subheader("📊 Scan diagnostics")
+                d1,d2,d3=st.columns(3)
+                d1.metric("Technical Signals",len(tech))
+                d2.metric("Data Loaded",len(data_map))
+                d3.metric("Data Failures",failed)
+
+                with st.expander("All scanned stocks"):
+                    allcols=[
+                        "Symbol","Signal","Close","SMA50","SMA200",
+                        "50/200 Cross","Close > SMA50",
+                        "Annual Revenue Growth %",
+                        "3Y Avg Revenue Growth %",
+                        "Fundamental Status","SMA50 Slope %",
+                        "SMA200 Slope %","Distance from 52W High %"
+                    ]
+                    allcols=[c for c in allcols if c in result_df.columns]
+                    st.dataframe(
+                        result_df[allcols],
+                        width="stretch",
+                        hide_index=True
+                    )
+
+                csv=result_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇️ Download Kratter Scan CSV",
+                    csv,
+                    "kratter_momentum_scan.csv",
+                    "text/csv",
+                    key="kratter_download"
+                )
+
+        st.subheader("🧮 Position-size calculator")
+        st.caption(
+            "The book's example uses a 15% stop and 2% account risk. "
+            "This calculator follows that formula; it does not guarantee "
+            "the actual next-open fill price."
+        )
+
+        calc_entry=st.number_input(
+            "Reference Entry Price (₹)",
+            min_value=0.01,
+            value=100.0,
+            step=1.0,
+            key="kratter_calc_entry"
+        )
+        calc=_kratter_position_plan(
+            calc_entry,
+            account_size,
+            risk_pct
+        )
+        if calc:
+            a,b,c,d=st.columns(4)
+            a.metric("Stop",f"₹{calc['Stop (-15%)']:.2f}")
+            b.metric("Target",f"₹{calc['Target (+300%)']:.2f}")
+            c.metric("Shares",f"{calc['Shares']:,}")
+            d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
 elif module == "📊 Options Next-Day Analyzer":
