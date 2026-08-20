@@ -8227,9 +8227,7 @@ def _options_phase2_snapshot(df):
     if df is None or df.empty:
         return {}
 
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=x.columns.get_level_values(0)
+    x=_options_normalize_columns(df)
 
     required=["High","Low","Close"]
     if any(c not in x.columns for c in required):
@@ -8517,6 +8515,380 @@ def _options_phase3_final_signal(row):
         return "🟡 Option Selling Candidate"
     if max(c,p)>=65: return "🔵 Option Buying Candidate"
     return "⚪ Avoid / Wait"
+
+
+
+# ============================================================
+# OPTIONS PHASE 4: BACKTESTING & VALIDATION
+# ============================================================
+
+def _options_phase4_signal_plan(signal, close, atr, support, resistance):
+    """Convert a historical signal into underlying trigger/SL/targets."""
+    if not np.isfinite(close):
+        return None
+
+    atr_use=atr if np.isfinite(atr) and atr>0 else close*0.02
+
+    if signal=="🟢 Strong Call Candidate":
+        trigger=close+0.20*atr_use
+        sl=support if np.isfinite(support) and support<close else close-atr_use
+        if sl>=trigger:
+            sl=close-atr_use
+        t1=resistance if np.isfinite(resistance) and resistance>trigger else trigger+atr_use
+        t2=t1+atr_use
+        return "CALL",trigger,sl,t1,t2
+
+    if signal=="🔴 Strong Put Candidate":
+        trigger=close-0.20*atr_use
+        sl=resistance if np.isfinite(resistance) and resistance>close else close+atr_use
+        if sl<=trigger:
+            sl=close+atr_use
+        t1=support if np.isfinite(support) and support<trigger else trigger-atr_use
+        t2=t1-atr_use
+        return "PUT",trigger,sl,t1,t2
+
+    return None
+
+
+def _options_phase4_evaluate_path(signal, trigger, sl, t1, t2,
+                                  next_open, next_high, next_low,
+                                  next_close):
+    """Evaluate the next trading session using OHLC only.
+
+    Conservative ambiguity rule:
+    if both SL and T1 are touched in the same candle, SL is assumed
+    to occur first. This avoids overstating historical performance.
+    """
+    if not all(np.isfinite(v) for v in [
+        trigger,sl,t1,t2,next_open,next_high,next_low,next_close
+    ]):
+        return {
+            "Outcome":"Insufficient Data",
+            "Return %":np.nan,
+            "Target 1 Hit":False,
+            "Target 2 Hit":False,
+            "Stop Hit":False,
+            "Triggered":False
+        }
+
+    if signal=="CALL":
+        triggered=next_high>=trigger
+        if not triggered:
+            return {
+                "Outcome":"Not Triggered",
+                "Return %":(next_close-next_open)/next_open*100,
+                "Target 1 Hit":False,
+                "Target 2 Hit":False,
+                "Stop Hit":False,
+                "Triggered":False
+            }
+
+        stop_hit=next_low<=sl
+        t1_hit=next_high>=t1
+        t2_hit=next_high>=t2
+
+        if stop_hit:
+            exit_price=sl
+            outcome="Stop Hit"
+        elif t2_hit:
+            exit_price=t2
+            outcome="Target 2 Hit"
+        elif t1_hit:
+            exit_price=t1
+            outcome="Target 1 Hit"
+        else:
+            exit_price=next_close
+            outcome="Close Exit"
+
+        return {
+            "Outcome":outcome,
+            "Return %":(exit_price-trigger)/trigger*100,
+            "Target 1 Hit":bool(t1_hit),
+            "Target 2 Hit":bool(t2_hit),
+            "Stop Hit":bool(stop_hit),
+            "Triggered":True
+        }
+
+    if signal=="PUT":
+        triggered=next_low<=trigger
+        if not triggered:
+            return {
+                "Outcome":"Not Triggered",
+                "Return %":(next_open-next_close)/next_open*100,
+                "Target 1 Hit":False,
+                "Target 2 Hit":False,
+                "Stop Hit":False,
+                "Triggered":False
+            }
+
+        stop_hit=next_high>=sl
+        t1_hit=next_low<=t1
+        t2_hit=next_low<=t2
+
+        if stop_hit:
+            exit_price=sl
+            outcome="Stop Hit"
+        elif t2_hit:
+            exit_price=t2
+            outcome="Target 2 Hit"
+        elif t1_hit:
+            exit_price=t1
+            outcome="Target 1 Hit"
+        else:
+            exit_price=next_close
+            outcome="Close Exit"
+
+        return {
+            "Outcome":outcome,
+            "Return %":(trigger-exit_price)/trigger*100,
+            "Target 1 Hit":bool(t1_hit),
+            "Target 2 Hit":bool(t2_hit),
+            "Stop Hit":bool(stop_hit),
+            "Triggered":True
+        }
+
+    return {
+        "Outcome":"Unsupported",
+        "Return %":np.nan,
+        "Target 1 Hit":False,
+        "Target 2 Hit":False,
+        "Stop Hit":False,
+        "Triggered":False
+    }
+
+
+def _options_phase4_build_backtest(history, min_score=80):
+    """Backtest Phase-3 signals using a dictionary of symbol -> OHLC DataFrame.
+
+    The historical signal itself must already be computed from data available
+    on that signal date. The following trading session is used for validation.
+    """
+    records=[]
+
+    for symbol, df in history.items():
+        if df is None or df.empty:
+            continue
+
+        x=df.copy()
+        x=_options_normalize_columns(x)
+
+        needed=["Open","High","Low","Close"]
+        if any(c not in x.columns for c in needed):
+            continue
+
+        x=x.dropna(subset=needed).copy()
+        if len(x)<80:
+            continue
+
+        for c in needed:
+            x[c]=pd.to_numeric(x[c],errors="coerce")
+
+        # Compute all Phase-3 technical indicators on each historical date.
+        # Existing functions are intentionally reused to keep the validation
+        # rules identical to the live analyzer.
+        close=x["Close"]
+        x["EMA20"]=close.ewm(span=20,adjust=False,min_periods=20).mean()
+        x["EMA50"]=close.ewm(span=50,adjust=False,min_periods=50).mean()
+        x["EMA200"]=close.ewm(span=200,adjust=False,min_periods=200).mean()
+
+        if len(x)<205:
+            continue
+
+        # Lightweight daily volume ratio / delivery ratio where available.
+        if "Volume" in x.columns:
+            vol=pd.to_numeric(x["Volume"],errors="coerce")
+            x["Volume x"]=vol/vol.rolling(20,min_periods=20).mean()
+        else:
+            x["Volume x"]=np.nan
+
+        # Phase-2 indicators.
+        mid,upper,lower,width,pctb=_options_bollinger_bands(x,20,2.0)
+        adx,plus_di,minus_di=_options_adx(x,14)
+        atr=_options_atr(x,14)
+
+        x["BB Middle"]=mid
+        x["BB Upper"]=upper
+        x["BB Lower"]=lower
+        x["BB Width"]=width
+        x["BB %B"]=pctb
+        x["ADX14"]=adx
+        x["+DI14"]=plus_di
+        x["-DI14"]=minus_di
+        x["ATR14"]=atr
+        x["ADX Rising"]=adx.diff()>0
+        x["BB Squeeze"]=width<=width.rolling(120,min_periods=40).quantile(.20)
+
+        # We validate the technical/regime portion here. Full OI/PCR
+        # validation requires historical derivatives columns for each date.
+        for i in range(205,len(x)-1):
+            row=x.iloc[i]
+            nxt=x.iloc[i+1]
+
+            # Build the technical signal/regime without future data.
+            bb_state=""
+            if row["Close"]>row["BB Upper"]:
+                bb_state="Upper Band Breakout"
+            elif row["Close"]<row["BB Lower"]:
+                bb_state="Lower Band Breakdown"
+            elif row["Close"]>row["BB Middle"]:
+                bb_state="Above BB Midline"
+            else:
+                bb_state="Below BB Midline"
+
+            if bool(row["BB Squeeze"]) and i>0 and row["BB Width"]>x["BB Width"].iloc[i-1]:
+                bb_state+=" + Squeeze Release"
+
+            trend=(
+                "Bullish" if row["Close"]>row["EMA200"] and row["EMA20"]>row["EMA50"]
+                else "Bearish" if row["Close"]<row["EMA200"] and row["EMA20"]<row["EMA50"]
+                else "Neutral"
+            )
+
+            # Technical-only Phase-3 direction score.
+            call=0.0; put=0.0
+            if trend=="Bullish": call+=15
+            elif trend=="Bearish": put+=15
+
+            if "Upper Band Breakout" in bb_state: call+=10
+            elif "Lower Band Breakdown" in bb_state: put+=10
+            elif "Above BB Midline" in bb_state: call+=5
+            elif "Below BB Midline" in bb_state: put+=5
+
+            if np.isfinite(row["ADX14"]) and row["ADX14"]>=25:
+                if row["+DI14"]>row["-DI14"]: call+=10
+                elif row["-DI14"]>row["+DI14"]: put+=10
+
+            support=np.nan
+            resistance=np.nan
+            # Rolling swing levels are used only as a conservative proxy when
+            # historical Fib levels are not supplied.
+            prior_low=x["Low"].iloc[max(0,i-60):i].min()
+            prior_high=x["High"].iloc[max(0,i-60):i].max()
+            if np.isfinite(prior_low): support=float(prior_low)
+            if np.isfinite(prior_high): resistance=float(prior_high)
+
+            # Require meaningful technical confluence.
+            if call>=25 and call>put+5:
+                signal="🟢 Strong Call Candidate"
+            elif put>=25 and put>call+5:
+                signal="🔴 Strong Put Candidate"
+            else:
+                continue
+
+            plan=_options_phase4_signal_plan(
+                signal,float(row["Close"]),float(row["ATR14"]),
+                support,resistance
+            )
+            if plan is None:
+                continue
+
+            direction,trigger,sl,t1,t2=plan
+            result=_options_phase4_evaluate_path(
+                direction,trigger,sl,t1,t2,
+                float(nxt["Open"]),float(nxt["High"]),
+                float(nxt["Low"]),float(nxt["Close"])
+            )
+
+            records.append({
+                "Symbol":symbol,
+                "Signal Date":x.index[i],
+                "Next Date":x.index[i+1],
+                "Signal":signal,
+                "Technical Score":max(call,put),
+                "Regime":(
+                    "🚀 Trending Bull" if call>=25 and row["ADX14"]>=25
+                    else "🔻 Trending Bear" if put>=25 and row["ADX14"]>=25
+                    else "🟡 Other"
+                ),
+                "Close":float(row["Close"]),
+                "Trigger":trigger,
+                "Stop":sl,
+                "Target 1":t1,
+                "Target 2":t2,
+                **result
+            })
+
+    return pd.DataFrame(records)
+
+
+def _options_phase4_metrics(bt):
+    if bt is None or bt.empty:
+        return {}
+
+    triggered=bt[bt["Triggered"]==True].copy()
+    if triggered.empty:
+        return {
+            "Signals":len(bt),
+            "Triggered":0
+        }
+
+    ret=pd.to_numeric(triggered["Return %"],errors="coerce").dropna()
+    wins=ret[ret>0]
+    losses=ret[ret<0]
+
+    gross_profit=wins.sum()
+    gross_loss=abs(losses.sum())
+
+    equity=(1+ret/100).cumprod()
+    running_max=equity.cummax()
+    drawdown=(equity/running_max-1)*100
+
+    return {
+        "Signals":len(bt),
+        "Triggered":len(triggered),
+        "Win Rate %":len(wins)/len(ret)*100,
+        "Average Return %":ret.mean(),
+        "Median Return %":ret.median(),
+        "Best Return %":ret.max(),
+        "Worst Return %":ret.min(),
+        "Profit Factor":gross_profit/gross_loss if gross_loss>0 else np.inf,
+        "Max Drawdown %":drawdown.min(),
+        "Cumulative Return %":(equity.iloc[-1]-1)*100
+    }
+
+
+
+def _options_normalize_columns(df):
+    """Normalize yfinance/CSV columns without assuming MultiIndex."""
+    x=df.copy()
+
+    # A true MultiIndex can safely be flattened.
+    if isinstance(x.columns, pd.MultiIndex):
+        names=[]
+        for tup in x.columns.to_list():
+            vals=[str(v).strip() for v in tup if str(v).strip().lower() not in ("nan","none")]
+            names.append(vals[0] if vals else "")
+        x.columns=names
+    else:
+        # Some CSVs contain tuple-looking column labels as strings.
+        cleaned=[]
+        for c in x.columns:
+            s=str(c).strip()
+            # Remove common tuple wrappers only when they are textual.
+            if len(s)>=4 and s[0]=="(" and s[-1]==")":
+                parts=[z.strip().strip("'\"") for z in s[1:-1].split(",")]
+                s=parts[0] if parts else s
+            cleaned.append(s)
+        x.columns=cleaned
+
+    # Normalize common OHLC names.
+    aliases={
+        "adj close":"Adj Close",
+        "adj_close":"Adj Close",
+        "open":"Open",
+        "high":"High",
+        "low":"Low",
+        "close":"Close",
+        "volume":"Volume",
+        "date":"Date",
+        "datetime":"Date",
+        "timestamp":"Date"
+    }
+    x.columns=[
+        aliases.get(str(c).strip().lower(),str(c).strip())
+        for c in x.columns
+    ]
+    return x
 
 
 if module == "🚀 Smart Breakout Scanner":
@@ -10663,6 +11035,95 @@ elif module == "📊 Options Next-Day Analyzer":
                                 "🔵 Option Buying Candidate"
                             ])
                         ].head(20)
+
+                        st.subheader("📈 Phase 4 — Backtesting & Validation")
+
+                        st.caption(
+                            "Phase 4 validates the technical/regime component using "
+                            "the next trading session. It does not invent option "
+                            "premium or IV data. Full derivatives validation requires "
+                            "historical OI/PCR fields for each past date."
+                        )
+
+                        with st.expander("Run historical validation",expanded=False):
+                            st.info(
+                                "Upload one or more historical OHLC CSV files. "
+                                "Each file should contain Date, Open, High, Low and Close. "
+                                "The filename is used as the stock symbol."
+                            )
+
+                            bt_files=st.file_uploader(
+                                "Historical OHLC CSV files",
+                                type=["csv"],
+                                accept_multiple_files=True,
+                                key="options_phase4_files"
+                            )
+
+                            if bt_files:
+                                bt_history={}
+                                for bf in bt_files:
+                                    try:
+                                        bdf=pd.read_csv(bf)
+                                        date_col=next(
+                                            (c for c in bdf.columns
+                                             if str(c).strip().lower() in
+                                             ["date","datetime","timestamp"]),
+                                            None
+                                        )
+                                        if date_col:
+                                            bdf[date_col]=pd.to_datetime(
+                                                bdf[date_col],errors="coerce"
+                                            )
+                                            bdf=bdf.dropna(subset=[date_col]).set_index(date_col).sort_index()
+
+                                        bdf=_options_normalize_columns(bdf)
+
+                                        symbol=Path(bf.name).stem.upper()
+                                        bt_history[symbol]=bdf
+                                    except Exception as exc:
+                                        st.error(
+                                            f"Could not read {bf.name}: {exc}"
+                                        )
+
+                                if bt_history:
+                                    bt_result=_options_phase4_build_backtest(bt_history)
+
+                                    if bt_result.empty:
+                                        st.warning(
+                                            "No historical signals were generated. "
+                                            "Provide sufficiently long daily OHLC "
+                                            "history (preferably 1+ year)."
+                                        )
+                                    else:
+                                        metrics=_options_phase4_metrics(bt_result)
+
+                                        m1,m2,m3,m4,m5=st.columns(5)
+                                        m1.metric("Signals",int(metrics.get("Signals",0)))
+                                        m2.metric("Triggered",int(metrics.get("Triggered",0)))
+                                        m3.metric("Win Rate",f'{metrics.get("Win Rate %",0):.1f}%')
+                                        m4.metric("Avg Return",f'{metrics.get("Average Return %",0):.2f}%')
+                                        m5.metric("Max DD",f'{metrics.get("Max Drawdown %",0):.2f}%')
+
+                                        st.dataframe(
+                                            bt_result,
+                                            width="stretch",
+                                            hide_index=True
+                                        )
+
+                                        csv_data=bt_result.to_csv(index=False).encode("utf-8")
+                                        st.download_button(
+                                            "⬇️ Download Backtest Results",
+                                            csv_data,
+                                            "options_phase4_backtest.csv",
+                                            "text/csv",
+                                            key="options_phase4_download"
+                                        )
+
+                                        st.markdown("**Validation metrics**")
+                                        st.write({
+                                            k:round(v,3) if isinstance(v,(float,np.floating)) and np.isfinite(v) else v
+                                            for k,v in metrics.items()
+                                        })
 
                         st.subheader("🧠 Phase 3 — Confluence & Market Regime")
 
