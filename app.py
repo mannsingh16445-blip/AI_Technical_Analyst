@@ -11710,13 +11710,33 @@ elif module == "🔥 Momentum Catalyst Scanner":
         fundamentals=_mcs_read_fundamentals(fund_file) if fund_file else {}
 
     st.markdown("---")
-    st.subheader("🎯 Early Breakout Detector")
-    st.caption("Find stocks still below resistance but tightening and preparing for a breakout.")
+    st.subheader("🔎 Momentum / Breakout Mode")
 
-    early_min=st.slider("Minimum Early Breakout Score",50,90,65,5,key="mcs_early_min_score")
-    early_run=st.button("🎯 RUN EARLY BREAKOUT SCAN",key="mcs_early_run",type="primary")
+    scan_mode=st.selectbox(
+        "Select Scanner Mode",
+        [
+            "Confirmed Breakout",
+            "Early Breakout"
+        ],
+        index=0,
+        key="mcs_scan_mode",
+        help="Confirmed Breakout finds stocks already breaking resistance. Early Breakout finds stocks still below resistance but preparing to break out."
+    )
 
-    if early_run:
+    early_min=st.slider(
+        "Minimum Early Breakout Score",
+        50,90,65,5,
+        key="mcs_early_min_score",
+        disabled=(scan_mode!="Early Breakout")
+    )
+
+    early_run=st.button(
+        "🎯 RUN SELECTED SCAN",
+        key="mcs_early_run",
+        type="primary"
+    )
+
+    if scan_mode=="Early Breakout" and early_run:
         early_rows=[]
         with st.spinner("Scanning for stocks preparing to break out..."):
             early_data_map=_kratter_download_batches(stocks)
@@ -11767,7 +11787,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
                                f"early_breakout_{analysis_date.strftime('%Y%m%d')}.csv",
                                "text/csv",key="mcs_early_download")
 
-        if st.button("🔎 RUN MOMENTUM CATALYST SCAN",type="primary",key="mcs_run"):
+        if scan_mode=="Confirmed Breakout" and st.button("🔎 RUN MOMENTUM CATALYST SCAN",type="primary",key="mcs_run"):
             with st.spinner("Scanning momentum, volume, trend and breakout structure..."):
                 data_map=_kratter_download_batches(stocks)
                 benchmark=_download_nifty50_history("5y") if '_download_nifty50_history' in globals() else pd.DataFrame()
