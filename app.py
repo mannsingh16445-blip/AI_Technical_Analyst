@@ -9569,40 +9569,99 @@ def _mcs_early_breakout(symbol, df, benchmark=None, fundamentals=None):
 def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
                       min_score=65, min_vol=1.5, mode="Early Breakout",
                       max_hold_days=10):
-    """Walk-forward validation with no look-ahead bias."""
+    """Optimized walk-forward backtest.
+
+    Indicators are calculated once for the complete history. Historical
+    signals are then evaluated sequentially using only the rows available
+    on each signal date. A new Early Breakout signal is emitted only when
+    the setup changes from False to True, preventing duplicate signals while
+    a stock remains in the same setup.
+    """
     if df is None or df.empty:
         return []
+
     d=df.copy()
     d.index=pd.to_datetime(d.index)
     if getattr(d.index,"tz",None) is not None:
         d.index=d.index.tz_localize(None)
     d=d.sort_index()
-    out=[]
-    for i in range(205, len(d)-1):
-        hist=d.iloc[:i+1].copy()
-        sig_date=d.index[i]
-        b=pd.DataFrame()
-        if benchmark is not None and not benchmark.empty:
-            b=benchmark.loc[benchmark.index<=sig_date].copy()
+
+    # Calculate the technical columns once.
+    x=_mcs_prepare(d)
+    if x.empty or len(x)<210:
+        return []
+
+    # Prepare benchmark once.
+    bfull=pd.DataFrame()
+    if benchmark is not None and not benchmark.empty:
+        bfull=benchmark.copy()
+        bfull.index=pd.to_datetime(bfull.index)
+        if getattr(bfull.index,"tz",None) is not None:
+            bfull.index=bfull.index.tz_localize(None)
+        bfull=bfull.sort_index()
+        bfull=_mcs_prepare(bfull)
+
+    results=[]
+    previous_setup=False
+    n=len(x)
+
+    # The last max_hold_days candles cannot be evaluated because future
+    # outcome data would be incomplete.
+    last_signal_index=n-max_hold_days-1
+
+    for i in range(205, max(205,last_signal_index)+1):
+        hist=x.iloc[:i+1]
+        sig_date=x.index[i]
+
+        # Benchmark as known at this signal date.
+        b=bfull.loc[bfull.index<=sig_date] if not bfull.empty else pd.DataFrame()
 
         if mode=="Early Breakout":
-            s=_mcs_early_breakout(symbol,hist,b,fundamentals or {})
-            if s is None or not s.get("Early Qualified",False) or float(s.get("Early Score",0))<min_score:
+            signal=_mcs_early_breakout(
+                symbol,hist,b,fundamentals or {}
+            )
+            current_setup=bool(
+                signal is not None and signal.get("Early Qualified",False)
+                and float(signal.get("Early Score",0))>=min_score
+            )
+
+            # Only the first day of a setup is a signal.
+            if current_setup and previous_setup:
+                previous_setup=True
                 continue
-            resistance=s.get("Resistance 20D",np.nan)
-            score=float(s.get("Early Score",0))
+            previous_setup=current_setup
+
+            if not current_setup:
+                continue
+
+            resistance=signal.get("Resistance 20D",np.nan)
+            score=float(signal.get("Early Score",0))
         else:
-            s=_mcs_scan_one(symbol,hist,b,fundamentals or {},
-                            breakout_mode="Confirmed Breakout",
-                            min_breakout_volume=min_vol)
-            if s is None or not s.get("Breakout Qualified",False) or float(s.get("Score",0))<min_score:
+            signal=_mcs_scan_one(
+                symbol,hist,b,fundamentals or {},
+                breakout_mode="Confirmed Breakout",
+                min_breakout_volume=min_vol
+            )
+            current_setup=bool(
+                signal is not None and signal.get("Breakout Qualified",False)
+                and float(signal.get("Score",0))>=min_score
+            )
+
+            if current_setup and previous_setup:
+                previous_setup=True
                 continue
-            resistance=s.get("Breakout Level",np.nan)
-            score=float(s.get("Score",0))
+            previous_setup=current_setup
+
+            if not current_setup:
+                continue
+
+            resistance=signal.get("Breakout Level",np.nan)
+            score=float(signal.get("Score",0))
 
         future=d.iloc[i+1:i+1+max_hold_days].copy()
         if future.empty:
             continue
+
         entry=float(future["Open"].iloc[0])
         entry_date=future.index[0]
 
@@ -9611,23 +9670,25 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
         if np.isfinite(resistance):
             hits=future[future["Close"]>float(resistance)]
             if not hits.empty:
-                breakout_date=hits.index[0].strftime("%Y-%m-%d")
-                days_to_breakout=int(future.index.get_loc(hits.index[0])+1)
+                hit_index=hits.index[0]
+                breakout_date=hit_index.strftime("%Y-%m-%d")
+                days_to_breakout=int(future.index.get_loc(hit_index)+1)
 
         end_close=float(future["Close"].iloc[-1])
         max_gain=(float(future["High"].max())/entry-1)*100
         max_dd=(float(future["Low"].min())/entry-1)*100
         forward_return=(end_close/entry-1)*100
 
-        atr=float(s.get("ATR14",np.nan))
+        atr=float(signal.get("ATR14",np.nan))
         if not np.isfinite(atr):
             atr=entry*.02
+
         stop=entry-1.5*atr
         risk=entry-stop
         target1=entry+2*risk
         target2=entry+3*risk
 
-        out.append({
+        results.append({
             "Symbol":symbol,
             "Signal Date":sig_date.strftime("%Y-%m-%d"),
             "Entry Date":entry_date.strftime("%Y-%m-%d"),
@@ -9636,7 +9697,9 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
             "Entry":entry,
             "Resistance":resistance,
             "Breakout Date":breakout_date,
-            "Breakout Within 5D":bool(np.isfinite(days_to_breakout) and days_to_breakout<=5),
+            "Breakout Within 5D":bool(
+                np.isfinite(days_to_breakout) and days_to_breakout<=5
+            ),
             "Days To Breakout":days_to_breakout,
             "Forward Return %":forward_return,
             "Max Gain %":max_gain,
@@ -9645,7 +9708,9 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
             "Target 1 Hit":bool((future["High"]>=target1).any()),
             "Target 2 Hit":bool((future["High"]>=target2).any())
         })
-    return out
+
+    return results
+
 
 
 def _mcs_backtest_summary(bt):
@@ -11973,8 +12038,9 @@ elif module == "🔥 Momentum Catalyst Scanner":
         st.markdown("---")
         st.subheader("📊 Momentum Catalyst Backtest & Validation")
         st.caption(
-            "Walk-forward validation: each signal uses only information "
-            "available on that historical date."
+            "Optimized walk-forward validation. Indicators are calculated "
+            "once per stock and each setup generates only one signal until "
+            "the setup resets."
         )
 
         import datetime as _dt_bt
@@ -11993,6 +12059,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
         bt_hold=bc3.slider(
             "Forward Evaluation Days", 5,20,10,1,key="mcs_bt_hold"
         )
+
         bt_min=st.slider(
             "Minimum Backtest Score",50,90,65,5,key="mcs_bt_min_score"
         )
@@ -12001,6 +12068,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             ["Early Breakout","Confirmed Breakout"],
             horizontal=True,key="mcs_bt_mode"
         )
+
         bt_run=st.button(
             "📊 RUN BACKTEST & VALIDATION",
             type="primary",key="mcs_bt_run"
@@ -12009,66 +12077,99 @@ elif module == "🔥 Momentum Catalyst Scanner":
         if bt_run:
             if bt_start>=bt_end:
                 st.error("Backtest start date must be before the end date.")
+            elif not stocks:
+                st.error("No stocks are available in the selected universe.")
             else:
                 bt_rows=[]
-                with st.spinner("Running walk-forward backtest..."):
+                start_ts=pd.Timestamp(bt_start)
+                end_ts=pd.Timestamp(bt_end)
+
+                progress=st.progress(0)
+                status=st.empty()
+                processed=0
+
+                with st.spinner("Downloading historical data once per stock..."):
                     data_map=_kratter_download_batches(stocks)
                     benchmark=(
                         _download_nifty50_history("5y")
                         if '_download_nifty50_history' in globals()
                         else pd.DataFrame()
                     )
-                    start_ts=pd.Timestamp(bt_start)
-                    end_ts=pd.Timestamp(bt_end)
 
-                    for symbol in stocks:
-                        d=data_map.get(symbol)
-                        if d is None or d.empty:
-                            continue
-                        d=d.copy()
+                if benchmark is None:
+                    benchmark=pd.DataFrame()
+
+                for symbol in stocks:
+                    processed+=1
+                    status.text(
+                        f"Backtesting {symbol} — "
+                        f"{processed}/{len(stocks)} stocks"
+                    )
+                    progress.progress(
+                        min(100,int(processed/len(stocks)*100))
+                    )
+
+                    d=data_map.get(symbol)
+                    if d is None or d.empty:
+                        continue
+
+                    d=d.copy()
+                    try:
+                        d.index=pd.to_datetime(d.index)
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d.sort_index()
+
+                        # Retain pre-start history so SMA200 can be calculated.
+                        d=d.loc[d.index<=end_ts].copy()
+                    except Exception:
+                        continue
+
+                    if len(d)<210:
+                        continue
+
+                    b=benchmark.copy()
+                    if not b.empty:
                         try:
-                            d.index=pd.to_datetime(d.index)
-                            if getattr(d.index,"tz",None) is not None:
-                                d.index=d.index.tz_localize(None)
-                            d=d.sort_index()
-                            d=d.loc[d.index<=end_ts].copy()
+                            b.index=pd.to_datetime(b.index)
+                            if getattr(b.index,"tz",None) is not None:
+                                b.index=b.index.tz_localize(None)
+                            b=b.loc[b.index<=end_ts].sort_index()
                         except Exception:
-                            continue
-                        if d.empty:
-                            continue
+                            b=pd.DataFrame()
 
-                        b=benchmark.copy() if benchmark is not None else pd.DataFrame()
-                        if not b.empty:
-                            try:
-                                b.index=pd.to_datetime(b.index)
-                                if getattr(b.index,"tz",None) is not None:
-                                    b.index=b.index.tz_localize(None)
-                                b=b.loc[b.index<=end_ts].sort_index()
-                            except Exception:
-                                b=pd.DataFrame()
-
-                        bt_rows.extend(
-                            r for r in _mcs_backtest_one(
-                                symbol,d,b,
-                                fundamentals.get(str(symbol).upper(),{}),
-                                min_score=bt_min,
-                                min_vol=min_vol,
-                                mode=bt_mode,
-                                max_hold_days=bt_hold
-                            )
-                            if start_ts<=pd.Timestamp(r["Signal Date"])<=end_ts
+                    try:
+                        rows=_mcs_backtest_one(
+                            symbol,d,b,
+                            fundamentals.get(str(symbol).upper(),{}),
+                            min_score=bt_min,
+                            min_vol=min_vol,
+                            mode=bt_mode,
+                            max_hold_days=bt_hold
                         )
+                        bt_rows.extend([
+                            r for r in rows
+                            if start_ts<=pd.Timestamp(r["Signal Date"])<=end_ts
+                        ])
+                    except Exception:
+                        # One problematic stock must never kill the entire run.
+                        continue
+
+                progress.empty()
+                status.empty()
 
                 bt_df=pd.DataFrame(bt_rows)
+
                 if bt_df.empty:
                     st.warning(
                         "No qualifying historical signals were found. "
-                        "Try a lower score or wider date range."
+                        "Try a lower score, a wider date range, or a broader universe."
                     )
                 else:
                     summary=_mcs_backtest_summary(bt_df)
+
                     st.success(
-                        f"Backtest completed: {len(bt_df):,} historical signals."
+                        f"Backtest completed: {len(bt_df):,} unique historical signals."
                     )
 
                     k1,k2,k3,k4=st.columns(4)
@@ -12083,18 +12184,22 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     k7.metric("Target 1 Hit",f'{summary["Target 1 Hit %"]:.1f}%')
                     k8.metric("Stop Hit",f'{summary["Stop Hit %"]:.1f}%')
 
+                    st.markdown("#### Historical Signal Results")
                     st.dataframe(
                         bt_df.sort_values(
-                            ["Signal Date","Score"],ascending=[False,False]
+                            ["Signal Date","Score"],
+                            ascending=[False,False]
                         ),
-                        width="stretch",hide_index=True
+                        width="stretch",
+                        hide_index=True
                     )
 
                     st.download_button(
                         "⬇️ Download Backtest Results",
                         bt_df.to_csv(index=False).encode("utf-8"),
                         f"momentum_catalyst_backtest_{bt_start}_{bt_end}.csv",
-                        "text/csv",key="mcs_bt_download"
+                        "text/csv",
+                        key="mcs_bt_download"
                     )
 
 
