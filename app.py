@@ -7498,6 +7498,7 @@ module = st.sidebar.radio(
     [
         "🎯 CCI + EMA + RSI Strategy",
         "📚 Kratter Momentum Scanner",
+        "🔥 Momentum Catalyst Scanner",
         "📊 Options Next-Day Analyzer",
             "🏆 Minervini SEPA + VCP Scanner",
         "🚀 Smart Breakout Scanner",
@@ -8892,6 +8893,119 @@ def _options_normalize_columns(df):
     return x
 
 
+
+
+# ============================================================
+# MOMENTUM CATALYST SCANNER
+# Price + Volume + Trend + Breakout + Relative Strength + Fundamentals
+# ============================================================
+def _mcs_prepare(df):
+    if df is None or df.empty: return pd.DataFrame()
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=[next((str(v).strip() for v in tup if str(v).strip().lower() not in ("nan","none")),"") for tup in x.columns.to_list()]
+    else: x.columns=[str(c).strip() for c in x.columns]
+    ren={}
+    for c in x.columns:
+        k=str(c).lower().replace('_',' ').strip()
+        if k in ('open','high','low','close','volume'): ren[c]=k.title()
+        elif k in ('date','datetime','timestamp'): ren[c]='Date'
+    x=x.rename(columns=ren)
+    if 'Date' in x.columns:
+        x['Date']=pd.to_datetime(x['Date'],errors='coerce'); x=x.dropna(subset=['Date']).set_index('Date')
+    elif not isinstance(x.index,pd.DatetimeIndex):
+        x.index=pd.to_datetime(x.index,errors='coerce'); x=x[~x.index.isna()]
+    need=['Open','High','Low','Close']
+    if any(c not in x.columns for c in need): return pd.DataFrame()
+    for c in need+(['Volume'] if 'Volume' in x.columns else []): x[c]=pd.to_numeric(x[c],errors='coerce')
+    x=x.dropna(subset=need).sort_index()
+    if len(x)<205: return pd.DataFrame()
+    c=x['Close']; x['SMA20']=c.rolling(20).mean(); x['SMA50']=c.rolling(50).mean(); x['SMA200']=c.rolling(200).mean()
+    x['Return 1D %']=c.pct_change()*100; x['Return 20D %']=c.pct_change(20)*100; x['Return 60D %']=c.pct_change(60)*100
+    x['High20Prev']=x['High'].shift(1).rolling(20).max(); x['High50Prev']=x['High'].shift(1).rolling(50).max()
+    x['Volume Ratio']=x['Volume']/x['Volume'].rolling(20).mean() if 'Volume' in x.columns else np.nan
+    x['52WHigh']=x['High'].rolling(252,min_periods=120).max(); x['Distance 52W High %']=(c/x['52WHigh']-1)*100
+    tr=pd.concat([x['High']-x['Low'],(x['High']-c.shift()).abs(),(x['Low']-c.shift()).abs()],axis=1).max(axis=1)
+    x['ATR14']=tr.rolling(14).mean()
+    return x.dropna(subset=['SMA50','SMA200'])
+
+def _mcs_scan_one(symbol,df,benchmark=None,fundamentals=None):
+    x=_mcs_prepare(df)
+    if x.empty: return None
+    r=x.iloc[-1]; f=fundamentals or {}
+    def num(k):
+        v=pd.to_numeric(f.get(k),errors='coerce') if f.get(k) is not None else np.nan
+        return float(v) if pd.notna(v) else np.nan
+    annual=num('annual'); pat=num('pat'); ebitda=num('ebitda'); order=num('order'); catalyst=str(f.get('catalyst') or '').strip()
+    score=0; reasons=[]; warnings=[]
+    ret1=float(r['Return 1D %']); ret20=float(r['Return 20D %'])
+    if ret1>=4: score+=10; reasons.append(f'1D +{ret1:.1f}%')
+    elif ret1>=3: score+=7; reasons.append(f'1D +{ret1:.1f}%')
+    if ret20>=10: score+=10; reasons.append(f'20D +{ret20:.1f}%')
+    elif ret20>=5: score+=6
+    vr=float(r['Volume Ratio']) if np.isfinite(r['Volume Ratio']) else np.nan
+    if np.isfinite(vr):
+        if vr>=2: score+=20; reasons.append(f'Volume {vr:.1f}x 20D avg')
+        elif vr>=1.5: score+=15; reasons.append(f'Volume {vr:.1f}x 20D avg')
+        elif vr>=1.2: score+=8
+        else: warnings.append('No strong volume expansion')
+    else: warnings.append('Volume unavailable')
+    trend=0
+    if r['Close']>r['SMA20']: trend+=5
+    if r['Close']>r['SMA50']: trend+=5
+    if r['Close']>r['SMA200']: trend+=5
+    if r['SMA50']>r['SMA200']: trend+=5
+    score+=trend
+    if trend>=15: reasons.append('Bullish 20/50/200 structure')
+    breakout='None'
+    if r['Close']>r['High50Prev']: breakout='50D Breakout'; score+=15; reasons.append('50-day high breakout')
+    elif r['Close']>r['High20Prev']: breakout='20D Breakout'; score+=10; reasons.append('20-day high breakout')
+    elif r['Close']>r['SMA20'] and ret20>0: breakout='Emerging'; score+=4
+    else: warnings.append('No price breakout')
+    rs20=rs60=np.nan
+    if benchmark is not None and not benchmark.empty:
+        b=_mcs_prepare(benchmark)
+        if not b.empty:
+            rs20=ret20-float(b.iloc[-1]['Return 20D %']); rs60=float(r['Return 60D %'])-float(b.iloc[-1]['Return 60D %'])
+    if np.isfinite(rs20):
+        if rs20>=5: score+=6; reasons.append(f'20D RS +{rs20:.1f}% vs Nifty')
+        elif rs20>=2: score+=4
+    if np.isfinite(rs60) and rs60>=5: score+=4
+    fund=0
+    if np.isfinite(annual):
+        if annual>=20: fund+=4; reasons.append(f'Revenue growth {annual:.1f}%')
+        elif annual>=15: fund+=2
+    if np.isfinite(pat):
+        if pat>=50: fund+=3; reasons.append(f'PAT growth {pat:.1f}%')
+        elif pat>=25: fund+=2
+    if np.isfinite(ebitda) and ebitda>=20: fund+=2; reasons.append(f'EBITDA growth {ebitda:.1f}%')
+    if np.isfinite(order) and order>=15: fund+=1; reasons.append(f'Order book growth {order:.1f}%')
+    score+=min(10,fund)
+    if catalyst: score+=5; reasons.append('Catalyst supplied')
+    else: warnings.append('Catalyst/news not supplied')
+    score=min(100,int(round(score)))
+    grade='🟢 Explosive Momentum' if score>=80 else '🟢 Strong Momentum' if score>=70 else '🟡 Emerging Momentum' if score>=60 else '⚪ Watchlist'
+    ready=bool(score>=75 and r['Close']>r['SMA50']>r['SMA200'] and np.isfinite(vr) and vr>=1.2)
+    entry=float(r['Close']); atr=float(r['ATR14']) if np.isfinite(r['ATR14']) else entry*.02; sl=max(.01,entry-1.5*atr); risk=entry-sl
+    return {'Symbol':symbol,'Score':score,'Rating':grade,'Trade Ready':ready,'Close':entry,'1D %':ret1,'20D %':ret20,'60D %':float(r['Return 60D %']),'Volume Ratio':vr,'Breakout':breakout,'RS 20D %':rs20,'RS 60D %':rs60,'SMA20':float(r['SMA20']),'SMA50':float(r['SMA50']),'SMA200':float(r['SMA200']),'SMA50>SMA200':bool(r['SMA50']>r['SMA200']),'52W High Distance %':float(r['Distance 52W High %']),'Revenue Growth %':annual,'PAT Growth %':pat,'EBITDA Growth %':ebitda,'Order Book Growth %':order,'Catalyst':catalyst or 'Not supplied','Entry Reference':entry,'ATR14':atr,'Suggested SL':sl,'Target 1':entry+2*risk,'Target 2':entry+3*risk,'Reasons':' | '.join(reasons),'Warnings':' | '.join(warnings)}
+
+def _mcs_read_fundamentals(uploaded_file):
+    try:
+        f=pd.read_csv(uploaded_file); cols={str(c).strip().lower():c for c in f.columns}
+        sym=next((cols[k] for k in ('symbol','ticker','stock','code') if k in cols),None)
+        if sym is None: return {}
+        def find(keys): return next((cols[k] for k in keys if k in cols),None)
+        ac=find(('annual revenue growth %','revenue growth %','revenue growth')); pc=find(('pat growth %','pat growth','profit growth %','profit growth')); ec=find(('ebitda growth %','ebitda growth')); oc=find(('order book growth %','order book growth','order growth %')); cc=find(('catalyst','news catalyst','event catalyst'))
+        out={}
+        for _,r in f.iterrows():
+            s=str(r[sym]).strip().upper()
+            if not s or s=='NAN': continue
+            def num(c):
+                if c is None: return None
+                v=pd.to_numeric(r[c],errors='coerce'); return float(v) if pd.notna(v) else None
+            out[s]={'annual':num(ac),'pat':num(pc),'ebitda':num(ec),'order':num(oc),'catalyst':str(r[cc]).strip() if cc and pd.notna(r[cc]) else ''}
+        return out
+    except Exception: return {}
 
 # ============================================================
 # KRATTER MOMENTUM SCANNER
@@ -11264,6 +11378,64 @@ elif module == "📚 Kratter Momentum Scanner":
             c.metric("Shares",f"{calc['Shares']:,}")
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
+
+elif module == "🔥 Momentum Catalyst Scanner":
+
+    st.header("🔥 Momentum Catalyst Scanner")
+    st.caption("Price acceleration + volume expansion + trend + breakout + relative strength + optional fundamental acceleration")
+    st.info("Designed from the common pattern observed in your high-momentum stock list. Fundamentals and catalysts are optional inputs; the scanner never fabricates them.")
+
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
+    selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
+    uk=universe_options[selected_universe]
+    try:
+        if uk=="nifty50": stocks=load_nifty50()
+        elif uk=="nifty500": stocks=load_nifty500()
+        elif uk=="midcap100": stocks=load_nifty_midcap100()
+        elif uk=="smallcap250": stocks=load_nifty_smallcap250()
+        elif uk=="fno": stocks=load_fno_stocks()
+        else: stocks=load_nse_equity_universe()
+    except Exception: stocks=[]
+    stocks=list(stocks or [])
+    st.sidebar.markdown("### Momentum thresholds")
+    min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
+    min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
+    if not stocks: st.warning("No stocks could be loaded for this universe.")
+    else:
+        fund_file=st.file_uploader("Optional fundamentals/catalyst CSV",type=["csv"],key="mcs_fundamentals")
+        st.caption("Columns: Symbol, Annual Revenue Growth %, PAT Growth %, EBITDA Growth %, Order Book Growth %, Catalyst")
+        fundamentals=_mcs_read_fundamentals(fund_file) if fund_file else {}
+        if st.button("🔎 RUN MOMENTUM CATALYST SCAN",type="primary",key="mcs_run"):
+            with st.spinner("Scanning momentum, volume, trend and breakout structure..."):
+                data_map=_kratter_download_batches(stocks)
+                benchmark=_download_nifty50_history("2y") if '_download_nifty50_history' in globals() else pd.DataFrame()
+            rows=[]; failed=0
+            for symbol in stocks:
+                d=data_map.get(symbol)
+                if d is None or d.empty: failed+=1; continue
+                res=_mcs_scan_one(symbol,d,benchmark,fundamentals.get(str(symbol).upper(),{}))
+                if res is not None: rows.append(res)
+            result_df=pd.DataFrame(rows)
+            if result_df.empty:
+                st.warning("No valid stocks were returned. The scanner requires at least 205 daily bars.")
+            else:
+                result_df=result_df[result_df["Volume Ratio"].fillna(0)>=min_vol].copy()
+                result_df=result_df[result_df["Score"]>=min_score].sort_values(["Score","Volume Ratio"],ascending=False)
+                if result_df.empty: st.info("No stocks met the selected score and volume thresholds.")
+                else:
+                    a,b,c,d=st.columns(4)
+                    a.metric("Qualified",len(result_df)); b.metric("Explosive ≥80",int((result_df.Score>=80).sum())); c.metric("Strong 70–79",int(((result_df.Score>=70)&(result_df.Score<80)).sum())); d.metric("Trade Ready",int(result_df["Trade Ready"].sum()))
+                    st.subheader("🏆 Highest-Probability Momentum Stocks")
+                    cols=["Symbol","Score","Rating","Trade Ready","Close","1D %","20D %","Volume Ratio","Breakout","RS 20D %","SMA50>SMA200","52W High Distance %","Revenue Growth %","PAT Growth %","EBITDA Growth %","Order Book Growth %","Entry Reference","Suggested SL","Target 1","Target 2","Reasons","Warnings"]
+                    cols=[c for c in cols if c in result_df.columns]
+                    st.dataframe(result_df[cols],width="stretch",hide_index=True)
+                    st.subheader("🧠 Why are these stocks rising?")
+                    for _,r in result_df.head(10).iterrows():
+                        st.markdown(f"**{r['Symbol']} — {r['Rating']} — {r['Score']}/100**")
+                        st.write(r["Reasons"] or "No strong explanatory factors available.")
+                        if r["Warnings"]: st.caption("⚠️ "+r["Warnings"])
+                    csv=result_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Download Momentum Catalyst Scan CSV",csv,"momentum_catalyst_scan.csv","text/csv",key="mcs_download")
 
 elif module == "📊 Options Next-Day Analyzer":
 
