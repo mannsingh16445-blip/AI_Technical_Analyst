@@ -11400,6 +11400,21 @@ elif module == "🔥 Momentum Catalyst Scanner":
     st.sidebar.markdown("### Momentum thresholds")
     min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
     min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
+
+    import datetime as _dt
+    analysis_date=st.sidebar.date_input(
+        "Analysis / As-of Date",
+        value=_dt.date.today(),
+        max_value=_dt.date.today(),
+        key="mcs_analysis_date",
+        help="Select the trading date on which you want the scanner to evaluate the stocks."
+    )
+    analysis_ts=pd.Timestamp(analysis_date)
+    st.sidebar.caption(
+        f"Scanner will evaluate the latest trading session on or before "
+        f"{analysis_date.strftime('%d-%b-%Y')}."
+    )
+
     if not stocks: st.warning("No stocks could be loaded for this universe.")
     else:
         fund_file=st.file_uploader("Optional fundamentals/catalyst CSV",type=["csv"],key="mcs_fundamentals")
@@ -11408,16 +11423,47 @@ elif module == "🔥 Momentum Catalyst Scanner":
         if st.button("🔎 RUN MOMENTUM CATALYST SCAN",type="primary",key="mcs_run"):
             with st.spinner("Scanning momentum, volume, trend and breakout structure..."):
                 data_map=_kratter_download_batches(stocks)
-                benchmark=_download_nifty50_history("2y") if '_download_nifty50_history' in globals() else pd.DataFrame()
-            rows=[]; failed=0
+                benchmark=_download_nifty50_history("5y") if '_download_nifty50_history' in globals() else pd.DataFrame()
+            rows=[]; failed=0; no_history=0
             for symbol in stocks:
                 d=data_map.get(symbol)
-                if d is None or d.empty: failed+=1; continue
-                res=_mcs_scan_one(symbol,d,benchmark,fundamentals.get(str(symbol).upper(),{}))
+                if d is None or d.empty:
+                    failed+=1
+                    continue
+                d=d.copy()
+                try:
+                    d.index=pd.to_datetime(d.index)
+                    if getattr(d.index,"tz",None) is not None:
+                        d.index=d.index.tz_localize(None)
+                    d=d.loc[d.index<=analysis_ts].copy()
+                except Exception:
+                    no_history+=1
+                    continue
+                if d.empty:
+                    no_history+=1
+                    continue
+
+                if benchmark is not None and not benchmark.empty:
+                    benchmark=benchmark.copy()
+                    try:
+                        benchmark.index=pd.to_datetime(benchmark.index)
+                        if getattr(benchmark.index,"tz",None) is not None:
+                            benchmark.index=benchmark.index.tz_localize(None)
+                        benchmark=benchmark.loc[benchmark.index<=analysis_ts].copy()
+                    except Exception:
+                        benchmark=pd.DataFrame()
+
+                res=_mcs_scan_one(
+                    symbol,d,benchmark,
+                    fundamentals.get(str(symbol).upper(),{})
+                )
                 if res is not None: rows.append(res)
             result_df=pd.DataFrame(rows)
             if result_df.empty:
-                st.warning("No valid stocks were returned. The scanner requires at least 205 daily bars.")
+                st.warning(
+                    f"No valid stocks were returned for {analysis_date.strftime('%d-%b-%Y')}. "
+                    "The scanner requires at least 205 daily bars available on or before the selected date."
+                )
             else:
                 result_df=result_df[result_df["Volume Ratio"].fillna(0)>=min_vol].copy()
                 result_df=result_df[result_df["Score"]>=min_score].sort_values(["Score","Volume Ratio"],ascending=False)
@@ -11426,7 +11472,8 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     a,b,c,d=st.columns(4)
                     a.metric("Qualified",len(result_df)); b.metric("Explosive ≥80",int((result_df.Score>=80).sum())); c.metric("Strong 70–79",int(((result_df.Score>=70)&(result_df.Score<80)).sum())); d.metric("Trade Ready",int(result_df["Trade Ready"].sum()))
                     st.subheader("🏆 Highest-Probability Momentum Stocks")
-                    cols=["Symbol","Score","Rating","Trade Ready","Close","1D %","20D %","Volume Ratio","Breakout","RS 20D %","SMA50>SMA200","52W High Distance %","Revenue Growth %","PAT Growth %","EBITDA Growth %","Order Book Growth %","Entry Reference","Suggested SL","Target 1","Target 2","Reasons","Warnings"]
+                    result_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+                    cols=["Scan Date","Symbol","Score","Rating","Trade Ready","Close","1D %","20D %","Volume Ratio","Breakout","RS 20D %","SMA50>SMA200","52W High Distance %","Revenue Growth %","PAT Growth %","EBITDA Growth %","Order Book Growth %","Entry Reference","Suggested SL","Target 1","Target 2","Reasons","Warnings"]
                     cols=[c for c in cols if c in result_df.columns]
                     st.dataframe(result_df[cols],width="stretch",hide_index=True)
                     st.subheader("🧠 Why are these stocks rising?")
