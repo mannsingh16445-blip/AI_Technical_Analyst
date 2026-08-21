@@ -8929,65 +8929,257 @@ def _mcs_prepare(df):
     x['ATR14']=tr.rolling(14).mean()
     return x.dropna(subset=['SMA50','SMA200'])
 
-def _mcs_scan_one(symbol,df,benchmark=None,fundamentals=None):
+def _mcs_scan_one(symbol,df,benchmark=None,fundamentals=None,
+                  breakout_mode="Confirmed Breakout",
+                  min_breakout_volume=1.5):
+    """Score a stock with breakout as a hard gate, not just momentum.
+
+    Confirmed Breakout:
+      - Close above previous 20D or 50D high
+      - Volume >= selected multiple of 20D average
+      - Close in the upper part of the day's range
+      - Price above SMA20
+      - Preferably above SMA50/SMA200
+    """
     x=_mcs_prepare(df)
-    if x.empty: return None
-    r=x.iloc[-1]; f=fundamentals or {}
+    if x.empty:
+        return None
+
+    r=x.iloc[-1]
+    f=fundamentals or {}
+
     def num(k):
-        v=pd.to_numeric(f.get(k),errors='coerce') if f.get(k) is not None else np.nan
+        v=pd.to_numeric(f.get(k),errors="coerce") if f.get(k) is not None else np.nan
         return float(v) if pd.notna(v) else np.nan
-    annual=num('annual'); pat=num('pat'); ebitda=num('ebitda'); order=num('order'); catalyst=str(f.get('catalyst') or '').strip()
-    score=0; reasons=[]; warnings=[]
-    ret1=float(r['Return 1D %']); ret20=float(r['Return 20D %'])
-    if ret1>=4: score+=10; reasons.append(f'1D +{ret1:.1f}%')
-    elif ret1>=3: score+=7; reasons.append(f'1D +{ret1:.1f}%')
-    if ret20>=10: score+=10; reasons.append(f'20D +{ret20:.1f}%')
-    elif ret20>=5: score+=6
-    vr=float(r['Volume Ratio']) if np.isfinite(r['Volume Ratio']) else np.nan
-    if np.isfinite(vr):
-        if vr>=2: score+=20; reasons.append(f'Volume {vr:.1f}x 20D avg')
-        elif vr>=1.5: score+=15; reasons.append(f'Volume {vr:.1f}x 20D avg')
-        elif vr>=1.2: score+=8
-        else: warnings.append('No strong volume expansion')
-    else: warnings.append('Volume unavailable')
-    trend=0
-    if r['Close']>r['SMA20']: trend+=5
-    if r['Close']>r['SMA50']: trend+=5
-    if r['Close']>r['SMA200']: trend+=5
-    if r['SMA50']>r['SMA200']: trend+=5
-    score+=trend
-    if trend>=15: reasons.append('Bullish 20/50/200 structure')
-    breakout='None'
-    if r['Close']>r['High50Prev']: breakout='50D Breakout'; score+=15; reasons.append('50-day high breakout')
-    elif r['Close']>r['High20Prev']: breakout='20D Breakout'; score+=10; reasons.append('20-day high breakout')
-    elif r['Close']>r['SMA20'] and ret20>0: breakout='Emerging'; score+=4
-    else: warnings.append('No price breakout')
+
+    annual=num("annual"); pat=num("pat"); ebitda=num("ebitda")
+    order=num("order")
+    catalyst=str(f.get("catalyst") or "").strip()
+
+    close=float(r["Close"])
+    high=float(r["High"])
+    low=float(r["Low"])
+    open_px=float(r["Open"])
+    ret1=float(r["Return 1D %"])
+    ret20=float(r["Return 20D %"])
+    vr=float(r["Volume Ratio"]) if np.isfinite(r["Volume Ratio"]) else np.nan
+
+    # --------------------------------------------------------
+    # BREAKOUT ENGINE — this is now the primary filter
+    # --------------------------------------------------------
+    breakout_20=bool(np.isfinite(r["High20Prev"]) and close>float(r["High20Prev"]))
+    breakout_50=bool(np.isfinite(r["High50Prev"]) and close>float(r["High50Prev"]))
+
+    if breakout_50:
+        breakout="50D Breakout"
+        breakout_level=float(r["High50Prev"])
+    elif breakout_20:
+        breakout="20D Breakout"
+        breakout_level=float(r["High20Prev"])
+    else:
+        breakout="No Breakout"
+        breakout_level=np.nan
+
+    breakout_pct=(
+        (close/breakout_level-1)*100
+        if np.isfinite(breakout_level) and breakout_level>0 else np.nan
+    )
+
+    day_range=high-low
+    close_location=(
+        (close-low)/day_range*100
+        if day_range>0 else 50.0
+    )
+
+    # Gap-adjusted breakout: a stock can gap above resistance, but we still
+    # require the closing price to remain above it.
+    confirmed_volume=bool(np.isfinite(vr) and vr>=min_breakout_volume)
+    strong_close=bool(close_location>=65)
+    trend_ok=bool(close>r["SMA20"])
+    trend_strong=bool(close>r["SMA50"] and r["SMA50"]>r["SMA200"])
+    near_52w=bool(
+        np.isfinite(r["Distance 52W High %"])
+        and r["Distance 52W High %"]>=-12
+    )
+
+    # Optional stricter mode for earlier entries:
+    # 20D breakout is accepted, but must have volume and strong close.
+    if breakout_mode=="Confirmed Breakout":
+        breakout_qualified=(
+            (breakout_50 or breakout_20)
+            and confirmed_volume
+            and strong_close
+            and trend_ok
+        )
+    else:
+        breakout_qualified=(
+            breakout_20
+            and confirmed_volume
+            and strong_close
+            and trend_ok
+        )
+
+    score=0
+    reasons=[]
+    warnings=[]
+
+    # Breakout receives the largest weight.
+    if breakout_50:
+        score+=25
+        reasons.append("Confirmed 50-day high breakout")
+    elif breakout_20:
+        score+=20
+        reasons.append("Confirmed 20-day high breakout")
+    else:
+        warnings.append("No 20/50-day breakout")
+
+    if confirmed_volume:
+        if vr>=2:
+            score+=20
+            reasons.append(f"Breakout volume {vr:.1f}x 20D average")
+        else:
+            score+=15
+            reasons.append(f"Breakout volume {vr:.1f}x 20D average")
+    else:
+        warnings.append("Breakout volume confirmation missing")
+
+    if strong_close:
+        score+=10
+        reasons.append(f"Strong closing position ({close_location:.0f}% of range)")
+    else:
+        warnings.append("Weak breakout candle close")
+
+    if trend_ok:
+        score+=5
+    if trend_strong:
+        score+=10
+        reasons.append("Price > SMA50 > SMA200")
+
+    # Momentum is now a confirmation, not the main trigger.
+    if ret1>=4:
+        score+=5
+        reasons.append(f"1D momentum +{ret1:.1f}%")
+    elif ret1>=2:
+        score+=2
+
+    if ret20>=10:
+        score+=5
+        reasons.append(f"20D momentum +{ret20:.1f}%")
+    elif ret20>=5:
+        score+=3
+
+    # Relative strength.
     rs20=rs60=np.nan
     if benchmark is not None and not benchmark.empty:
         b=_mcs_prepare(benchmark)
         if not b.empty:
-            rs20=ret20-float(b.iloc[-1]['Return 20D %']); rs60=float(r['Return 60D %'])-float(b.iloc[-1]['Return 60D %'])
+            rs20=ret20-float(b.iloc[-1]["Return 20D %"])
+            rs60=float(r["Return 60D %"])-float(b.iloc[-1]["Return 60D %"])
+
     if np.isfinite(rs20):
-        if rs20>=5: score+=6; reasons.append(f'20D RS +{rs20:.1f}% vs Nifty')
-        elif rs20>=2: score+=4
-    if np.isfinite(rs60) and rs60>=5: score+=4
+        if rs20>=5:
+            score+=5
+            reasons.append(f"20D RS +{rs20:.1f}% vs Nifty")
+        elif rs20>=2:
+            score+=3
+
+    if np.isfinite(rs60) and rs60>=5:
+        score+=3
+
+    # Near 52-week high is confirmation, not a breakout by itself.
+    if near_52w:
+        score+=2
+        reasons.append("Near 52-week high")
+
+    # Fundamentals remain a bonus only; they cannot create a breakout signal.
     fund=0
     if np.isfinite(annual):
-        if annual>=20: fund+=4; reasons.append(f'Revenue growth {annual:.1f}%')
-        elif annual>=15: fund+=2
+        if annual>=20:
+            fund+=4
+            reasons.append(f"Revenue growth {annual:.1f}%")
+        elif annual>=15:
+            fund+=2
     if np.isfinite(pat):
-        if pat>=50: fund+=3; reasons.append(f'PAT growth {pat:.1f}%')
-        elif pat>=25: fund+=2
-    if np.isfinite(ebitda) and ebitda>=20: fund+=2; reasons.append(f'EBITDA growth {ebitda:.1f}%')
-    if np.isfinite(order) and order>=15: fund+=1; reasons.append(f'Order book growth {order:.1f}%')
+        if pat>=50:
+            fund+=3
+            reasons.append(f"PAT growth {pat:.1f}%")
+        elif pat>=25:
+            fund+=2
+    if np.isfinite(ebitda) and ebitda>=20:
+        fund+=2
+        reasons.append(f"EBITDA growth {ebitda:.1f}%")
+    if np.isfinite(order) and order>=15:
+        fund+=1
+        reasons.append(f"Order book growth {order:.1f}%")
     score+=min(10,fund)
-    if catalyst: score+=5; reasons.append('Catalyst supplied')
-    else: warnings.append('Catalyst/news not supplied')
-    score=min(100,int(round(score)))
-    grade='🟢 Explosive Momentum' if score>=80 else '🟢 Strong Momentum' if score>=70 else '🟡 Emerging Momentum' if score>=60 else '⚪ Watchlist'
-    ready=bool(score>=75 and r['Close']>r['SMA50']>r['SMA200'] and np.isfinite(vr) and vr>=1.2)
-    entry=float(r['Close']); atr=float(r['ATR14']) if np.isfinite(r['ATR14']) else entry*.02; sl=max(.01,entry-1.5*atr); risk=entry-sl
-    return {'Symbol':symbol,'Score':score,'Rating':grade,'Trade Ready':ready,'Close':entry,'1D %':ret1,'20D %':ret20,'60D %':float(r['Return 60D %']),'Volume Ratio':vr,'Breakout':breakout,'RS 20D %':rs20,'RS 60D %':rs60,'SMA20':float(r['SMA20']),'SMA50':float(r['SMA50']),'SMA200':float(r['SMA200']),'SMA50>SMA200':bool(r['SMA50']>r['SMA200']),'52W High Distance %':float(r['Distance 52W High %']),'Revenue Growth %':annual,'PAT Growth %':pat,'EBITDA Growth %':ebitda,'Order Book Growth %':order,'Catalyst':catalyst or 'Not supplied','Entry Reference':entry,'ATR14':atr,'Suggested SL':sl,'Target 1':entry+2*risk,'Target 2':entry+3*risk,'Reasons':' | '.join(reasons),'Warnings':' | '.join(warnings)}
+
+    if catalyst:
+        score+=5
+        reasons.append("Catalyst supplied")
+    else:
+        warnings.append("Catalyst/news not supplied")
+
+    # Hard gate: momentum alone can no longer qualify a stock.
+    if not breakout_qualified:
+        rating="⚪ No Breakout"
+        trade_ready=False
+        score=min(score,59)
+        if breakout in ("20D Breakout","50D Breakout"):
+            warnings.append("Breakout failed confirmation rules")
+    else:
+        score=min(100,int(round(score)))
+        rating=(
+            "🟢 Explosive Breakout" if score>=80
+            else "🟢 Strong Breakout" if score>=70
+            else "🟡 Breakout Developing"
+        )
+        trade_ready=bool(
+            score>=70
+            and close>r["SMA50"]>r["SMA200"]
+            and confirmed_volume
+        )
+
+    entry=close
+    atr=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else entry*.02
+    sl=max(.01,entry-1.5*atr)
+    risk=entry-sl
+
+    return {
+        "Symbol":symbol,
+        "Score":score,
+        "Rating":rating,
+        "Trade Ready":trade_ready,
+        "Breakout Qualified":breakout_qualified,
+        "Close":entry,
+        "1D %":ret1,
+        "20D %":ret20,
+        "60D %":float(r["Return 60D %"]),
+        "Volume Ratio":vr,
+        "Breakout":breakout,
+        "Breakout Level":breakout_level,
+        "Breakout Distance %":breakout_pct,
+        "Close Location %":close_location,
+        "RS 20D %":rs20,
+        "RS 60D %":rs60,
+        "SMA20":float(r["SMA20"]),
+        "SMA50":float(r["SMA50"]),
+        "SMA200":float(r["SMA200"]),
+        "SMA50>SMA200":bool(r["SMA50"]>r["SMA200"]),
+        "52W High Distance %":float(r["Distance 52W High %"]),
+        "Revenue Growth %":annual,
+        "PAT Growth %":pat,
+        "EBITDA Growth %":ebitda,
+        "Order Book Growth %":order,
+        "Catalyst":catalyst or "Not supplied",
+        "Entry Reference":entry,
+        "ATR14":atr,
+        "Suggested SL":sl,
+        "Target 1":entry+2*risk,
+        "Target 2":entry+3*risk,
+        "Reasons":" | ".join(reasons),
+        "Warnings":" | ".join(warnings)
+    }
+
 
 def _mcs_read_fundamentals(uploaded_file):
     try:
@@ -11382,8 +11574,8 @@ elif module == "📚 Kratter Momentum Scanner":
 elif module == "🔥 Momentum Catalyst Scanner":
 
     st.header("🔥 Momentum Catalyst Scanner")
-    st.caption("Price acceleration + volume expansion + trend + breakout + relative strength + optional fundamental acceleration")
-    st.info("Designed from the common pattern observed in your high-momentum stock list. Fundamentals and catalysts are optional inputs; the scanner never fabricates them.")
+    st.caption("Breakout-first scanner: resistance breakout + volume confirmation + strong close + trend, with momentum/fundamentals as confirmation.")
+    st.info("This version no longer treats a stock merely being in momentum as a signal. A stock must first qualify as a price breakout; momentum and fundamentals only strengthen the breakout score.")
 
     universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
@@ -11400,6 +11592,13 @@ elif module == "🔥 Momentum Catalyst Scanner":
     st.sidebar.markdown("### Momentum thresholds")
     min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
     min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
+    breakout_mode=st.sidebar.selectbox(
+        "Breakout Mode",
+        ["Confirmed Breakout","Early 20D Breakout"],
+        index=0,
+        key="mcs_breakout_mode",
+        help="Confirmed Breakout requires a 20D/50D resistance breakout plus volume, strong close and SMA20 confirmation."
+    )
 
     import datetime as _dt
     analysis_date=st.sidebar.date_input(
@@ -11455,7 +11654,9 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
                 res=_mcs_scan_one(
                     symbol,d,benchmark,
-                    fundamentals.get(str(symbol).upper(),{})
+                    fundamentals.get(str(symbol).upper(),{}),
+                    breakout_mode=breakout_mode,
+                    min_breakout_volume=min_vol
                 )
                 if res is not None: rows.append(res)
             result_df=pd.DataFrame(rows)
@@ -11465,15 +11666,18 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     "The scanner requires at least 205 daily bars available on or before the selected date."
                 )
             else:
-                result_df=result_df[result_df["Volume Ratio"].fillna(0)>=min_vol].copy()
+                result_df=result_df[result_df["Breakout Qualified"]].copy()
                 result_df=result_df[result_df["Score"]>=min_score].sort_values(["Score","Volume Ratio"],ascending=False)
                 if result_df.empty: st.info("No stocks met the selected score and volume thresholds.")
                 else:
                     a,b,c,d=st.columns(4)
-                    a.metric("Qualified",len(result_df)); b.metric("Explosive ≥80",int((result_df.Score>=80).sum())); c.metric("Strong 70–79",int(((result_df.Score>=70)&(result_df.Score<80)).sum())); d.metric("Trade Ready",int(result_df["Trade Ready"].sum()))
+                    a.metric("Breakouts",len(result_df))
+                    b.metric("Explosive ≥80",int((result_df.Score>=80).sum()))
+                    c.metric("Strong 70–79",int(((result_df.Score>=70)&(result_df.Score<80)).sum()))
+                    d.metric("Trade Ready",int(result_df["Trade Ready"].sum()))
                     st.subheader("🏆 Highest-Probability Momentum Stocks")
                     result_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
-                    cols=["Scan Date","Symbol","Score","Rating","Trade Ready","Close","1D %","20D %","Volume Ratio","Breakout","RS 20D %","SMA50>SMA200","52W High Distance %","Revenue Growth %","PAT Growth %","EBITDA Growth %","Order Book Growth %","Entry Reference","Suggested SL","Target 1","Target 2","Reasons","Warnings"]
+                    cols=["Scan Date","Symbol","Score","Rating","Trade Ready","Breakout Qualified","Close","1D %","20D %","Volume Ratio","Breakout","Breakout Level","Breakout Distance %","Close Location %","RS 20D %","SMA50>SMA200","52W High Distance %","Revenue Growth %","PAT Growth %","EBITDA Growth %","Order Book Growth %","Entry Reference","Suggested SL","Target 1","Target 2","Reasons","Warnings"]
                     cols=[c for c in cols if c in result_df.columns]
                     st.dataframe(result_df[cols],width="stretch",hide_index=True)
                     st.subheader("🧠 Why are these stocks rising?")
