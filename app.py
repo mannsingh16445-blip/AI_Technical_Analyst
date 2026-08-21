@@ -9561,6 +9561,114 @@ def _mcs_early_breakout(symbol, df, benchmark=None, fundamentals=None):
     }
 
 
+
+# ============================================================
+# MOMENTUM CATALYST BACKTEST & VALIDATION
+# ============================================================
+
+def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
+                      min_score=65, min_vol=1.5, mode="Early Breakout",
+                      max_hold_days=10):
+    """Walk-forward validation with no look-ahead bias."""
+    if df is None or df.empty:
+        return []
+    d=df.copy()
+    d.index=pd.to_datetime(d.index)
+    if getattr(d.index,"tz",None) is not None:
+        d.index=d.index.tz_localize(None)
+    d=d.sort_index()
+    out=[]
+    for i in range(205, len(d)-1):
+        hist=d.iloc[:i+1].copy()
+        sig_date=d.index[i]
+        b=pd.DataFrame()
+        if benchmark is not None and not benchmark.empty:
+            b=benchmark.loc[benchmark.index<=sig_date].copy()
+
+        if mode=="Early Breakout":
+            s=_mcs_early_breakout(symbol,hist,b,fundamentals or {})
+            if s is None or not s.get("Early Qualified",False) or float(s.get("Early Score",0))<min_score:
+                continue
+            resistance=s.get("Resistance 20D",np.nan)
+            score=float(s.get("Early Score",0))
+        else:
+            s=_mcs_scan_one(symbol,hist,b,fundamentals or {},
+                            breakout_mode="Confirmed Breakout",
+                            min_breakout_volume=min_vol)
+            if s is None or not s.get("Breakout Qualified",False) or float(s.get("Score",0))<min_score:
+                continue
+            resistance=s.get("Breakout Level",np.nan)
+            score=float(s.get("Score",0))
+
+        future=d.iloc[i+1:i+1+max_hold_days].copy()
+        if future.empty:
+            continue
+        entry=float(future["Open"].iloc[0])
+        entry_date=future.index[0]
+
+        breakout_date=""
+        days_to_breakout=np.nan
+        if np.isfinite(resistance):
+            hits=future[future["Close"]>float(resistance)]
+            if not hits.empty:
+                breakout_date=hits.index[0].strftime("%Y-%m-%d")
+                days_to_breakout=int(future.index.get_loc(hits.index[0])+1)
+
+        end_close=float(future["Close"].iloc[-1])
+        max_gain=(float(future["High"].max())/entry-1)*100
+        max_dd=(float(future["Low"].min())/entry-1)*100
+        forward_return=(end_close/entry-1)*100
+
+        atr=float(s.get("ATR14",np.nan))
+        if not np.isfinite(atr):
+            atr=entry*.02
+        stop=entry-1.5*atr
+        risk=entry-stop
+        target1=entry+2*risk
+        target2=entry+3*risk
+
+        out.append({
+            "Symbol":symbol,
+            "Signal Date":sig_date.strftime("%Y-%m-%d"),
+            "Entry Date":entry_date.strftime("%Y-%m-%d"),
+            "Score":score,
+            "Signal Type":mode,
+            "Entry":entry,
+            "Resistance":resistance,
+            "Breakout Date":breakout_date,
+            "Breakout Within 5D":bool(np.isfinite(days_to_breakout) and days_to_breakout<=5),
+            "Days To Breakout":days_to_breakout,
+            "Forward Return %":forward_return,
+            "Max Gain %":max_gain,
+            "Max Drawdown %":max_dd,
+            "Stop Hit":bool((future["Low"]<=stop).any()),
+            "Target 1 Hit":bool((future["High"]>=target1).any()),
+            "Target 2 Hit":bool((future["High"]>=target2).any())
+        })
+    return out
+
+
+def _mcs_backtest_summary(bt):
+    if bt is None or bt.empty:
+        return {}
+    b5=bt["Breakout Within 5D"].mean()*100
+    days=bt["Days To Breakout"].dropna()
+    return {
+        "Signals":len(bt),
+        "Breakout Conversion %":b5,
+        "Breakout <=1D %":((days<=1).mean()*100 if len(days) else 0),
+        "Breakout <=3D %":((days<=3).mean()*100 if len(days) else 0),
+        "Breakout <=5D %":((days<=5).mean()*100 if len(days) else 0),
+        "Avg Forward Return %":bt["Forward Return %"].mean(),
+        "Median Forward Return %":bt["Forward Return %"].median(),
+        "Avg Max Gain %":bt["Max Gain %"].mean(),
+        "Avg Max Drawdown %":bt["Max Drawdown %"].mean(),
+        "Stop Hit %":bt["Stop Hit"].mean()*100,
+        "Target 1 Hit %":bt["Target 1 Hit"].mean()*100,
+        "Target 2 Hit %":bt["Target 2 Hit"].mean()*100
+    }
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -11716,7 +11824,8 @@ elif module == "🔥 Momentum Catalyst Scanner":
         "Select Scanner Mode",
         [
             "Confirmed Breakout",
-            "Early Breakout"
+            "Early Breakout",
+            "📊 Backtest & Validation"
         ],
         index=0,
         key="mcs_scan_mode",
@@ -11855,6 +11964,139 @@ elif module == "🔥 Momentum Catalyst Scanner":
                         if r["Warnings"]: st.caption("⚠️ "+r["Warnings"])
                     csv=result_df.to_csv(index=False).encode("utf-8")
                     st.download_button("⬇️ Download Momentum Catalyst Scan CSV",csv,"momentum_catalyst_scan.csv","text/csv",key="mcs_download")
+
+
+    # ========================================================
+    # BACKTEST & VALIDATION MODE
+    # ========================================================
+    if scan_mode=="📊 Backtest & Validation":
+        st.markdown("---")
+        st.subheader("📊 Momentum Catalyst Backtest & Validation")
+        st.caption(
+            "Walk-forward validation: each signal uses only information "
+            "available on that historical date."
+        )
+
+        import datetime as _dt_bt
+        default_end=analysis_date
+        default_start=default_end-_dt_bt.timedelta(days=365)
+
+        bc1,bc2,bc3=st.columns(3)
+        bt_start=bc1.date_input(
+            "Backtest Start Date", value=default_start,
+            max_value=_dt_bt.date.today(), key="mcs_bt_start"
+        )
+        bt_end=bc2.date_input(
+            "Backtest End Date", value=default_end,
+            max_value=_dt_bt.date.today(), key="mcs_bt_end"
+        )
+        bt_hold=bc3.slider(
+            "Forward Evaluation Days", 5,20,10,1,key="mcs_bt_hold"
+        )
+        bt_min=st.slider(
+            "Minimum Backtest Score",50,90,65,5,key="mcs_bt_min_score"
+        )
+        bt_mode=st.radio(
+            "Strategy to Validate",
+            ["Early Breakout","Confirmed Breakout"],
+            horizontal=True,key="mcs_bt_mode"
+        )
+        bt_run=st.button(
+            "📊 RUN BACKTEST & VALIDATION",
+            type="primary",key="mcs_bt_run"
+        )
+
+        if bt_run:
+            if bt_start>=bt_end:
+                st.error("Backtest start date must be before the end date.")
+            else:
+                bt_rows=[]
+                with st.spinner("Running walk-forward backtest..."):
+                    data_map=_kratter_download_batches(stocks)
+                    benchmark=(
+                        _download_nifty50_history("5y")
+                        if '_download_nifty50_history' in globals()
+                        else pd.DataFrame()
+                    )
+                    start_ts=pd.Timestamp(bt_start)
+                    end_ts=pd.Timestamp(bt_end)
+
+                    for symbol in stocks:
+                        d=data_map.get(symbol)
+                        if d is None or d.empty:
+                            continue
+                        d=d.copy()
+                        try:
+                            d.index=pd.to_datetime(d.index)
+                            if getattr(d.index,"tz",None) is not None:
+                                d.index=d.index.tz_localize(None)
+                            d=d.sort_index()
+                            d=d.loc[d.index<=end_ts].copy()
+                        except Exception:
+                            continue
+                        if d.empty:
+                            continue
+
+                        b=benchmark.copy() if benchmark is not None else pd.DataFrame()
+                        if not b.empty:
+                            try:
+                                b.index=pd.to_datetime(b.index)
+                                if getattr(b.index,"tz",None) is not None:
+                                    b.index=b.index.tz_localize(None)
+                                b=b.loc[b.index<=end_ts].sort_index()
+                            except Exception:
+                                b=pd.DataFrame()
+
+                        bt_rows.extend(
+                            r for r in _mcs_backtest_one(
+                                symbol,d,b,
+                                fundamentals.get(str(symbol).upper(),{}),
+                                min_score=bt_min,
+                                min_vol=min_vol,
+                                mode=bt_mode,
+                                max_hold_days=bt_hold
+                            )
+                            if start_ts<=pd.Timestamp(r["Signal Date"])<=end_ts
+                        )
+
+                bt_df=pd.DataFrame(bt_rows)
+                if bt_df.empty:
+                    st.warning(
+                        "No qualifying historical signals were found. "
+                        "Try a lower score or wider date range."
+                    )
+                else:
+                    summary=_mcs_backtest_summary(bt_df)
+                    st.success(
+                        f"Backtest completed: {len(bt_df):,} historical signals."
+                    )
+
+                    k1,k2,k3,k4=st.columns(4)
+                    k1.metric("Signals",summary["Signals"])
+                    k2.metric("Breakout ≤5D",f'{summary["Breakout Conversion %"]:.1f}%')
+                    k3.metric("Avg Forward Return",f'{summary["Avg Forward Return %"]:.2f}%')
+                    k4.metric("Median Return",f'{summary["Median Forward Return %"]:.2f}%')
+
+                    k5,k6,k7,k8=st.columns(4)
+                    k5.metric("Breakout ≤1D",f'{summary["Breakout <=1D %"]:.1f}%')
+                    k6.metric("Breakout ≤3D",f'{summary["Breakout <=3D %"]:.1f}%')
+                    k7.metric("Target 1 Hit",f'{summary["Target 1 Hit %"]:.1f}%')
+                    k8.metric("Stop Hit",f'{summary["Stop Hit %"]:.1f}%')
+
+                    st.dataframe(
+                        bt_df.sort_values(
+                            ["Signal Date","Score"],ascending=[False,False]
+                        ),
+                        width="stretch",hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Backtest Results",
+                        bt_df.to_csv(index=False).encode("utf-8"),
+                        f"momentum_catalyst_backtest_{bt_start}_{bt_end}.csv",
+                        "text/csv",key="mcs_bt_download"
+                    )
+
 
 elif module == "📊 Options Next-Day Analyzer":
 
