@@ -11662,6 +11662,53 @@ elif module == "🔥 Momentum Catalyst Scanner":
     st.info("This version no longer treats a stock merely being in momentum as a signal. A stock must first qualify as a price breakout; momentum and fundamentals only strengthen the breakout score.")
 
 
+
+
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
+    selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
+    uk=universe_options[selected_universe]
+    try:
+        if uk=="nifty50": stocks=load_nifty50()
+        elif uk=="nifty500": stocks=load_nifty500()
+        elif uk=="midcap100": stocks=load_nifty_midcap100()
+        elif uk=="smallcap250": stocks=load_nifty_smallcap250()
+        elif uk=="fno": stocks=load_fno_stocks()
+        else: stocks=load_nse_equity_universe()
+    except Exception: stocks=[]
+    stocks=list(stocks or [])
+    if selected_universe=="Nifty 50" and not stocks:
+        stocks=list(NIFTY50)
+    st.sidebar.markdown("### Momentum thresholds")
+    min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
+    min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
+    breakout_mode=st.sidebar.selectbox(
+        "Breakout Mode",
+        ["Confirmed Breakout","Early 20D Breakout"],
+        index=0,
+        key="mcs_breakout_mode",
+        help="Confirmed Breakout requires a 20D/50D resistance breakout plus volume, strong close and SMA20 confirmation."
+    )
+
+    import datetime as _dt
+    analysis_date=st.sidebar.date_input(
+        "Analysis / As-of Date",
+        value=_dt.date.today(),
+        max_value=_dt.date.today(),
+        key="mcs_analysis_date",
+        help="Select the trading date on which you want the scanner to evaluate the stocks."
+    )
+    analysis_ts=pd.Timestamp(analysis_date)
+    st.sidebar.caption(
+        f"Scanner will evaluate the latest trading session on or before "
+        f"{analysis_date.strftime('%d-%b-%Y')}."
+    )
+
+    if not stocks: st.warning("No stocks could be loaded for this universe.")
+    else:
+        fund_file=st.file_uploader("Optional fundamentals/catalyst CSV",type=["csv"],key="mcs_fundamentals")
+        st.caption("Columns: Symbol, Annual Revenue Growth %, PAT Growth %, EBITDA Growth %, Order Book Growth %, Catalyst")
+        fundamentals=_mcs_read_fundamentals(fund_file) if fund_file else {}
+
     st.markdown("---")
     st.subheader("🎯 Early Breakout Detector")
     st.caption("Find stocks still below resistance but tightening and preparing for a breakout.")
@@ -11720,51 +11767,6 @@ elif module == "🔥 Momentum Catalyst Scanner":
                                f"early_breakout_{analysis_date.strftime('%Y%m%d')}.csv",
                                "text/csv",key="mcs_early_download")
 
-
-    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
-    selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
-    uk=universe_options[selected_universe]
-    try:
-        if uk=="nifty50": stocks=load_nifty50()
-        elif uk=="nifty500": stocks=load_nifty500()
-        elif uk=="midcap100": stocks=load_nifty_midcap100()
-        elif uk=="smallcap250": stocks=load_nifty_smallcap250()
-        elif uk=="fno": stocks=load_fno_stocks()
-        else: stocks=load_nse_equity_universe()
-    except Exception: stocks=[]
-    stocks=list(stocks or [])
-    if selected_universe=="Nifty 50" and not stocks:
-        stocks=list(NIFTY50)
-    st.sidebar.markdown("### Momentum thresholds")
-    min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
-    min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
-    breakout_mode=st.sidebar.selectbox(
-        "Breakout Mode",
-        ["Confirmed Breakout","Early 20D Breakout"],
-        index=0,
-        key="mcs_breakout_mode",
-        help="Confirmed Breakout requires a 20D/50D resistance breakout plus volume, strong close and SMA20 confirmation."
-    )
-
-    import datetime as _dt
-    analysis_date=st.sidebar.date_input(
-        "Analysis / As-of Date",
-        value=_dt.date.today(),
-        max_value=_dt.date.today(),
-        key="mcs_analysis_date",
-        help="Select the trading date on which you want the scanner to evaluate the stocks."
-    )
-    analysis_ts=pd.Timestamp(analysis_date)
-    st.sidebar.caption(
-        f"Scanner will evaluate the latest trading session on or before "
-        f"{analysis_date.strftime('%d-%b-%Y')}."
-    )
-
-    if not stocks: st.warning("No stocks could be loaded for this universe.")
-    else:
-        fund_file=st.file_uploader("Optional fundamentals/catalyst CSV",type=["csv"],key="mcs_fundamentals")
-        st.caption("Columns: Symbol, Annual Revenue Growth %, PAT Growth %, EBITDA Growth %, Order Book Growth %, Catalyst")
-        fundamentals=_mcs_read_fundamentals(fund_file) if fund_file else {}
         if st.button("🔎 RUN MOMENTUM CATALYST SCAN",type="primary",key="mcs_run"):
             with st.spinner("Scanning momentum, volume, trend and breakout structure..."):
                 data_map=_kratter_download_batches(stocks)
