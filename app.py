@@ -344,6 +344,12 @@ NIFTY50 = [
 ]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_nifty50():
+    """Return the maintained Nifty 50 constituent snapshot."""
+    return list(NIFTY50)
+
+
 # ============================================================
 # LOAD NSE EQUITY UNIVERSE
 # ============================================================
@@ -11589,6 +11595,8 @@ elif module == "🔥 Momentum Catalyst Scanner":
         else: stocks=load_nse_equity_universe()
     except Exception: stocks=[]
     stocks=list(stocks or [])
+    if selected_universe=="Nifty 50" and not stocks:
+        stocks=list(NIFTY50)
     st.sidebar.markdown("### Momentum thresholds")
     min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
     min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
