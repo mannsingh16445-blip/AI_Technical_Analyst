@@ -9483,6 +9483,84 @@ def _kratter_read_fundamental_csv(uploaded_file):
 
 
 
+
+# ============================================================
+# EARLY BREAKOUT DETECTION
+# ============================================================
+
+def _mcs_early_breakout(symbol, df, benchmark=None, fundamentals=None):
+    """Identify stocks preparing for a breakout without requiring a breakout."""
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<60:
+        return None
+    r=x.iloc[-1]
+    close=float(r["Close"])
+    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
+    resistance50=float(r["High50Prev"]) if np.isfinite(r["High50Prev"]) else np.nan
+    if not np.isfinite(resistance) or close>=resistance:
+        return None
+    distance=(resistance-close)/resistance*100
+    if not 0<=distance<=3:
+        return None
+
+    recent=x.iloc[-10:]; prior=x.iloc[-30:-10]
+    if len(recent)<8 or len(prior)<10: return None
+    recent_range=(recent["High"].max()-recent["Low"].min())/close*100
+    prior_range=(prior["High"].max()-prior["Low"].min())/close*100
+    range_contracting=prior_range>0 and recent_range<prior_range*.75
+
+    rv=pd.to_numeric(recent["Volume"],errors="coerce").mean() if "Volume" in recent else np.nan
+    pv=pd.to_numeric(prior["Volume"],errors="coerce").mean() if "Volume" in prior else np.nan
+    volume_contracting=bool(np.isfinite(rv) and np.isfinite(pv) and rv<pv*.90)
+    vr=float(r["Volume Ratio"]) if np.isfinite(r["Volume Ratio"]) else np.nan
+    volume_expanding=bool(np.isfinite(vr) and vr>=1.10)
+
+    trend_ok=bool(close>r["SMA20"] and r["SMA20"]>r["SMA50"])
+    full_trend=bool(trend_ok and r["SMA50"]>r["SMA200"])
+
+    atr_recent=x["ATR14"].iloc[-5:].mean()
+    atr_prior=x["ATR14"].iloc[-25:-5].mean()
+    atr_contracting=bool(np.isfinite(atr_recent) and np.isfinite(atr_prior) and atr_recent<atr_prior*.90)
+
+    rs20=np.nan
+    if benchmark is not None and not benchmark.empty:
+        b=_mcs_prepare(benchmark)
+        if not b.empty:
+            rs20=float(r["Return 20D %"])-float(b.iloc[-1]["Return 20D %"])
+    rs_ok=bool(np.isfinite(rs20) and rs20>=2)
+
+    score=25 if distance<=1.5 else 18
+    reasons=[f"{distance:.1f}% below 20D resistance"]; missing=[]
+    if range_contracting: score+=15; reasons.append("10D range contraction")
+    else: missing.append("No clear range contraction")
+    if volume_contracting: score+=10; reasons.append("Volume contracted during base")
+    if volume_expanding: score+=10; reasons.append(f"Volume starting to expand ({vr:.1f}x)")
+    else: missing.append("Volume expansion not started")
+    if trend_ok: score+=10; reasons.append("Positive short-term trend")
+    else: missing.append("Short-term trend not confirmed")
+    if full_trend: score+=10; reasons.append("SMA20 > SMA50 > SMA200")
+    if atr_contracting: score+=8; reasons.append("ATR contraction")
+    else: missing.append("ATR contraction absent")
+    if rs_ok: score+=7; reasons.append(f"RS +{rs20:.1f}% vs Nifty")
+    else: missing.append("Relative strength not confirmed")
+
+    qualified=bool(trend_ok and (range_contracting or volume_expanding))
+    rating=("🟢 Breakout Imminent" if distance<=1.5 and range_contracting and trend_ok and volume_expanding
+            else "🟡 Breakout Setup" if qualified else "⚪ Early Watch")
+    return {
+        "Symbol":symbol,"Early Score":min(100,int(round(score))),
+        "Early Rating":rating,"Early Qualified":qualified,"Close":close,
+        "Resistance 20D":resistance,"Resistance 50D":resistance50,
+        "Distance to Breakout %":distance,"Volume Ratio":vr,
+        "Recent 10D Range %":recent_range,"Range Contracting":range_contracting,
+        "Volume Contracting":volume_contracting,"Volume Expanding":volume_expanding,
+        "ATR14":float(r["ATR14"]),"ATR Contracting":atr_contracting,
+        "SMA20":float(r["SMA20"]),"SMA50":float(r["SMA50"]),
+        "SMA200":float(r["SMA200"]),"RS 20D %":rs20,
+        "Reasons":" | ".join(reasons),"Missing Confirmations":" | ".join(missing)
+    }
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -11582,6 +11660,66 @@ elif module == "🔥 Momentum Catalyst Scanner":
     st.header("🔥 Momentum Catalyst Scanner")
     st.caption("Breakout-first scanner: resistance breakout + volume confirmation + strong close + trend, with momentum/fundamentals as confirmation.")
     st.info("This version no longer treats a stock merely being in momentum as a signal. A stock must first qualify as a price breakout; momentum and fundamentals only strengthen the breakout score.")
+
+
+    st.markdown("---")
+    st.subheader("🎯 Early Breakout Detector")
+    st.caption("Find stocks still below resistance but tightening and preparing for a breakout.")
+
+    early_min=st.slider("Minimum Early Breakout Score",50,90,65,5,key="mcs_early_min_score")
+    early_run=st.button("🎯 RUN EARLY BREAKOUT SCAN",key="mcs_early_run",type="primary")
+
+    if early_run:
+        early_rows=[]
+        with st.spinner("Scanning for stocks preparing to break out..."):
+            early_data_map=_kratter_download_batches(stocks)
+            early_benchmark=(_download_nifty50_history("5y")
+                             if '_download_nifty50_history' in globals() else pd.DataFrame())
+            for symbol in stocks:
+                d=early_data_map.get(symbol)
+                if d is None or d.empty: continue
+                d=d.copy()
+                try:
+                    d.index=pd.to_datetime(d.index)
+                    if getattr(d.index,"tz",None) is not None: d.index=d.index.tz_localize(None)
+                    d=d.loc[d.index<=analysis_ts].copy()
+                except Exception:
+                    continue
+                if d.empty: continue
+                eb=early_benchmark.copy() if early_benchmark is not None else pd.DataFrame()
+                if not eb.empty:
+                    try:
+                        eb.index=pd.to_datetime(eb.index)
+                        if getattr(eb.index,"tz",None) is not None: eb.index=eb.index.tz_localize(None)
+                        eb=eb.loc[eb.index<=analysis_ts].copy()
+                    except Exception: eb=pd.DataFrame()
+                er=_mcs_early_breakout(symbol,d,eb,fundamentals.get(str(symbol).upper(),{}))
+                if er is not None and er["Early Qualified"] and er["Early Score"]>=early_min:
+                    early_rows.append(er)
+
+        early_df=pd.DataFrame(early_rows)
+        if early_df.empty:
+            st.warning(f"No early-breakout setups met the threshold for {analysis_date.strftime('%d-%b-%Y')}.")
+        else:
+            early_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+            a,b,c,d=st.columns(4)
+            a.metric("Early Setups",len(early_df))
+            b.metric("🟢 Imminent",int((early_df["Early Rating"]=="🟢 Breakout Imminent").sum()))
+            c.metric("🟡 Setup",int((early_df["Early Rating"]=="🟡 Breakout Setup").sum()))
+            d.metric("Avg Score",f'{early_df["Early Score"].mean():.1f}')
+            cols=["Scan Date","Symbol","Early Score","Early Rating","Close",
+                  "Resistance 20D","Distance to Breakout %","Volume Ratio",
+                  "Recent 10D Range %","Range Contracting","Volume Expanding",
+                  "ATR Contracting","SMA20","SMA50","SMA200","RS 20D %",
+                  "Reasons","Missing Confirmations"]
+            st.dataframe(early_df.sort_values(["Early Score","Distance to Breakout %"],
+                                               ascending=[False,True])[cols],
+                         width="stretch",hide_index=True)
+            st.download_button("⬇️ Download Early Breakout Results",
+                               early_df.to_csv(index=False).encode("utf-8"),
+                               f"early_breakout_{analysis_date.strftime('%Y%m%d')}.csv",
+                               "text/csv",key="mcs_early_download")
+
 
     universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
