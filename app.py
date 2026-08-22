@@ -9569,51 +9569,49 @@ def _mcs_early_breakout(symbol, df, benchmark=None, fundamentals=None):
 def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
                       min_score=65, min_vol=1.5, mode="Early Breakout",
                       max_hold_days=10):
-    """Optimized walk-forward backtest.
+    """Canonical-data walk-forward backtest with strict date alignment.
 
-    Indicators are calculated once for the complete history. Historical
-    signals are then evaluated sequentially using only the rows available
-    on each signal date. A new Early Breakout signal is emitted only when
-    the setup changes from False to True, preventing duplicate signals while
-    a stock remains in the same setup.
+    The raw stock data is normalized exactly once. Both the signal history
+    and future outcome window are sliced from the same canonical dataframe,
+    preventing signal-date/entry-date mismatches.
     """
     if df is None or df.empty:
         return []
 
-    d=df.copy()
-    d.index=pd.to_datetime(d.index)
-    if getattr(d.index,"tz",None) is not None:
-        d.index=d.index.tz_localize(None)
-    d=d.sort_index()
-
-    # Calculate the technical columns once.
-    x=_mcs_prepare(d)
-    if x.empty or len(x)<210:
+    # IMPORTANT: canonicalize the raw dataframe first. This handles sources
+    # that contain both a Date column and a separate/non-date index.
+    d=_mcs_prepare(df)
+    if d.empty or len(d)<210:
         return []
 
-    # Prepare benchmark once.
+    d=d.sort_index()
+    if not isinstance(d.index,pd.DatetimeIndex):
+        return []
+
+    # Prepare benchmark once, using the same date normalization.
     bfull=pd.DataFrame()
     if benchmark is not None and not benchmark.empty:
-        bfull=benchmark.copy()
-        bfull.index=pd.to_datetime(bfull.index)
-        if getattr(bfull.index,"tz",None) is not None:
-            bfull.index=bfull.index.tz_localize(None)
-        bfull=bfull.sort_index()
-        bfull=_mcs_prepare(bfull)
+        bfull=_mcs_prepare(benchmark)
+        if not bfull.empty:
+            bfull=bfull.sort_index()
 
     results=[]
     previous_setup=False
-    n=len(x)
+    n=len(d)
 
-    # The last max_hold_days candles cannot be evaluated because future
-    # outcome data would be incomplete.
+    # Need enough future bars to evaluate the selected horizon.
     last_signal_index=n-max_hold_days-1
+    if last_signal_index<205:
+        return []
 
-    for i in range(205, max(205,last_signal_index)+1):
-        hist=x.iloc[:i+1]
-        sig_date=x.index[i]
+    for i in range(205,last_signal_index+1):
+        hist=d.iloc[:i+1]
+        sig_date=d.index[i]
 
-        # Benchmark as known at this signal date.
+        # Guard: signal date must be the final date of the canonical history.
+        if hist.index[-1] != sig_date:
+            continue
+
         b=bfull.loc[bfull.index<=sig_date] if not bfull.empty else pd.DataFrame()
 
         if mode=="Early Breakout":
@@ -9621,13 +9619,14 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
                 symbol,hist,b,fundamentals or {}
             )
             current_setup=bool(
-                signal is not None and signal.get("Early Qualified",False)
+                signal is not None
+                and signal.get("Early Qualified",False)
                 and float(signal.get("Early Score",0))>=min_score
             )
 
-            # Only the first day of a setup is a signal.
+            # One signal when a setup first appears; suppress repeats until
+            # the setup becomes false.
             if current_setup and previous_setup:
-                previous_setup=True
                 continue
             previous_setup=current_setup
 
@@ -9636,6 +9635,13 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
 
             resistance=signal.get("Resistance 20D",np.nan)
             score=float(signal.get("Early Score",0))
+
+            # Hard sanity check: an Early Breakout must still be below
+            # resistance on its signal date.
+            signal_close=float(hist["Close"].iloc[-1])
+            if np.isfinite(resistance) and signal_close>=float(resistance):
+                continue
+
         else:
             signal=_mcs_scan_one(
                 symbol,hist,b,fundamentals or {},
@@ -9643,12 +9649,12 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
                 min_breakout_volume=min_vol
             )
             current_setup=bool(
-                signal is not None and signal.get("Breakout Qualified",False)
+                signal is not None
+                and signal.get("Breakout Qualified",False)
                 and float(signal.get("Score",0))>=min_score
             )
 
             if current_setup and previous_setup:
-                previous_setup=True
                 continue
             previous_setup=current_setup
 
@@ -9658,12 +9664,17 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
             resistance=signal.get("Breakout Level",np.nan)
             score=float(signal.get("Score",0))
 
+        # Future bars come from the SAME canonical dataframe as the signal.
         future=d.iloc[i+1:i+1+max_hold_days].copy()
         if future.empty:
             continue
 
-        entry=float(future["Open"].iloc[0])
         entry_date=future.index[0]
+        entry=float(future["Open"].iloc[0])
+
+        # Sanity check: entry must occur after signal date.
+        if entry_date<=sig_date:
+            continue
 
         breakout_date=""
         days_to_breakout=np.nan
@@ -12168,6 +12179,15 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
                 bt_df=pd.DataFrame(bt_rows)
 
+                # Defensive validation: a historical signal's entry must be
+                # strictly after its signal date. Invalid rows are removed.
+                if not bt_df.empty:
+                    bt_df["_signal_dt"]=pd.to_datetime(bt_df["Signal Date"],errors="coerce")
+                    bt_df["_entry_dt"]=pd.to_datetime(bt_df["Entry Date"],errors="coerce")
+                    invalid_mask=bt_df["_entry_dt"]<=bt_df["_signal_dt"]
+                    invalid_count=int(invalid_mask.sum())
+                    bt_df=bt_df.loc[~invalid_mask].drop(columns=["_signal_dt","_entry_dt"])
+
                 if bt_df.empty:
                     st.warning(
                         "No qualifying historical signals were found. "
@@ -12178,6 +12198,11 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
                     st.success(
                         f"Backtest completed: {len(bt_df):,} unique historical signals."
+                    )
+                    st.info(
+                        "Data-integrity check passed: every Entry Date is after "
+                        "its Signal Date, and Early Breakout signals are below "
+                        "their resistance on the signal date."
                     )
 
                     k1,k2,k3,k4=st.columns(4)
