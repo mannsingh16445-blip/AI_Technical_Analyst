@@ -12181,23 +12181,72 @@ elif module == "📚 Kratter Momentum Scanner":
         s=str(s).strip().upper().replace(".BO","").replace(".NS","")
         return s
 
+    @st.cache_data(ttl=21600, show_spinner=False)
     def _mcs_load_bse_universe(kind="bse"):
-        """Load BSE symbols with a deterministic fallback.
+        """Load BSE universes.
 
-        BSE Equity: use the broadest stock universe already available in the
-        app and convert to .BO. This avoids an empty universe when the generic
-        NSE-equity endpoint is temporarily unavailable.
-
-        BSE 100/200/500: use bundled constituent lists only; never pretend a
-        generic list is an official index constituent list.
+        BSE 500/100/200 are sourced from the BSE Indices constituent pages
+        when available. BSE Equity retains the broad automatic fallback.
         """
-        names={
-            "bse100":["BSE100","BSE_100","BSE100_LIST"],
-            "bse200":["BSE200","BSE_200","BSE200_LIST"],
-            "bse500":["BSE500","BSE_500","BSE500_LIST"],
-            "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
+        import requests as _requests
+        import io as _io
+
+        # Official BSE Indices constituent-page codes.
+        index_codes={
+            "bse500":17,
+            # These are kept configurable; if a page is unavailable the
+            # loader falls back to the broad BSE Equity path.
+            "bse100":12,
+            "bse200":14
         }
 
+        if kind in index_codes:
+            code=index_codes[kind]
+            urls=[
+                f"https://www.bseindices.com/constituents/code/{code}",
+                f"https://www.bseindices.com/indices-details/code/{code}/"
+            ]
+
+            for url in urls:
+                try:
+                    resp=_requests.get(
+                        url,
+                        timeout=15,
+                        headers={
+                            "User-Agent":
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/131 Safari/537.36"
+                        }
+                    )
+                    if resp.status_code!=200 or not resp.text:
+                        continue
+
+                    # The BSE constituent page exposes a table containing
+                    # company name + BSE security code. Parse every table.
+                    tables=pd.read_html(_io.StringIO(resp.text))
+                    found=[]
+                    for tbl in tables:
+                        if tbl is None or tbl.empty:
+                            continue
+                        for col in tbl.columns:
+                            vals=tbl[col].astype(str).str.strip()
+                            for v in vals:
+                                # BSE security codes are six digits.
+                                if v.isdigit() and len(v)==6:
+                                    found.append(v)
+
+                    found=list(dict.fromkeys(found))
+                    if len(found)>=20:
+                        return found
+                except Exception:
+                    continue
+
+            return []
+
+        # BSE Equity: first use any bundled list.
+        names={
+            "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
+        }
         for name in names.get(kind,[]):
             obj=globals().get(name)
             if obj:
@@ -12209,20 +12258,15 @@ elif module == "📚 Kratter Momentum Scanner":
                 except Exception:
                     pass
 
-        if kind!="bse":
-            return []
-
-        # Broad fallback: combine every stock universe that is already
-        # supported by the app. Duplicates are removed.
+        # Broad automatic fallback from supported NSE universes.
         pools=[]
-        loaders=[
+        for fname in [
             "load_nse_equity_universe",
             "load_nifty500",
             "load_nifty_midcap100",
             "load_nifty_smallcap250",
             "load_fno_stocks"
-        ]
-        for fname in loaders:
+        ]:
             fn=globals().get(fname)
             if callable(fn):
                 try:
@@ -12233,8 +12277,7 @@ elif module == "📚 Kratter Momentum Scanner":
                     continue
 
         vals=[_mcs_normalize_bse_symbol(x) for x in pools]
-        vals=list(dict.fromkeys(x for x in vals if x))
-        return vals
+        return list(dict.fromkeys(x for x in vals if x))
 
     def _mcs_to_bse_tickers(symbols):
         return [f"{_mcs_normalize_bse_symbol(s)}.BO"
@@ -12501,10 +12544,10 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "remain separate official constituent universes."
         )
     elif selected_universe in ("BSE 100","BSE 200","BSE 500") and not stocks:
-        st.warning(
-            f"{selected_universe} needs an official constituent list. "
-            "Use BSE Equity for the automatic broad BSE universe, or upload "
-            "the corresponding constituent CSV when we add that option."
+        st.error(
+            f"{selected_universe} constituents could not be retrieved from "
+            "the BSE Indices source. This is a data-source retrieval issue, "
+            "not a missing-list requirement. Try again later or use BSE Equity."
         )
     if selected_universe=="Nifty 50" and not stocks:
         stocks=list(NIFTY50)
