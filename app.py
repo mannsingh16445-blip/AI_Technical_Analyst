@@ -12182,14 +12182,14 @@ elif module == "📚 Kratter Momentum Scanner":
         return s
 
     def _mcs_load_bse_universe(kind="bse"):
-        """Load BSE symbols.
+        """Load BSE symbols with a deterministic fallback.
 
-        BSE Equity has an automatic fallback: use the application's NSE
-        equity universe and convert symbols to Yahoo's .BO format. This is
-        useful because many Indian equities are dual-listed.
+        BSE Equity: use the broadest stock universe already available in the
+        app and convert to .BO. This avoids an empty universe when the generic
+        NSE-equity endpoint is temporarily unavailable.
 
-        BSE 100/200/500 require an actual constituent list and are never
-        silently substituted with an unrelated index.
+        BSE 100/200/500: use bundled constituent lists only; never pretend a
+        generic list is an official index constituent list.
         """
         names={
             "bse100":["BSE100","BSE_100","BSE100_LIST"],
@@ -12209,16 +12209,32 @@ elif module == "📚 Kratter Momentum Scanner":
                 except Exception:
                     pass
 
-        if kind=="bse":
-            try:
-                nse=load_nse_equity_universe()
-                vals=[_mcs_normalize_bse_symbol(x) for x in (nse or [])]
-                vals=list(dict.fromkeys(x for x in vals if x))
-                return vals
-            except Exception:
-                return []
+        if kind!="bse":
+            return []
 
-        return []
+        # Broad fallback: combine every stock universe that is already
+        # supported by the app. Duplicates are removed.
+        pools=[]
+        loaders=[
+            "load_nse_equity_universe",
+            "load_nifty500",
+            "load_nifty_midcap100",
+            "load_nifty_smallcap250",
+            "load_fno_stocks"
+        ]
+        for fname in loaders:
+            fn=globals().get(fname)
+            if callable(fn):
+                try:
+                    vals=fn()
+                    if vals:
+                        pools.extend(list(vals))
+                except Exception:
+                    continue
+
+        vals=[_mcs_normalize_bse_symbol(x) for x in pools]
+        vals=list(dict.fromkeys(x for x in vals if x))
+        return vals
 
     def _mcs_to_bse_tickers(symbols):
         return [f"{_mcs_normalize_bse_symbol(s)}.BO"
@@ -12480,9 +12496,15 @@ elif module == "🔥 Momentum Catalyst Scanner":
     stocks=list(stocks or [])
     if selected_universe=="BSE Equity" and stocks:
         st.info(
-            "BSE Equity uses the app's NSE equity universe and requests the "
-            "corresponding BSE (.BO) listings. For official BSE 100/200/500 "
-            "constituents, use a constituent CSV or a bundled BSE list."
+            f"BSE Equity loaded {len(stocks):,} symbols. The scanner will "
+            "request their BSE (.BO) market-data listings. BSE 100/200/500 "
+            "remain separate official constituent universes."
+        )
+    elif selected_universe in ("BSE 100","BSE 200","BSE 500") and not stocks:
+        st.warning(
+            f"{selected_universe} needs an official constituent list. "
+            "Use BSE Equity for the automatic broad BSE universe, or upload "
+            "the corresponding constituent CSV when we add that option."
         )
     if selected_universe=="Nifty 50" and not stocks:
         stocks=list(NIFTY50)
