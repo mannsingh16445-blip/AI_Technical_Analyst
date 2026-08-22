@@ -9642,6 +9642,31 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
             if np.isfinite(resistance) and signal_close>=float(resistance):
                 continue
 
+
+        elif mode=="🔥 Early Breakout V2":
+            signal=_mcs_early_breakout_v2(
+                symbol,hist,b,fundamentals or {}
+            )
+            current_setup=bool(
+                signal is not None
+                and signal.get("V2 Qualified",False)
+                and float(signal.get("V2 Score",0))>=min_score
+            )
+
+            if current_setup and previous_setup:
+                continue
+            previous_setup=current_setup
+
+            if not current_setup:
+                continue
+
+            resistance=signal.get("Resistance 20D",np.nan)
+            score=float(signal.get("V2 Score",0))
+
+            signal_close=float(hist["Close"].iloc[-1])
+            if np.isfinite(resistance) and signal_close>=float(resistance):
+                continue
+
         else:
             signal=_mcs_scan_one(
                 symbol,hist,b,fundamentals or {},
@@ -9749,6 +9774,194 @@ def _mcs_backtest_summary(bt):
         "Stop Hit %": float(bt["Stop Hit"].mean() * 100),
         "Target 1 Hit %": float(bt["Target 1 Hit"].mean() * 100),
         "Target 2 Hit %": float(bt["Target 2 Hit"].mean() * 100)
+    }
+
+
+
+
+# ============================================================
+# EARLY BREAKOUT V2 — RESISTANCE PRESSURE ENGINE
+# ============================================================
+
+def _mcs_early_breakout_v2(symbol, df, benchmark=None, fundamentals=None):
+    """Evidence-based Early Breakout V2.
+
+    V2 emphasizes resistance pressure rather than simply being close to
+    resistance: repeated resistance tests, rising lows, compression and
+    improving volume near resistance.
+    """
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<60:
+        return None
+
+    r=x.iloc[-1]
+    close=float(r["Close"])
+    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
+    resistance50=float(r["High50Prev"]) if np.isfinite(r["High50Prev"]) else np.nan
+    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
+        return None
+
+    distance=(resistance-close)/resistance*100
+    if distance>2.0:
+        return None
+
+    recent=x.iloc[-15:].copy()
+    if len(recent)<12:
+        return None
+
+    # Resistance tests: highs that reached within 1% of the fixed
+    # signal-date 20D resistance.
+    test_threshold=resistance*0.99
+    resistance_tests=int((recent["High"]>=test_threshold).sum())
+
+    # Higher lows: compare the first and second halves of the recent base.
+    lows1=float(recent["Low"].iloc[:7].mean())
+    lows2=float(recent["Low"].iloc[7:].mean())
+    rising_lows=bool(lows2>lows1*1.005)
+
+    # Compression: recent 7D range vs preceding 8D range.
+    r7=recent.iloc[-7:]
+    r8=recent.iloc[:8]
+    range7=(float(r7["High"].max())-float(r7["Low"].min()))/close*100
+    range8=(float(r8["High"].max())-float(r8["Low"].min()))/close*100
+    compression=bool(range8>0 and range7<range8*.80)
+
+    # Volume behaviour: compare volume on resistance-test days with
+    # non-test days, and current volume against 20D average.
+    vol=pd.to_numeric(recent["Volume"],errors="coerce")
+    test_mask=recent["High"]>=test_threshold
+    test_vol=vol[test_mask].mean() if test_mask.any() else np.nan
+    non_test_vol=vol[~test_mask].mean() if (~test_mask).any() else np.nan
+    test_volume_strength=(
+        bool(np.isfinite(test_vol) and np.isfinite(non_test_vol)
+             and test_vol>non_test_vol*1.10)
+    )
+    vr=float(r["Volume Ratio"]) if np.isfinite(r["Volume Ratio"]) else np.nan
+    volume_expanding=bool(np.isfinite(vr) and vr>=1.20)
+
+    # Trend.
+    sma20=float(r["SMA20"]); sma50=float(r["SMA50"]); sma200=float(r["SMA200"])
+    trend_short=bool(close>sma20 and sma20>sma50)
+    trend_full=bool(trend_short and sma50>sma200)
+
+    # ATR contraction.
+    atr=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else np.nan
+    atr_recent=x["ATR14"].iloc[-5:].mean()
+    atr_prior=x["ATR14"].iloc[-25:-5].mean()
+    atr_contract=bool(
+        np.isfinite(atr_recent) and np.isfinite(atr_prior)
+        and atr_recent<atr_prior*.90
+    )
+
+    # Relative strength vs Nifty.
+    rs20=np.nan
+    if benchmark is not None and not benchmark.empty:
+        b=_mcs_prepare(benchmark)
+        if not b.empty:
+            rs20=float(r["Return 20D %"])-float(b.iloc[-1]["Return 20D %"])
+    rs_ok=bool(np.isfinite(rs20) and rs20>=2)
+
+    # Score: 100 points, focused on breakout pressure.
+    score=0
+    reasons=[]
+    missing=[]
+
+    if distance<=1.0:
+        score+=20; reasons.append(f"{distance:.2f}% below resistance")
+    elif distance<=2.0:
+        score+=12; reasons.append(f"{distance:.2f}% below resistance")
+    else:
+        missing.append("More than 2% from resistance")
+
+    if resistance_tests>=3:
+        score+=20; reasons.append(f"{resistance_tests} resistance tests")
+    elif resistance_tests==2:
+        score+=15; reasons.append("2 resistance tests")
+    elif resistance_tests==1:
+        score+=8; reasons.append("1 resistance test")
+    else:
+        missing.append("No recent resistance test")
+
+    if rising_lows:
+        score+=15; reasons.append("Rising lows")
+    else:
+        missing.append("Rising lows absent")
+
+    if test_volume_strength and volume_expanding:
+        score+=15; reasons.append("Volume strengthening near resistance")
+    elif test_volume_strength:
+        score+=10; reasons.append("Higher volume on resistance tests")
+    elif volume_expanding:
+        score+=8; reasons.append(f"Volume {vr:.1f}x 20D average")
+    else:
+        missing.append("Volume confirmation weak")
+
+    if trend_short:
+        score+=7
+        reasons.append("SMA20 > SMA50 / price above SMA20")
+    else:
+        missing.append("Short-term trend weak")
+
+    if trend_full:
+        score+=3
+        reasons.append("SMA20 > SMA50 > SMA200")
+
+    if compression:
+        score+=10
+        reasons.append("Range compression")
+    else:
+        missing.append("Range compression absent")
+
+    if atr_contract:
+        score+=5
+        reasons.append("ATR contraction")
+
+    if rs_ok:
+        score+=5
+        reasons.append(f"RS +{rs20:.1f}% vs Nifty")
+    else:
+        missing.append("Relative strength weak")
+
+    if score>=85 and distance<=1.5 and resistance_tests>=2 and trend_short:
+        rating="🟢 Breakout Imminent V2"
+    elif score>=75 and resistance_tests>=1 and trend_short:
+        rating="🟡 Strong Breakout Setup V2"
+    elif score>=65:
+        rating="⚪ Watchlist V2"
+    else:
+        rating="⚪ Not Ready"
+
+    qualified=bool(
+        score>=65 and
+        distance<=2.0 and
+        trend_short and
+        (resistance_tests>=1) and
+        (rising_lows or compression or volume_expanding)
+    )
+
+    return {
+        "Symbol":symbol,
+        "V2 Score":int(min(100,round(score))),
+        "V2 Rating":rating,
+        "V2 Qualified":qualified,
+        "Close":close,
+        "Resistance 20D":resistance,
+        "Resistance 50D":resistance50,
+        "Distance to Breakout %":distance,
+        "Resistance Tests 15D":resistance_tests,
+        "Rising Lows":rising_lows,
+        "Range Compression":compression,
+        "Volume Ratio":vr,
+        "Test-Day Volume Stronger":test_volume_strength,
+        "Volume Expanding":volume_expanding,
+        "ATR14":atr,
+        "ATR Contracting":atr_contract,
+        "SMA20":sma20,
+        "SMA50":sma50,
+        "SMA200":sma200,
+        "RS 20D %":rs20,
+        "Reasons":" | ".join(reasons),
+        "Missing Confirmations":" | ".join(missing)
     }
 
 
@@ -11909,6 +12122,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
         [
             "Confirmed Breakout",
             "Early Breakout",
+            "🔥 Early Breakout V2",
             "📊 Backtest & Validation"
         ],
         index=0,
@@ -12051,6 +12265,114 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
 
     # ========================================================
+    # EARLY BREAKOUT V2 MODE
+    # ========================================================
+    if scan_mode=="🔥 Early Breakout V2":
+        st.markdown("---")
+        st.subheader("🔥 Early Breakout V2 — Resistance Pressure")
+        st.caption(
+            "Evidence-based pre-breakout detection using resistance tests, "
+            "rising lows, compression and volume behaviour."
+        )
+
+        v2_min=st.slider(
+            "Minimum V2 Score",60,90,65,5,key="mcs_v2_min_score"
+        )
+        v2_run=st.button(
+            "🔥 RUN EARLY BREAKOUT V2",
+            key="mcs_v2_run",
+            type="primary"
+        )
+
+        if v2_run:
+            v2_rows=[]
+            with st.spinner("Scanning for resistance-pressure setups..."):
+                v2_data_map=_kratter_download_batches(stocks)
+                v2_benchmark=(
+                    _download_nifty50_history("5y")
+                    if '_download_nifty50_history' in globals()
+                    else pd.DataFrame()
+                )
+
+                for symbol in stocks:
+                    d=v2_data_map.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    d=d.copy()
+                    try:
+                        d.index=pd.to_datetime(d.index)
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d.loc[d.index<=analysis_ts].sort_index()
+                    except Exception:
+                        continue
+                    if d.empty:
+                        continue
+
+                    b=v2_benchmark.copy() if v2_benchmark is not None else pd.DataFrame()
+                    if not b.empty:
+                        try:
+                            b.index=pd.to_datetime(b.index)
+                            if getattr(b.index,"tz",None) is not None:
+                                b.index=b.index.tz_localize(None)
+                            b=b.loc[b.index<=analysis_ts].sort_index()
+                        except Exception:
+                            b=pd.DataFrame()
+
+                    r2=_mcs_early_breakout_v2(
+                        symbol,d,b,fundamentals.get(str(symbol).upper(),{})
+                    )
+                    if r2 is not None and r2["V2 Qualified"] and r2["V2 Score"]>=v2_min:
+                        v2_rows.append(r2)
+
+            v2_df=pd.DataFrame(v2_rows)
+            if v2_df.empty:
+                st.warning(
+                    f"No V2 setups met the threshold for "
+                    f"{analysis_date.strftime('%d-%b-%Y')}."
+                )
+            else:
+                v2_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+                q1,q2,q3,q4=st.columns(4)
+                q1.metric("V2 Setups",len(v2_df))
+                q2.metric(
+                    "🟢 Imminent",
+                    int(v2_df["V2 Rating"].str.contains("Imminent").sum())
+                )
+                q3.metric(
+                    "🟡 Strong Setup",
+                    int(v2_df["V2 Rating"].str.contains("Strong").sum())
+                )
+                q4.metric("Avg Score",f'{v2_df["V2 Score"].mean():.1f}')
+
+                v2_cols=[
+                    "Scan Date","Symbol","V2 Score","V2 Rating","Close",
+                    "Resistance 20D","Distance to Breakout %",
+                    "Resistance Tests 15D","Rising Lows","Range Compression",
+                    "Volume Ratio","Test-Day Volume Stronger",
+                    "Volume Expanding","ATR Contracting","SMA20","SMA50",
+                    "SMA200","RS 20D %","Reasons","Missing Confirmations"
+                ]
+                v2_cols=[c for c in v2_cols if c in v2_df.columns]
+
+                st.dataframe(
+                    v2_df.sort_values(
+                        ["V2 Score","Distance to Breakout %"],
+                        ascending=[False,True]
+                    )[v2_cols],
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Early Breakout V2 Results",
+                    v2_df.to_csv(index=False).encode("utf-8"),
+                    f"early_breakout_v2_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",
+                    key="mcs_v2_download"
+                )
+
+    # ========================================================
     # BACKTEST & VALIDATION MODE
     # ========================================================
     if scan_mode=="📊 Backtest & Validation":
@@ -12084,7 +12406,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
         )
         bt_mode=st.radio(
             "Strategy to Validate",
-            ["Early Breakout","Confirmed Breakout"],
+            ["Early Breakout","🔥 Early Breakout V2","Confirmed Breakout"],
             horizontal=True,key="mcs_bt_mode"
         )
 
