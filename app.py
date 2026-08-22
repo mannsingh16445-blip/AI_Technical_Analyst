@@ -9714,24 +9714,32 @@ def _mcs_backtest_one(symbol, df, benchmark=None, fundamentals=None,
 
 
 def _mcs_backtest_summary(bt):
+    """Return internally consistent outcome statistics."""
     if bt is None or bt.empty:
         return {}
-    b5=bt["Breakout Within 5D"].mean()*100
-    days=bt["Days To Breakout"].dropna()
+
+    n = len(bt)
+    days = pd.to_numeric(bt["Days To Breakout"], errors="coerce")
+
+    def pct(mask):
+        return float(mask.sum() / n * 100) if n else 0.0
+
     return {
-        "Signals":len(bt),
-        "Breakout Conversion %":b5,
-        "Breakout <=1D %":((days<=1).mean()*100 if len(days) else 0),
-        "Breakout <=3D %":((days<=3).mean()*100 if len(days) else 0),
-        "Breakout <=5D %":((days<=5).mean()*100 if len(days) else 0),
-        "Avg Forward Return %":bt["Forward Return %"].mean(),
-        "Median Forward Return %":bt["Forward Return %"].median(),
-        "Avg Max Gain %":bt["Max Gain %"].mean(),
-        "Avg Max Drawdown %":bt["Max Drawdown %"].mean(),
-        "Stop Hit %":bt["Stop Hit"].mean()*100,
-        "Target 1 Hit %":bt["Target 1 Hit"].mean()*100,
-        "Target 2 Hit %":bt["Target 2 Hit"].mean()*100
+        "Signals": n,
+        "Breakout <=1D %": pct(days <= 1),
+        "Breakout <=3D %": pct(days <= 3),
+        "Breakout <=5D %": pct(days <= 5),
+        "Breakout Conversion %": pct(days <= 5),
+        "No Breakout Within 5D %": pct(days.isna() | (days > 5)),
+        "Avg Forward Return %": float(bt["Forward Return %"].mean()),
+        "Median Forward Return %": float(bt["Forward Return %"].median()),
+        "Avg Max Gain %": float(bt["Max Gain %"].mean()),
+        "Avg Max Drawdown %": float(bt["Max Drawdown %"].mean()),
+        "Stop Hit %": float(bt["Stop Hit"].mean() * 100),
+        "Target 1 Hit %": float(bt["Target 1 Hit"].mean() * 100),
+        "Target 2 Hit %": float(bt["Target 2 Hit"].mean() * 100)
     }
+
 
 
 if module == "🚀 Smart Breakout Scanner":
@@ -12174,7 +12182,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
                     k1,k2,k3,k4=st.columns(4)
                     k1.metric("Signals",summary["Signals"])
-                    k2.metric("Breakout ≤5D",f'{summary["Breakout Conversion %"]:.1f}%')
+                    k2.metric("Breakout ≤5D",f'{summary["Breakout <=5D %"]:.1f}%')
                     k3.metric("Avg Forward Return",f'{summary["Avg Forward Return %"]:.2f}%')
                     k4.metric("Median Return",f'{summary["Median Forward Return %"]:.2f}%')
 
@@ -12183,6 +12191,13 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     k6.metric("Breakout ≤3D",f'{summary["Breakout <=3D %"]:.1f}%')
                     k7.metric("Target 1 Hit",f'{summary["Target 1 Hit %"]:.1f}%')
                     k8.metric("Stop Hit",f'{summary["Stop Hit %"]:.1f}%')
+
+                    st.caption(
+                        f'Breakout counts: '
+                        f'{int(round(summary["Breakout <=1D %"]*summary["Signals"]/100))}/{summary["Signals"]} ≤1D · '
+                        f'{int(round(summary["Breakout <=3D %"]*summary["Signals"]/100))}/{summary["Signals"]} ≤3D · '
+                        f'{int(round(summary["Breakout <=5D %"]*summary["Signals"]/100))}/{summary["Signals"]} ≤5D'
+                    )
 
                     st.markdown("#### Historical Signal Results")
                     st.dataframe(
