@@ -7471,25 +7471,90 @@ def backtest_minervini_sepa_vcp(
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def download_nifty50_benchmark(period="2y"):
-    """Serial benchmark download; avoids thread-heavy calls on Streamlit Cloud."""
-    try:
-        d=yf.download(
-            tickers="^NSEI",
-            period=period,
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False
-        )
-        if isinstance(d,pd.DataFrame) and not d.empty:
-            if isinstance(d.columns,pd.MultiIndex):
-                d.columns=d.columns.get_level_values(0)
-            return d
-    except Exception:
-        pass
+def download_nifty50_benchmark(period="2y", fallback_df=None):
+    """Robust Nifty benchmark loader.
+
+    Primary: ^NSEI. Fallback: a supplied Nifty history already present in
+    the application. Handles yfinance MultiIndex columns and malformed
+    benchmark frames without allowing the V3 scanner to lose regime/RS data.
+    """
+    candidates=["^NSEI","NIFTY 50"]
+    for ticker in candidates:
+        try:
+            d=yf.download(
+                tickers=ticker,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False
+            )
+            if isinstance(d,pd.DataFrame) and not d.empty:
+                if isinstance(d.columns,pd.MultiIndex):
+                    # Prefer the first level when it contains OHLC names;
+                    # otherwise select the ticker level.
+                    if "Close" in d.columns.get_level_values(0):
+                        d.columns=d.columns.get_level_values(0)
+                    elif "Close" in d.columns.get_level_values(-1):
+                        d.columns=d.columns.get_level_values(-1)
+                cols={str(c).strip().title():c for c in d.columns}
+                rename={}
+                for wanted in ["Open","High","Low","Close","Volume"]:
+                    if wanted in cols:
+                        rename[cols[wanted]]=wanted
+                d=d.rename(columns=rename)
+                if all(c in d.columns for c in ["Open","High","Low","Close"]):
+                    d=d[["Open","High","Low","Close"]+
+                        (["Volume"] if "Volume" in d.columns else [])].copy()
+                    d.index=pd.to_datetime(d.index,errors="coerce")
+                    if getattr(d.index,"tz",None) is not None:
+                        d.index=d.index.tz_localize(None)
+                    d=d[~d.index.isna()].sort_index()
+                    if len(d)>=210:
+                        return d
+        except Exception:
+            continue
+
+    # Fallback: use history already loaded elsewhere in the app.
+    if fallback_df is not None and not fallback_df.empty:
+        try:
+            d=fallback_df.copy()
+            d.index=pd.to_datetime(d.index,errors="coerce")
+            if getattr(d.index,"tz",None) is not None:
+                d.index=d.index.tz_localize(None)
+            d=d[~d.index.isna()].sort_index()
+            if all(c in d.columns for c in ["Open","High","Low","Close"]) and len(d)>=210:
+                return d
+        except Exception:
+            pass
+
     return pd.DataFrame()
 
+
+
+def _mcs_get_reliable_benchmark(stocks=None, loaded_data=None, period="2y"):
+    """Return a reliable Nifty benchmark plus source label."""
+    b=download_nifty50_benchmark(period=period)
+    if not b.empty:
+        return b, "NIFTY 50 (^NSEI)"
+
+    # Try common Nifty-50 index keys that may already be present.
+    if loaded_data:
+        for key in ["^NSEI","NIFTY50","NIFTY 50","NIFTY_50"]:
+            d=loaded_data.get(key)
+            if isinstance(d,pd.DataFrame) and not d.empty:
+                try:
+                    z=d.copy()
+                    z.index=pd.to_datetime(z.index,errors="coerce")
+                    if getattr(z.index,"tz",None) is not None:
+                        z.index=z.index.tz_localize(None)
+                    z=z[~z.index.isna()].sort_index()
+                    if all(c in z.columns for c in ["Open","High","Low","Close"]) and len(z)>=210:
+                        return z, f"Loaded benchmark ({key})"
+                except Exception:
+                    pass
+
+    return pd.DataFrame(), "Unavailable"
 
 # ============================================================
 # SIDEBAR
