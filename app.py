@@ -12177,13 +12177,46 @@ elif module == "📚 Kratter Momentum Scanner":
 
     st.subheader("1️⃣ Select universe")
 
+    def _mcs_normalize_bse_symbol(s):
+        s=str(s).strip().upper().replace(".BO","").replace(".NS","")
+        return s
+
+    def _mcs_load_bse_universe(kind="bse"):
+        """Load BSE symbols from lists already bundled in the app.
+        No symbols are fabricated if a BSE list is unavailable.
+        """
+        names={
+            "bse100":["BSE100","BSE_100","BSE100_LIST"],
+            "bse200":["BSE200","BSE_200","BSE200_LIST"],
+            "bse500":["BSE500","BSE_500","BSE500_LIST"],
+            "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
+        }
+        for name in names.get(kind,[]):
+            obj=globals().get(name)
+            if obj:
+                try:
+                    vals=[_mcs_normalize_bse_symbol(x) for x in obj]
+                    return list(dict.fromkeys(x for x in vals if x))
+                except Exception:
+                    pass
+        return []
+
+    def _mcs_to_bse_tickers(symbols):
+        return [f"{_mcs_normalize_bse_symbol(s)}.BO"
+                for s in symbols if _mcs_normalize_bse_symbol(s)]
+
     universe_options={
         "Nifty 50":"nifty50",
         "Nifty 500":"nifty500",
         "Nifty Midcap 100":"midcap100",
         "Nifty Smallcap 250":"smallcap250",
         "F&O Stocks":"fno",
-        "NSE Equity":"nse"
+        "NSE Equity":"nse",
+        "BSE 100":"bse100",
+        "BSE 200":"bse200",
+        "BSE 500":"bse500",
+        "BSE Equity":"bse",
+        "NSE + BSE Combined":"nse_bse"
     }
 
     selected_universe=st.selectbox(
@@ -12206,6 +12239,12 @@ elif module == "📚 Kratter Momentum Scanner":
             stocks=load_nifty_smallcap250()
         elif universe_key=="fno":
             stocks=load_fno_stocks()
+        elif universe_key in ("bse100","bse200","bse500","bse"):
+            stocks=_mcs_load_bse_universe(universe_key)
+        elif universe_key=="nse_bse":
+            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(
+                _mcs_load_bse_universe("bse")
+            )
         else:
             stocks=load_nse_equity_universe()
     except Exception:
@@ -12404,7 +12443,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
 
 
-    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse","BSE 100":"bse100","BSE 200":"bse200","BSE 500":"bse500","BSE Equity":"bse","NSE + BSE Combined":"nse_bse"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
     uk=universe_options[selected_universe]
     try:
@@ -12413,6 +12452,9 @@ elif module == "🔥 Momentum Catalyst Scanner":
         elif uk=="midcap100": stocks=load_nifty_midcap100()
         elif uk=="smallcap250": stocks=load_nifty_smallcap250()
         elif uk=="fno": stocks=load_fno_stocks()
+        elif uk in ("bse100","bse200","bse500","bse"): stocks=_mcs_load_bse_universe(uk)
+        elif uk=="nse_bse":
+            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(_mcs_load_bse_universe("bse"))
         else: stocks=load_nse_equity_universe()
     except Exception: stocks=[]
     stocks=list(stocks or [])
