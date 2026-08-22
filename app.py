@@ -10047,6 +10047,70 @@ def _mcs_rsi(series, period=14):
     return 100-(100/(1+rs))
 
 
+
+def _mcs_build_universe_proxy(data_map, as_of=None, min_stocks=8):
+    """Build an equal-weighted normalized OHLC proxy from loaded stocks.
+
+    Used only when the actual Nifty index cannot be downloaded. This prevents
+    the regime engine from becoming Unknown during Yahoo/NSE outages while
+    clearly identifying the source as a universe proxy.
+    """
+    if not data_map:
+        return pd.DataFrame()
+
+    closes=[]
+    highs=[]
+    lows=[]
+    opens=[]
+    volumes=[]
+
+    for _,d in data_map.items():
+        if d is None or d.empty:
+            continue
+        try:
+            z=d.copy()
+            z.index=pd.to_datetime(z.index,errors="coerce")
+            if getattr(z.index,"tz",None) is not None:
+                z.index=z.index.tz_localize(None)
+            z=z[~z.index.isna()].sort_index()
+            if as_of is not None:
+                z=z.loc[z.index<=pd.Timestamp(as_of)]
+            if len(z)<210:
+                continue
+
+            base=float(z["Close"].iloc[0])
+            if not np.isfinite(base) or base<=0:
+                continue
+
+            # Normalize each stock to 100 so large-priced stocks do not
+            # dominate the proxy.
+            opens.append(z["Open"]/base*100)
+            highs.append(z["High"]/base*100)
+            lows.append(z["Low"]/base*100)
+            closes.append(z["Close"]/base*100)
+            if "Volume" in z.columns:
+                volumes.append(pd.to_numeric(z["Volume"],errors="coerce"))
+
+        except Exception:
+            continue
+
+    if len(closes)<min_stocks:
+        return pd.DataFrame()
+
+    c=pd.concat(closes,axis=1).mean(axis=1).dropna()
+    h=pd.concat(highs,axis=1).mean(axis=1).reindex(c.index)
+    l=pd.concat(lows,axis=1).mean(axis=1).reindex(c.index)
+    o=pd.concat(opens,axis=1).mean(axis=1).reindex(c.index)
+
+    out=pd.DataFrame({
+        "Open":o,
+        "High":h,
+        "Low":l,
+        "Close":c
+    }).dropna()
+
+    return out
+
 def _mcs_market_regime(benchmark):
     """Classify the broad market using the same canonical OHLC history."""
     if benchmark is None or benchmark.empty:
@@ -12676,11 +12740,18 @@ elif module == "🔥 Momentum Catalyst Scanner":
             plan_rows=[]
             with st.spinner("Evaluating V2 setups, market regime and trade plans..."):
                 plan_data=_kratter_download_batches(stocks)
-                plan_benchmark=(
-                    _download_nifty50_history("5y")
-                    if '_download_nifty50_history' in globals()
-                    else pd.DataFrame()
+
+                # First try the actual Nifty 50 index. If Yahoo/NSE is
+                # unavailable, fall back to an equal-weighted proxy made
+                # from the already downloaded universe data.
+                plan_benchmark, benchmark_source = _mcs_get_reliable_benchmark(
+                    stocks, plan_data, "2y"
                 )
+                if plan_benchmark.empty:
+                    plan_benchmark=_mcs_build_universe_proxy(
+                        plan_data, analysis_ts, min_stocks=8
+                    )
+                    benchmark_source="Universe proxy (fallback)"
 
                 market=_mcs_market_regime(plan_benchmark)
                 st.markdown("### Market Regime")
@@ -12689,6 +12760,14 @@ elif module == "🔥 Momentum Catalyst Scanner":
                 mr2.metric("Regime Score",market["Regime Score"])
                 mr3.metric("Nifty Close",f'{market.get("Nifty Close",np.nan):.2f}')
                 st.caption(market["Reason"])
+                if benchmark_source=="Universe proxy (fallback)":
+                    st.warning(
+                        "NIFTY 50 index data was unavailable. Market regime and "
+                        "relative strength are being calculated from an "
+                        "equal-weighted selected-universe proxy."
+                    )
+                else:
+                    st.success(f"Benchmark source: {benchmark_source}")
 
                 progress=st.progress(0)
                 status=st.empty()
