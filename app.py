@@ -9966,6 +9966,212 @@ def _mcs_early_breakout_v2(symbol, df, benchmark=None, fundamentals=None):
 
 
 
+
+# ============================================================
+# V2 MARKET REGIME + BREAKOUT CONFIRMATION + TRADE PLAN
+# ============================================================
+
+def _mcs_rsi(series, period=14):
+    s=pd.Series(series,dtype="float64")
+    delta=s.diff()
+    gain=delta.clip(lower=0)
+    loss=-delta.clip(upper=0)
+    avg_gain=gain.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
+    avg_loss=loss.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
+    rs=avg_gain/avg_loss.replace(0,np.nan)
+    return 100-(100/(1+rs))
+
+
+def _mcs_market_regime(benchmark):
+    """Classify the broad market using the same canonical OHLC history."""
+    if benchmark is None or benchmark.empty:
+        return {
+            "Regime":"⚪ Unknown",
+            "Regime Score":0,
+            "Reason":"Benchmark data unavailable"
+        }
+
+    b=_mcs_prepare(benchmark)
+    if b.empty or len(b)<210:
+        return {
+            "Regime":"⚪ Unknown",
+            "Regime Score":0,
+            "Reason":"Insufficient benchmark history"
+        }
+
+    r=b.iloc[-1]
+    close=float(r["Close"])
+    sma20=float(r["SMA20"])
+    sma50=float(r["SMA50"])
+    sma200=float(r["SMA200"])
+
+    slope50=float(b["SMA50"].iloc[-1]-b["SMA50"].iloc[-10])
+    slope200=float(b["SMA200"].iloc[-1]-b["SMA200"].iloc[-20])
+
+    score=0
+    reasons=[]
+
+    if close>sma200:
+        score+=25
+        reasons.append("Nifty above SMA200")
+    else:
+        score-=25
+        reasons.append("Nifty below SMA200")
+
+    if sma20>sma50:
+        score+=20
+        reasons.append("SMA20 > SMA50")
+    else:
+        score-=15
+        reasons.append("SMA20 < SMA50")
+
+    if sma50>sma200:
+        score+=25
+        reasons.append("SMA50 > SMA200")
+    else:
+        score-=25
+        reasons.append("SMA50 < SMA200")
+
+    if slope50>0:
+        score+=15
+        reasons.append("SMA50 rising")
+    else:
+        score-=10
+        reasons.append("SMA50 falling")
+
+    if slope200>0:
+        score+=15
+        reasons.append("SMA200 rising")
+    else:
+        score-=10
+        reasons.append("SMA200 falling")
+
+    if score>=65:
+        regime="🟢 Bullish"
+    elif score>=25:
+        regime="🟡 Neutral / Selective"
+    else:
+        regime="🔴 Bearish"
+
+    return {
+        "Regime":regime,
+        "Regime Score":score,
+        "Reason":" | ".join(reasons),
+        "Nifty Close":close,
+        "Nifty SMA20":sma20,
+        "Nifty SMA50":sma50,
+        "Nifty SMA200":sma200
+    }
+
+
+def _mcs_trade_plan_v2(symbol, df, benchmark=None, fundamentals=None,
+                        min_v2_score=65, allow_neutral=False):
+    """Turn a V2 setup into a regime-aware confirmation/trade plan.
+
+    This is deliberately conservative: a V2 setup is not treated as a
+    confirmed entry until price closes above resistance with volume and
+    candle-strength confirmation.
+    """
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<210:
+        return None
+
+    regime=_mcs_market_regime(benchmark)
+
+    setup=_mcs_early_breakout_v2(
+        symbol,x,benchmark,fundamentals or {}
+    )
+    if setup is None or not setup.get("V2 Qualified",False):
+        return None
+
+    score=int(setup["V2 Score"])
+    resistance=float(setup["Resistance 20D"])
+    close=float(x["Close"].iloc[-1])
+    high=float(x["High"].iloc[-1])
+    low=float(x["Low"].iloc[-1])
+    open_=float(x["Open"].iloc[-1])
+    volume_ratio=float(setup.get("Volume Ratio",np.nan))
+
+    atr=float(setup.get("ATR14",np.nan))
+    if not np.isfinite(atr) or atr<=0:
+        atr=max(close*.02,0.01)
+
+    # Confirmation requires a close above resistance, meaningful volume,
+    # and a strong candle close. A 0.20% buffer avoids marginal touches.
+    breakout_buffer=resistance*1.002
+    candle_range=max(high-low,0.000001)
+    close_location=(close-low)/candle_range
+
+    price_confirmed=close>=breakout_buffer
+    volume_confirmed=bool(np.isfinite(volume_ratio) and volume_ratio>=1.50)
+    candle_confirmed=close_location>=0.60
+    trend_confirmed=bool(close>x["SMA20"].iloc[-1] and x["SMA20"].iloc[-1]>x["SMA50"].iloc[-1])
+
+    confirmation_count=sum([
+        price_confirmed,volume_confirmed,candle_confirmed,trend_confirmed
+    ])
+
+    regime_ok=(
+        regime["Regime"]=="🟢 Bullish"
+        or (allow_neutral and regime["Regime"]=="🟡 Neutral / Selective")
+    )
+
+    if price_confirmed and volume_confirmed and candle_confirmed and trend_confirmed and regime_ok:
+        status="🟢 BUY CONFIRMED"
+    elif price_confirmed and confirmation_count>=3 and regime_ok:
+        status="🟡 BREAKOUT CONFIRMED — WEAK VOLUME/CANDLE"
+    elif regime["Regime"]=="🔴 Bearish":
+        status="🔴 AVOID — BEARISH MARKET"
+    elif price_confirmed and not regime_ok:
+        status="🟠 WAIT — MARKET REGIME"
+    else:
+        status="🔵 WAIT FOR BREAKOUT"
+
+    # Entry plan is based on a confirmed breakout, not the early setup close.
+    planned_entry=max(close,breakout_buffer)
+
+    # Structural stop = closer of recent swing support and ATR stop.
+    recent_low=float(x["Low"].iloc[-10:].min())
+    atr_stop=planned_entry-1.5*atr
+    structural_stop=max(recent_low,atr_stop)
+
+    # Keep the stop below entry. If structure is too close, use ATR stop.
+    if structural_stop>=planned_entry:
+        structural_stop=atr_stop
+
+    risk=max(planned_entry-structural_stop,0.01)
+    target1=planned_entry+2*risk
+    target2=planned_entry+3*risk
+
+    # Base-height projection provides a second structural target reference.
+    base_low=float(x["Low"].iloc[-20:].min())
+    base_height=max(resistance-base_low,0)
+    measured_target=resistance+base_height
+
+    return {
+        **setup,
+        **regime,
+        "Trade Status":status,
+        "Price Confirmed":price_confirmed,
+        "Volume Confirmed":volume_confirmed,
+        "Candle Confirmed":candle_confirmed,
+        "Trend Confirmed":trend_confirmed,
+        "Confirmation Count":confirmation_count,
+        "Breakout Buffer":breakout_buffer,
+        "Planned Entry":planned_entry,
+        "Stop Loss":structural_stop,
+        "Risk Per Share":risk,
+        "Target 1 (2R)":target1,
+        "Target 2 (3R)":target2,
+        "Measured Move Target":measured_target,
+        "Reward/Risk T1":2.0,
+        "Reward/Risk T2":3.0,
+        "Recent 10D Support":recent_low,
+        "Base 20D Low":base_low
+    }
+
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -12123,6 +12329,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "Confirmed Breakout",
             "Early Breakout",
             "🔥 Early Breakout V2",
+            "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
         ],
         index=0,
@@ -12370,6 +12577,135 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     f"early_breakout_v2_{analysis_date.strftime('%Y%m%d')}.csv",
                     "text/csv",
                     key="mcs_v2_download"
+                )
+
+    # ========================================================
+    # V2 + MARKET REGIME + CONFIRMATION + TRADE PLAN
+    # ========================================================
+    if scan_mode=="🚦 V2 + Regime & Trade Plan":
+        st.markdown("---")
+        st.subheader("🚦 V2 + Market Regime + Breakout Confirmation")
+        st.caption(
+            "Separates setup quality from entry confirmation. A V2 setup "
+            "is not treated as a buy until price, volume, candle strength "
+            "and market regime confirm the move."
+        )
+
+        c1,c2=st.columns(2)
+        plan_min=c1.slider(
+            "Minimum V2 Score",60,90,70,5,key="mcs_plan_min"
+        )
+        allow_neutral=c2.checkbox(
+            "Allow setups in Neutral regime",
+            value=False,
+            key="mcs_plan_neutral"
+        )
+
+        plan_run=st.button(
+            "🚦 RUN REGIME + TRADE PLAN",
+            key="mcs_plan_run",
+            type="primary"
+        )
+
+        if plan_run:
+            plan_rows=[]
+            with st.spinner("Evaluating V2 setups, market regime and trade plans..."):
+                plan_data=_kratter_download_batches(stocks)
+                plan_benchmark=(
+                    _download_nifty50_history("5y")
+                    if '_download_nifty50_history' in globals()
+                    else pd.DataFrame()
+                )
+
+                market=_mcs_market_regime(plan_benchmark)
+                st.markdown("### Market Regime")
+                mr1,mr2,mr3=st.columns(3)
+                mr1.metric("Regime",market["Regime"])
+                mr2.metric("Regime Score",market["Regime Score"])
+                mr3.metric("Nifty Close",f'{market.get("Nifty Close",np.nan):.2f}')
+                st.caption(market["Reason"])
+
+                progress=st.progress(0)
+                status=st.empty()
+
+                for idx,symbol in enumerate(stocks,1):
+                    status.text(f"Analysing {symbol} — {idx}/{len(stocks)}")
+                    progress.progress(int(idx/len(stocks)*100))
+
+                    d=plan_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index)
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d.loc[d.index<=analysis_ts].sort_index()
+                    except Exception:
+                        continue
+
+                    if len(d)<210:
+                        continue
+
+                    rplan=_mcs_trade_plan_v2(
+                        symbol,d,plan_benchmark,
+                        fundamentals.get(str(symbol).upper(),{}),
+                        min_v2_score=plan_min,
+                        allow_neutral=allow_neutral
+                    )
+
+                    if rplan is not None and rplan["V2 Score"]>=plan_min:
+                        plan_rows.append(rplan)
+
+                progress.empty()
+                status.empty()
+
+            plan_df=pd.DataFrame(plan_rows)
+
+            if plan_df.empty:
+                st.warning(
+                    "No V2 setups met the selected score and regime filters."
+                )
+            else:
+                buys=int(plan_df["Trade Status"].str.contains("BUY CONFIRMED").sum())
+                waits=int(plan_df["Trade Status"].str.contains("WAIT").sum())
+                avoids=int(plan_df["Trade Status"].str.contains("AVOID").sum())
+
+                p1,p2,p3,p4=st.columns(4)
+                p1.metric("V2 Setups",len(plan_df))
+                p2.metric("🟢 Buy Confirmed",buys)
+                p3.metric("🔵 Waiting",waits)
+                p4.metric("🔴 Avoid",avoids)
+
+                display_cols=[
+                    "Symbol","V2 Score","V2 Rating","Trade Status",
+                    "Regime","Distance to Breakout %",
+                    "Resistance Tests 15D","Volume Ratio",
+                    "Planned Entry","Stop Loss","Target 1 (2R)",
+                    "Target 2 (3R)","Measured Move Target",
+                    "Reward/Risk T1","Reward/Risk T2",
+                    "Price Confirmed","Volume Confirmed",
+                    "Candle Confirmed","Trend Confirmed",
+                    "Reasons"
+                ]
+                display_cols=[c for c in display_cols if c in plan_df.columns]
+
+                st.markdown("### Trade Plan")
+                st.dataframe(
+                    plan_df.sort_values(
+                        ["Trade Status","V2 Score"],
+                        ascending=[True,False]
+                    )[display_cols],
+                    width="stretch",
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Regime + Trade Plans",
+                    plan_df.to_csv(index=False).encode("utf-8"),
+                    f"v2_regime_trade_plan_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",
+                    key="mcs_plan_download"
                 )
 
     # ========================================================
