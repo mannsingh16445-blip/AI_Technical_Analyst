@@ -12177,124 +12177,13 @@ elif module == "📚 Kratter Momentum Scanner":
 
     st.subheader("1️⃣ Select universe")
 
-    def _mcs_normalize_bse_symbol(s):
-        s=str(s).strip().upper().replace(".BO","").replace(".NS","")
-        return s
-
-    @st.cache_data(ttl=21600, show_spinner=False)
-    def _mcs_load_bse_universe(kind="bse"):
-        """Load BSE universes.
-
-        BSE 500/100/200 are sourced from the BSE Indices constituent pages
-        when available. BSE Equity retains the broad automatic fallback.
-        """
-        import requests as _requests
-        import io as _io
-
-        # Official BSE Indices constituent-page codes.
-        index_codes={
-            "bse500":17,
-            # These are kept configurable; if a page is unavailable the
-            # loader falls back to the broad BSE Equity path.
-            "bse100":12,
-            "bse200":14
-        }
-
-        if kind in index_codes:
-            code=index_codes[kind]
-            urls=[
-                f"https://www.bseindices.com/constituents/code/{code}",
-                f"https://www.bseindices.com/indices-details/code/{code}/"
-            ]
-
-            for url in urls:
-                try:
-                    resp=_requests.get(
-                        url,
-                        timeout=15,
-                        headers={
-                            "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 Chrome/131 Safari/537.36"
-                        }
-                    )
-                    if resp.status_code!=200 or not resp.text:
-                        continue
-
-                    # The BSE constituent page exposes a table containing
-                    # company name + BSE security code. Parse every table.
-                    tables=pd.read_html(_io.StringIO(resp.text))
-                    found=[]
-                    for tbl in tables:
-                        if tbl is None or tbl.empty:
-                            continue
-                        for col in tbl.columns:
-                            vals=tbl[col].astype(str).str.strip()
-                            for v in vals:
-                                # BSE security codes are six digits.
-                                if v.isdigit() and len(v)==6:
-                                    found.append(v)
-
-                    found=list(dict.fromkeys(found))
-                    if len(found)>=20:
-                        return found
-                except Exception:
-                    continue
-
-            return []
-
-        # BSE Equity: first use any bundled list.
-        names={
-            "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
-        }
-        for name in names.get(kind,[]):
-            obj=globals().get(name)
-            if obj:
-                try:
-                    vals=[_mcs_normalize_bse_symbol(x) for x in obj]
-                    vals=list(dict.fromkeys(x for x in vals if x))
-                    if vals:
-                        return vals
-                except Exception:
-                    pass
-
-        # Broad automatic fallback from supported NSE universes.
-        pools=[]
-        for fname in [
-            "load_nse_equity_universe",
-            "load_nifty500",
-            "load_nifty_midcap100",
-            "load_nifty_smallcap250",
-            "load_fno_stocks"
-        ]:
-            fn=globals().get(fname)
-            if callable(fn):
-                try:
-                    vals=fn()
-                    if vals:
-                        pools.extend(list(vals))
-                except Exception:
-                    continue
-
-        vals=[_mcs_normalize_bse_symbol(x) for x in pools]
-        return list(dict.fromkeys(x for x in vals if x))
-
-    def _mcs_to_bse_tickers(symbols):
-        return [f"{_mcs_normalize_bse_symbol(s)}.BO"
-                for s in symbols if _mcs_normalize_bse_symbol(s)]
-
     universe_options={
         "Nifty 50":"nifty50",
         "Nifty 500":"nifty500",
         "Nifty Midcap 100":"midcap100",
         "Nifty Smallcap 250":"smallcap250",
         "F&O Stocks":"fno",
-        "NSE Equity":"nse",
-        "BSE 100":"bse100",
-        "BSE 200":"bse200",
-        "BSE 500":"bse500",
-        "BSE Equity":"bse",
-        "NSE + BSE Combined":"nse_bse"
+        "NSE Equity":"nse"
     }
 
     selected_universe=st.selectbox(
@@ -12317,12 +12206,6 @@ elif module == "📚 Kratter Momentum Scanner":
             stocks=load_nifty_smallcap250()
         elif universe_key=="fno":
             stocks=load_fno_stocks()
-        elif universe_key in ("bse100","bse200","bse500","bse"):
-            stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(universe_key))
-        elif universe_key=="nse_bse":
-            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(
-                _mcs_load_bse_universe("bse")
-            )
         else:
             stocks=load_nse_equity_universe()
     except Exception:
@@ -12521,7 +12404,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
 
 
 
-    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse","BSE 100":"bse100","BSE 200":"bse200","BSE 500":"bse500","BSE Equity":"bse","NSE + BSE Combined":"nse_bse"}
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
     uk=universe_options[selected_universe]
     try:
@@ -12530,25 +12413,9 @@ elif module == "🔥 Momentum Catalyst Scanner":
         elif uk=="midcap100": stocks=load_nifty_midcap100()
         elif uk=="smallcap250": stocks=load_nifty_smallcap250()
         elif uk=="fno": stocks=load_fno_stocks()
-        elif uk in ("bse100","bse200","bse500","bse"):
-            stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(uk))
-        elif uk=="nse_bse":
-            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(_mcs_load_bse_universe("bse"))
         else: stocks=load_nse_equity_universe()
     except Exception: stocks=[]
     stocks=list(stocks or [])
-    if selected_universe=="BSE Equity" and stocks:
-        st.info(
-            f"BSE Equity loaded {len(stocks):,} symbols. The scanner will "
-            "request their BSE (.BO) market-data listings. BSE 100/200/500 "
-            "remain separate official constituent universes."
-        )
-    elif selected_universe in ("BSE 100","BSE 200","BSE 500") and not stocks:
-        st.error(
-            f"{selected_universe} constituents could not be retrieved from "
-            "the BSE Indices source. This is a data-source retrieval issue, "
-            "not a missing-list requirement. Try again later or use BSE Equity."
-        )
     if selected_universe=="Nifty 50" and not stocks:
         stocks=list(NIFTY50)
     st.sidebar.markdown("### Momentum thresholds")
