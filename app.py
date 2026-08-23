@@ -10340,6 +10340,234 @@ def _mcs_early_breakout_v31(symbol, df, benchmark=None, fundamentals=None):
 # EARLY BREAKOUT V3.2 — BREAKOUT PROBABILITY + TRADE QUALITY
 # ============================================================
 
+
+# ============================================================
+# EARLY BREAKOUT V3.3 — ADAPTIVE BREAKOUT ENGINE
+# ============================================================
+
+def _mcs_early_breakout_v33(symbol, df, benchmark=None, fundamentals=None):
+    """Adaptive V3.3: V2 core + weighted evidence + trade quality.
+
+    Evidence from the ablation tests is used as weighting, not as mandatory
+    gates. Volume is highest-weighted, consolidation medium, close-location
+    lower, and relative strength informational/minor. No volume requirement
+    is mandatory.
+    """
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<210:
+        return None
+
+    r=x.iloc[-1]
+    close=float(r["Close"])
+    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
+    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
+        return None
+
+    distance=(resistance-close)/resistance*100
+    if distance>2.5:
+        return None
+
+    # ---------------- V2 CORE: 50 points ----------------
+    recent15=x.iloc[-15:]
+    tests=int((recent15["High"]>=resistance*.99).sum())
+
+    lows_a=float(recent15["Low"].iloc[:7].mean())
+    lows_b=float(recent15["Low"].iloc[7:].mean())
+    rising_lows=bool(lows_b>lows_a*1.005)
+
+    sma20=float(r["SMA20"])
+    sma50=float(r["SMA50"])
+    sma200=float(r["SMA200"])
+    trend=bool(close>sma20 and sma20>sma50)
+    trend_full=bool(trend and sma50>sma200)
+
+    core=0
+    core_reasons=[]
+    if distance<=.75:
+        core+=15; core_reasons.append("Very close to resistance")
+    elif distance<=1.25:
+        core+=12; core_reasons.append("Close to resistance")
+    elif distance<=2:
+        core+=8
+    else:
+        core+=4
+
+    if tests>=4:
+        core+=15; core_reasons.append(f"{tests} resistance tests")
+    elif tests>=2:
+        core+=12; core_reasons.append(f"{tests} resistance tests")
+    elif tests==1:
+        core+=7; core_reasons.append("1 resistance test")
+
+    if rising_lows:
+        core+=8; core_reasons.append("Rising lows")
+
+    if trend_full:
+        core+=12; core_reasons.append("Bullish MA stack")
+    elif trend:
+        core+=8; core_reasons.append("Bullish short trend")
+
+    core=min(50,core)
+
+    # ---------------- VOLUME: 20 points ----------------
+    vol_ratio=np.nan
+    if "Volume" in x.columns:
+        avg20=float(x["Volume"].iloc[-21:-1].mean())
+        if avg20>0:
+            vol_ratio=float(r["Volume"])/avg20
+
+    volume_score=0
+    if np.isfinite(vol_ratio):
+        if vol_ratio>=2.0:
+            volume_score=20
+        elif vol_ratio>=1.5:
+            volume_score=17
+        elif vol_ratio>=1.25:
+            volume_score=13
+        elif vol_ratio>=1.0:
+            volume_score=8
+        elif vol_ratio>=.75:
+            volume_score=3
+
+    # ---------------- CONSOLIDATION: 15 points ----------------
+    last7=x.iloc[-7:]
+    prior8=x.iloc[-15:-7]
+    range7=float(last7["High"].max()-last7["Low"].min())
+    range8=float(prior8["High"].max()-prior8["Low"].min())
+    compression=bool(range8>0 and range7<range8*.80)
+
+    atr5=float(x["ATR14"].iloc[-5:].mean())
+    atr20=float(x["ATR14"].iloc[-25:-5].mean())
+    atr_contract=bool(
+        np.isfinite(atr5) and np.isfinite(atr20) and atr5<atr20*.90
+    )
+    consolidation=bool(compression or atr_contract)
+
+    consolidation_score=15 if compression and atr_contract else (
+        11 if consolidation else 0
+    )
+
+    # ---------------- CLOSE LOCATION: 10 points ----------------
+    high=float(r["High"])
+    low=float(r["Low"])
+    day_range=high-low
+    close_location=(close-low)/day_range if day_range>0 else np.nan
+    close_score=10 if np.isfinite(close_location) and close_location>=.90 else (
+        7 if np.isfinite(close_location) and close_location>=.80 else 0
+    )
+
+    # ---------------- RELATIVE STRENGTH: 5 points ----------------
+    rs20=np.nan
+    rs60=np.nan
+    if benchmark is not None and not benchmark.empty:
+        b=_mcs_prepare(benchmark)
+        if len(b)>=61:
+            stock20=float(r["Return 20D %"])
+            bench20=float(b.iloc[-1]["Return 20D %"])
+            rs20=stock20-bench20
+            stock60=(close/float(x["Close"].iloc[-61])-1)*100
+            bench60=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-61])-1)*100
+            rs60=stock60-bench60
+
+    rs_score=5 if np.isfinite(rs20) and rs20>=5 else (
+        3 if np.isfinite(rs20) and rs20>=2 else 0
+    )
+
+    raw_score=core+volume_score+consolidation_score+close_score+rs_score
+
+    # ---------------- TRADE QUALITY ----------------
+    atr14=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else close*.02
+    entry=resistance*1.002
+
+    swing_low=float(x["Low"].iloc[-10:].min())
+    atr_stop=entry-1.5*atr14
+    structural_stop=swing_low*.995
+    stop=min(atr_stop,structural_stop)
+    risk=entry-stop
+
+    if risk<=0:
+        return None
+
+    risk_pct=risk/entry*100
+    target1=entry+2*risk
+    target2=entry+3*risk
+    rr=2.0
+
+    quality=0
+    quality_reasons=[]
+
+    if risk_pct<=2:
+        quality+=30; quality_reasons.append("Risk <=2%")
+    elif risk_pct<=3:
+        quality+=22; quality_reasons.append("Risk <=3%")
+    elif risk_pct<=4:
+        quality+=10
+
+    if trend_full:
+        quality+=20; quality_reasons.append("Bullish MA stack")
+    elif trend:
+        quality+=12
+
+    if consolidation:
+        quality+=15; quality_reasons.append("Consolidation/ATR compression")
+
+    if np.isfinite(rs20) and rs20>=5:
+        quality+=10; quality_reasons.append("Strong relative strength")
+    elif np.isfinite(rs20) and rs20>=2:
+        quality+=5
+
+    if np.isfinite(close_location) and close_location>=.80:
+        quality+=10; quality_reasons.append("Strong close")
+
+    if np.isfinite(vol_ratio) and vol_ratio>=1.25:
+        quality+=15; quality_reasons.append("Volume participation")
+
+    quality=min(100,quality)
+
+    # Convert the 100-point setup score into an evidence score.
+    # Trade quality is a gate/secondary ranking rather than an extra indicator.
+    composite=.70*raw_score + .30*quality
+
+    if raw_score>=80 and quality>=70 and composite>=75:
+        status="🟢 A-Grade"
+    elif raw_score>=70 and quality>=55 and composite>=65:
+        status="🟡 B-Grade — Confirm"
+    elif raw_score>=60:
+        status="🔵 Watch"
+    else:
+        status="⚪ Low Priority"
+
+    return {
+        "Symbol":symbol,
+        "V3.3 Score":round(composite,1),
+        "Core V2 Score /50":core,
+        "Volume /20":volume_score,
+        "Consolidation /15":consolidation_score,
+        "Close High /10":close_score,
+        "Relative Strength /5":rs_score,
+        "Trade Quality /100":quality,
+        "Status":status,
+        "Close":close,
+        "Resistance":resistance,
+        "Distance to Breakout %":distance,
+        "Confirmation Entry":entry,
+        "Stop Loss":stop,
+        "Risk %":risk_pct,
+        "Target 1":target1,
+        "Target 2":target2,
+        "Risk Reward":rr,
+        "Volume Ratio":vol_ratio,
+        "Resistance Tests 15D":tests,
+        "Relative Strength 20D %":rs20,
+        "Relative Strength 60D %":rs60,
+        "Close Location %":close_location*100 if np.isfinite(close_location) else np.nan,
+        "Consolidation":consolidation,
+        "ATR Contracting":atr_contract,
+        "Bullish MA Stack":trend_full,
+        "Core Reasons":" | ".join(core_reasons),
+        "Trade Quality Reasons":" | ".join(quality_reasons)
+    }
+
 def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
     """V3.2 separates breakout probability from trade quality.
 
@@ -13133,6 +13361,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "🔥 Early Breakout V2",
             "🚀 Early Breakout V3.1",
             "🎯 Early Breakout V3.2",
+            "🏆 Early Breakout V3.3 Adaptive",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -13490,6 +13719,107 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     f"early_breakout_v31_{analysis_date.strftime('%Y%m%d')}.csv",
                     "text/csv",
                     key="mcs_v31_download"
+                )
+
+    if scan_mode=="🏆 Early Breakout V3.3 Adaptive":
+        st.markdown("---")
+        st.subheader("🏆 Early Breakout V3.3 — Adaptive NSE Breakout Engine")
+        st.caption(
+            "V2 core + evidence-weighted factors + trade quality. "
+            "No experimental factor is a mandatory gate."
+        )
+
+        v33_min=st.slider(
+            "Minimum V3.3 Score",55,90,65,5,key="mcs_v33_min"
+        )
+
+        if st.button(
+            "🏆 RUN EARLY BREAKOUT V3.3",
+            key="mcs_v33_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner("Scanning the selected NSE universe with V3.3..."):
+                if len(stocks)>500:
+                    data=_mcs_large_universe_download(stocks)
+                else:
+                    data=_kratter_download_batches(stocks)
+
+                benchmark,bench_source=_mcs_get_reliable_benchmark(
+                    stocks,data,"2y"
+                )
+                if benchmark.empty:
+                    benchmark=_mcs_build_universe_proxy(
+                        data,analysis_ts,min_stocks=8
+                    )
+                    bench_source="Universe proxy (fallback)"
+
+                for symbol in stocks:
+                    d=data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                    except Exception:
+                        continue
+                    if len(d)<210:
+                        continue
+                    try:
+                        result=_mcs_early_breakout_v33(
+                            symbol,d,benchmark,
+                            fundamentals.get(str(symbol).upper(),{})
+                        )
+                        if result is not None and result["V3.3 Score"]>=v33_min:
+                            rows.append(result)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    f"No V3.3 setups met the {v33_min}-point threshold "
+                    f"on {analysis_date.strftime('%d-%b-%Y')}."
+                )
+            else:
+                out.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("Setups",len(out))
+                c2.metric("🟢 A-Grade",int((out["Status"]=="🟢 A-Grade").sum()))
+                c3.metric("🟡 B-Grade",int(out["Status"].str.contains("B-Grade").sum()))
+                c4.metric("Avg Score",f'{out["V3.3 Score"].mean():.1f}')
+
+                st.caption(f"Benchmark: {bench_source}")
+
+                display_cols=[
+                    "Scan Date","Symbol","V3.3 Score",
+                    "Core V2 Score /50","Volume /20","Consolidation /15",
+                    "Close High /10","Relative Strength /5",
+                    "Trade Quality /100","Status","Close","Resistance",
+                    "Distance to Breakout %","Confirmation Entry","Stop Loss",
+                    "Risk %","Target 1","Target 2","Risk Reward",
+                    "Volume Ratio","Resistance Tests 15D",
+                    "Relative Strength 20D %","Close Location %",
+                    "Consolidation","ATR Contracting","Bullish MA Stack",
+                    "Core Reasons","Trade Quality Reasons"
+                ]
+                display_cols=[c for c in display_cols if c in out.columns]
+                display=out.sort_values(
+                    ["V3.3 Score","Trade Quality /100"],
+                    ascending=[False,False]
+                )[display_cols]
+
+                st.dataframe(display,width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download V3.3 Results",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"early_breakout_v33_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="mcs_v33_download"
                 )
 
     if scan_mode=="🎯 Early Breakout V3.2":
