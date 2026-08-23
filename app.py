@@ -10568,6 +10568,145 @@ def _mcs_early_breakout_v33(symbol, df, benchmark=None, fundamentals=None):
         "Trade Quality Reasons":" | ".join(quality_reasons)
     }
 
+
+# ============================================================
+# EARLY BREAKOUT V3.4 — REALISTIC RISK / REWARD ENGINE
+# ============================================================
+
+def _mcs_early_breakout_v34(symbol, df, benchmark=None, fundamentals=None):
+    """V3.3 signal engine with realistic stop/target construction.
+
+    The signal score remains the V3.3 evidence-weighted score. The trade
+    layer now uses a capped structural/ATR risk and a nearby resistance
+    target instead of assuming a blind 2R/3R target.
+    """
+    base=_mcs_early_breakout_v33(symbol,df,benchmark,fundamentals)
+    if base is None:
+        return None
+
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<210:
+        return None
+
+    entry=float(base["Confirmation Entry"])
+    resistance=float(base["Resistance"])
+    atr=float(x["ATR14"].iloc[-1]) if np.isfinite(x["ATR14"].iloc[-1]) else entry*.02
+
+    # Structural and ATR candidates.
+    swing_low=float(x["Low"].iloc[-10:].min())
+    atr_stop=entry-1.5*atr
+    structural_stop=swing_low*.995
+
+    # Prefer the tighter protective stop, but never allow a risk > 7%.
+    raw_stop=max(atr_stop,structural_stop)
+    max_risk_stop=entry*.93
+    stop=max(raw_stop,max_risk_stop)
+
+    risk=entry-stop
+    if risk<=0:
+        return None
+
+    risk_pct=risk/entry*100
+
+    # Find meaningful overhead resistance from prior highs.
+    prior=x.iloc[-120:-1].copy()
+    levels=[]
+
+    for lookback in (20,40,60,120):
+        z=x.iloc[-lookback-1:-1]
+        if not z.empty:
+            levels.append(float(z["High"].max()))
+
+    # Candidate levels must be above entry and meaningfully separated.
+    candidates=sorted(set(
+        round(v,6) for v in levels
+        if np.isfinite(v) and v>entry*1.01
+    ))
+
+    # Prefer the nearest meaningful overhead resistance.
+    target=candidates[0] if candidates else entry+2*risk
+
+    # Ensure the target is not below a minimum 1.5R opportunity.
+    minimum_target=entry+1.5*risk
+    if target<minimum_target:
+        target=entry+2*risk
+
+    reward=target-entry
+    rr=reward/risk if risk>0 else np.nan
+
+    # Second target: next resistance / 3R, whichever is reachable.
+    higher=[v for v in candidates if v>target*1.01]
+    target2=higher[0] if higher else entry+3*risk
+
+    # Realistic trade-quality score.
+    quality=0
+    quality_reasons=[]
+
+    if risk_pct<=3:
+        quality+=30
+        quality_reasons.append("Risk <=3%")
+    elif risk_pct<=5:
+        quality+=24
+        quality_reasons.append("Risk <=5%")
+    elif risk_pct<=7:
+        quality+=15
+        quality_reasons.append("Risk <=7%")
+    else:
+        quality+=0
+        quality_reasons.append("Risk >7%")
+
+    if rr>=2.5:
+        quality+=35
+        quality_reasons.append("R:R >=2.5")
+    elif rr>=2:
+        quality+=30
+        quality_reasons.append("R:R >=2")
+    elif rr>=1.5:
+        quality+=20
+        quality_reasons.append("R:R >=1.5")
+    else:
+        quality+=5
+        quality_reasons.append("R:R <1.5")
+
+    # Carry forward structural evidence from V3.3.
+    quality+=min(15,int(base["Core V2 Score /50"]*.30))
+
+    if base["Volume /20"]>=13:
+        quality+=10
+        quality_reasons.append("Strong volume")
+    if base["Consolidation /15"]>=11:
+        quality+=5
+        quality_reasons.append("Tight consolidation")
+
+    quality=min(100,quality)
+
+    setup=float(base["V3.3 Score"])
+    composite=.65*setup+.35*quality
+
+    if risk_pct<=5 and rr>=2 and setup>=75 and quality>=70:
+        status="🟢 A — Strong Trade"
+    elif risk_pct<=7 and rr>=1.5 and setup>=70 and quality>=60:
+        status="🟡 B — Confirm Breakout"
+    elif risk_pct<=7 and setup>=60:
+        status="🔵 Watch"
+    else:
+        status="🔴 Avoid — Poor Trade Economics"
+
+    result=dict(base)
+    result.update({
+        "V3.4 Score":round(composite,1),
+        "Trade Quality V3.4":int(quality),
+        "Status V3.4":status,
+        "Stop Loss V3.4":stop,
+        "Risk V3.4 %":risk_pct,
+        "Target 1 V3.4":target,
+        "Target 2 V3.4":target2,
+        "Realistic R:R":rr,
+        "Overhead Resistance Target":target,
+        "Trade Quality Reasons V3.4":" | ".join(quality_reasons)
+    })
+    return result
+
 def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
     """V3.2 separates breakout probability from trade quality.
 
@@ -13362,6 +13501,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "🚀 Early Breakout V3.1",
             "🎯 Early Breakout V3.2",
             "🏆 Early Breakout V3.3 Adaptive",
+            "💎 Early Breakout V3.4 Risk/Reward",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -13719,6 +13859,113 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     f"early_breakout_v31_{analysis_date.strftime('%Y%m%d')}.csv",
                     "text/csv",
                     key="mcs_v31_download"
+                )
+
+    if scan_mode=="💎 Early Breakout V3.4 Risk/Reward":
+        st.markdown("---")
+        st.subheader("💎 Early Breakout V3.4 — Realistic Risk / Reward")
+        st.caption(
+            "V3.3 breakout evidence with capped risk and nearby-resistance "
+            "targets. This version does not assume a blind 2R/3R target."
+        )
+
+        v34_min=st.slider(
+            "Minimum V3.4 Score",55,90,65,5,key="mcs_v34_min"
+        )
+        v34_maxrisk=st.slider(
+            "Maximum Risk %",3,10,7,1,key="mcs_v34_maxrisk"
+        )
+
+        if st.button(
+            "💎 RUN EARLY BREAKOUT V3.4",
+            key="mcs_v34_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner("Scanning with realistic trade economics..."):
+                if len(stocks)>500:
+                    data=_mcs_large_universe_download(stocks)
+                else:
+                    data=_kratter_download_batches(stocks)
+
+                benchmark,bench_source=_mcs_get_reliable_benchmark(
+                    stocks,data,"2y"
+                )
+                if benchmark.empty:
+                    benchmark=_mcs_build_universe_proxy(
+                        data,analysis_ts,min_stocks=8
+                    )
+                    bench_source="Universe proxy (fallback)"
+
+                for symbol in stocks:
+                    d=data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                    except Exception:
+                        continue
+                    if len(d)<210:
+                        continue
+                    try:
+                        result=_mcs_early_breakout_v34(
+                            symbol,d,benchmark,
+                            fundamentals.get(str(symbol).upper(),{})
+                        )
+                        if result is not None and (
+                            result["V3.4 Score"]>=v34_min
+                            and result["Risk V3.4 %"]<=v34_maxrisk
+                            and result["Realistic R:R"]>=1.5
+                        ):
+                            rows.append(result)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    f"No V3.4 setups met the selected criteria on "
+                    f"{analysis_date.strftime('%d-%b-%Y')}."
+                )
+            else:
+                out.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("Setups",len(out))
+                c2.metric("🟢 A",int(out["Status V3.4"].str.startswith("🟢").sum()))
+                c3.metric("🟡 B",int(out["Status V3.4"].str.startswith("🟡").sum()))
+                c4.metric("Avg R:R",f'{out["Realistic R:R"].mean():.2f}')
+
+                st.caption(f"Benchmark: {bench_source}")
+
+                display_cols=[
+                    "Scan Date","Symbol","V3.4 Score","V3.3 Score",
+                    "Core V2 Score /50","Volume /20","Consolidation /15",
+                    "Close High /10","Relative Strength /5",
+                    "Trade Quality V3.4","Status V3.4","Close",
+                    "Resistance","Distance to Breakout %",
+                    "Confirmation Entry","Stop Loss V3.4","Risk V3.4 %",
+                    "Target 1 V3.4","Target 2 V3.4","Realistic R:R",
+                    "Overhead Resistance Target","Trade Quality Reasons V3.4"
+                ]
+                display_cols=[c for c in display_cols if c in out.columns]
+
+                display=out.sort_values(
+                    ["V3.4 Score","Realistic R:R"],
+                    ascending=[False,False]
+                )[display_cols]
+
+                st.dataframe(display,width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download V3.4 Results",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"early_breakout_v34_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="mcs_v34_download"
                 )
 
     if scan_mode=="🏆 Early Breakout V3.3 Adaptive":
