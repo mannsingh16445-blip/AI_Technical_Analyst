@@ -14043,8 +14043,30 @@ elif module == "🔥 Momentum Catalyst Scanner":
         elif st.button("💎 RUN MULTIBAGGER INTELLIGENCE V2.2",key="mbv22_run",type="primary"):
             try:
                 fund_df=_mbv2_norm_cols(pd.read_csv(fund_file))
+                # Accept both the original fundamental CSV (Name/Ticker)
+                # and the V2.1 combined export (Company/Symbol).
+                if "Ticker" not in fund_df.columns and "Symbol" in fund_df.columns:
+                    fund_df["Ticker"]=fund_df["Symbol"]
+                if "Name" not in fund_df.columns and "Company" in fund_df.columns:
+                    fund_df["Name"]=fund_df["Company"]
+
+                # Also normalize the most common exported column variants.
+                if "Ticker" not in fund_df.columns:
+                    for candidate in ["Ticker Symbol","Stock","Stock Symbol","NSE Symbol"]:
+                        if candidate in fund_df.columns:
+                            fund_df["Ticker"]=fund_df[candidate]
+                            break
+                if "Name" not in fund_df.columns:
+                    for candidate in ["Company Name","Stock Name"]:
+                        if candidate in fund_df.columns:
+                            fund_df["Name"]=fund_df[candidate]
+                            break
+
                 if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
-                    st.error("CSV must contain Name and Ticker columns.")
+                    st.error(
+                        "Could not identify stock name/symbol columns. "
+                        "Accepted formats include Name/Ticker or Company/Symbol."
+                    )
                 else:
                     lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
                     rows=[]
