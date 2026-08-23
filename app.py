@@ -10790,6 +10790,76 @@ def _mbv2_classify(fund_score, tech_score, risk_pct, rr):
         return "🔵 Developing"
     return "⚪ Research Watch"
 
+
+# ============================================================
+# MULTIBAGGER INTELLIGENCE V2.2 — SUSTAINABILITY + CONVERGENCE
+# ============================================================
+
+def _mbv22_growth_sustainability(row):
+    """Score whether growth looks broad/sustainable rather than one-off."""
+    def n(k):
+        try: return float(row.get(k,np.nan))
+        except Exception: return np.nan
+
+    vals={
+        "sales5":n("5Y Historical Revenue Growth"),
+        "eps5":n("5Y Historical EPS Growth"),
+        "sales1":n("1Y Forward Revenue Growth"),
+        "eps1":n("1Y Forward EPS Growth"),
+        "margin":n("EBITDA Margin"),
+        "cfm":n("5Y Avg Cash Flow Margin"),
+        "fcf":n("Free Cash Flow")
+    }
+
+    # Sustainable zone: strong growth gets rewarded, but extreme one-off
+    # numbers are capped rather than allowed to dominate the score.
+    def growth_score(x, ideal_lo, ideal_hi):
+        if not np.isfinite(x): return np.nan
+        if x < 0: return 0.0
+        if x <= ideal_hi:
+            return min(100, max(0,(x-ideal_lo)/(ideal_hi-ideal_lo)*100))
+        # Diminishing returns above the sustainable zone.
+        return max(70, 100 - min(30,(x-ideal_hi)/max(ideal_hi,1)*30))
+
+    g=[
+        growth_score(vals["sales5"],10,35),
+        growth_score(vals["eps5"],10,40),
+        growth_score(vals["sales1"],8,30),
+        growth_score(vals["eps1"],10,40)
+    ]
+    margin=100 if np.isfinite(vals["margin"]) and vals["margin"]>=15 else (
+        60 if np.isfinite(vals["margin"]) and vals["margin"]>=10 else 30)
+    cfm=100 if np.isfinite(vals["cfm"]) and vals["cfm"]>=15 else (
+        60 if np.isfinite(vals["cfm"]) and vals["cfm"]>=5 else 30)
+    fcf=100 if np.isfinite(vals["fcf"]) and vals["fcf"]>0 else 0
+
+    growth=np.nanmean(g) if any(np.isfinite(g)) else 0
+    return round(float(.70*growth+.10*margin+.10*cfm+.10*fcf),1)
+
+def _mbv22_convergence_class(fund, sustain, tech, risk, rr):
+    if fund>=80 and sustain>=75 and tech>=75 and risk<=5 and rr>=2:
+        return "💎 High Conviction"
+    if fund>=75 and sustain>=70 and tech>=60:
+        return "🚀 Emerging Multibagger"
+    if fund>=75 and sustain>=70 and tech<60:
+        return "🟡 Early Discovery"
+    if fund>=70 and sustain>=65 and tech>=70 and risk<=7 and rr>=1.5:
+        return "🟢 Fundamental + Technical"
+    if fund>=70 and sustain>=65:
+        return "🔵 Fundamental Watch"
+    if tech>=75 and risk<=7 and rr>=1.5:
+        return "⚪ Technical Candidate"
+    return "Research Watch"
+
+def _mbv22_final_score(fund, sustain, tech, risk, rr):
+    # Discovery is weighted more heavily than timing, because the objective
+    # is to identify businesses before full market recognition.
+    tech_component=tech if tech>0 else 0
+    base=.45*fund+.25*sustain+.30*tech_component
+    risk_bonus=(4 if risk<=3 else (2 if risk<=5 else 0)) if np.isfinite(risk) else 0
+    rr_bonus=(4 if rr>=2.5 else (2 if rr>=2 else (1 if rr>=1.5 else 0))) if np.isfinite(rr) else 0
+    return round(min(100,base+risk_bonus+rr_bonus),1)
+
 def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
     """V3.2 separates breakout probability from trade quality.
 
@@ -13586,6 +13656,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "🏆 Early Breakout V3.3 Adaptive",
             "💎 Early Breakout V3.4 Risk/Reward",
             "🏆 Multibagger Intelligence V2.1",
+            "💎 Multibagger Intelligence V2.2",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -13944,6 +14015,178 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     "text/csv",
                     key="mcs_v31_download"
                 )
+
+    if scan_mode=="💎 Multibagger Intelligence V2.2":
+        st.markdown("---")
+        st.subheader("💎 Multibagger Intelligence V2.2 — Sustainability + Convergence")
+        st.caption(
+            "V2.1 discovery engine plus growth-sustainability scoring and a "
+            "fundamental/technical convergence matrix."
+        )
+
+        fund_file=st.file_uploader(
+            "Upload Multibagger fundamental CSV",
+            type=["csv"],key="mbv22_fund_csv"
+        )
+        c1,c2,c3=st.columns(3)
+        fund_min=c1.slider("Minimum Fundamental Score",50,90,65,5,key="mbv22_fund_min")
+        sustain_min=c2.slider("Minimum Sustainability Score",40,90,60,5,key="mbv22_sustain_min")
+        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv22_risk")
+
+        st.info(
+            "V2.2 caps the influence of extreme growth rates and gives more "
+            "weight to sustained growth, margins, cash generation and technical convergence."
+        )
+
+        if fund_file is None:
+            st.info("Upload the same Multibagger Intelligence V1/V2.1 fundamental CSV.")
+        elif st.button("💎 RUN MULTIBAGGER INTELLIGENCE V2.2",key="mbv22_run",type="primary"):
+            try:
+                fund_df=_mbv2_norm_cols(pd.read_csv(fund_file))
+                if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
+                    st.error("CSV must contain Name and Ticker columns.")
+                else:
+                    lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
+                    rows=[]
+                    with st.spinner("Calculating sustainability and technical convergence..."):
+                        data=(
+                            _mcs_large_universe_download(stocks)
+                            if len(stocks)>500 else _kratter_download_batches(stocks)
+                        )
+                        benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
+                        if benchmark.empty:
+                            benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
+                            bench_source="Universe proxy (fallback)"
+
+                        for symbol in stocks:
+                            fr=lookup.get(str(symbol).upper().strip())
+                            if fr is None: continue
+                            try:
+                                fs=_mbv2_fundamental_score(fr.to_dict())
+                                if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min:
+                                    continue
+
+                                sustain=_mbv22_growth_sustainability(fr.to_dict())
+
+                                d=data.get(symbol)
+                                tech=None
+                                if d is not None and not d.empty:
+                                    d=d.copy()
+                                    d.index=pd.to_datetime(d.index,errors="coerce")
+                                    if getattr(d.index,"tz",None) is not None:
+                                        d.index=d.index.tz_localize(None)
+                                    d=d[~d.index.isna()].sort_index()
+                                    d=d.loc[d.index<=analysis_ts]
+                                    if len(d)>=210:
+                                        tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
+
+                                if tech is None:
+                                    ts=0.0; tq=np.nan; risk=np.nan; rr=np.nan
+                                    entry=stop=t1=t2=distance=vr=tests=np.nan
+                                    consolidation=False
+                                else:
+                                    ts=float(tech.get("V3.4 Score",0))
+                                    tq=tech.get("Trade Quality V3.4",np.nan)
+                                    risk=float(tech.get("Risk V3.4 %",np.nan))
+                                    rr=float(tech.get("Realistic R:R",np.nan))
+                                    entry=tech.get("Confirmation Entry",np.nan)
+                                    stop=tech.get("Stop Loss V3.4",np.nan)
+                                    t1=tech.get("Target 1 V3.4",np.nan)
+                                    t2=tech.get("Target 2 V3.4",np.nan)
+                                    distance=tech.get("Distance to Breakout %",np.nan)
+                                    vr=tech.get("Volume Ratio",np.nan)
+                                    tests=tech.get("Resistance Tests 15D",np.nan)
+                                    consolidation=tech.get("Consolidation",False)
+
+                                final=_mbv22_final_score(
+                                    fs["Fundamental Score"],sustain,ts,
+                                    risk if np.isfinite(risk) else np.nan,
+                                    rr if np.isfinite(rr) else np.nan
+                                )
+                                status=_mbv22_convergence_class(
+                                    fs["Fundamental Score"],sustain,ts,
+                                    risk if np.isfinite(risk) else 99,
+                                    rr if np.isfinite(rr) else 0
+                                )
+
+                                rows.append({
+                                    "Scan Date":analysis_date.strftime("%Y-%m-%d"),
+                                    "Symbol":symbol,
+                                    "Company":fr.get("Name",symbol),
+                                    "Sector":fr.get("Sub-Sector",""),
+                                    "V2.2 Score":final,
+                                    "Status":status,
+                                    "Fundamental Score":fs["Fundamental Score"],
+                                    "Growth Sustainability Score":sustain,
+                                    "Technical V3.4 Score":ts,
+                                    "V3.4 Trade Quality":tq,
+                                    "Risk %":risk,
+                                    "Realistic R:R":rr,
+                                    "Entry":entry,"Stop Loss":stop,
+                                    "Target 1":t1,"Target 2":t2,
+                                    "Distance to Breakout %":distance,
+                                    "Volume Ratio":vr,
+                                    "Resistance Tests":tests,
+                                    "Consolidation":consolidation,
+                                    **{k:v for k,v in fs.items()
+                                       if k not in ["Fundamental Score"]},
+                                })
+                                for col in [
+                                    "Market Cap","5Y Historical Revenue Growth",
+                                    "5Y Historical EPS Growth","1Y Forward Revenue Growth",
+                                    "1Y Forward EPS Growth","ROCE","Return on Equity",
+                                    "EBITDA Margin","Net Profit Margin","Debt to Equity",
+                                    "Free Cash Flow","Promoter Holding Change – 6M",
+                                    "FII Holding Change – 6M","DII Holding Change – 6M",
+                                    "Pledged Promoter Holdings","PE Ratio","Forward PE Ratio",
+                                    "PE Premium vs Sector"]:
+                                    rows[-1][col]=fr.get(col,np.nan)
+                            except Exception:
+                                continue
+
+                    out=pd.DataFrame(rows)
+                    if out.empty:
+                        st.warning("No fundamentally eligible companies were found.")
+                    else:
+                        status_order=[
+                            "💎 High Conviction","🚀 Emerging Multibagger",
+                            "🟢 Fundamental + Technical","🟡 Early Discovery",
+                            "🔵 Fundamental Watch","⚪ Technical Candidate",
+                            "Research Watch"]
+                        out["_status"]=pd.Categorical(
+                            out["Status"],categories=status_order,ordered=True)
+                        out=out.sort_values(
+                            ["_status","V2.2 Score"],
+                            ascending=[True,False]).drop(columns="_status")
+
+                        c1,c2,c3,c4,c5=st.columns(5)
+                        c1.metric("Candidates",len(out))
+                        c2.metric("💎 High",int(out["Status"].eq("💎 High Conviction").sum()))
+                        c3.metric("🚀 Emerging",int(out["Status"].eq("🚀 Emerging Multibagger").sum()))
+                        c4.metric("🟢 Convergence",int(out["Status"].eq("🟢 Fundamental + Technical").sum()))
+                        c5.metric("🟡 Early Discovery",int(out["Status"].eq("🟡 Early Discovery").sum()))
+
+                        st.caption(f"Benchmark: {bench_source}")
+
+                        cols=[
+                            "Symbol","Company","Sector","Status","V2.2 Score",
+                            "Fundamental Score","Growth Sustainability Score",
+                            "Technical V3.4 Score","V3.4 Trade Quality","Risk %",
+                            "Realistic R:R","Entry","Stop Loss","Target 1","Target 2",
+                            "Distance to Breakout %","Volume Ratio","Resistance Tests",
+                            "ROCE","Return on Equity","5Y Historical Revenue Growth",
+                            "5Y Historical EPS Growth","1Y Forward EPS Growth",
+                            "Debt to Equity","Free Cash Flow","PE Ratio","Forward PE Ratio"
+                        ]
+                        cols=[c for c in cols if c in out.columns]
+                        st.dataframe(out[cols],width="stretch",hide_index=True)
+                        st.download_button(
+                            "⬇️ Download Multibagger V2.2 Results",
+                            out.to_csv(index=False).encode("utf-8"),
+                            f"multibagger_v22_{analysis_date.strftime('%Y%m%d')}.csv",
+                            "text/csv",key="mbv22_download")
+            except Exception as e:
+                st.error(f"Multibagger V2.2 error: {e}")
 
     if scan_mode=="🏆 Multibagger Intelligence V2.1":
         st.markdown("---")
