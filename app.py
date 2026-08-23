@@ -9432,6 +9432,81 @@ def _kratter_position_plan(entry_price, account_size, risk_pct=2.0):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _mcs_large_universe_download(tickers):
+    """Download a large NSE universe in conservative chunks.
+
+    Full NSE can contain far more symbols than the smaller universes.
+    This wrapper normalizes symbols, removes obvious non-equity entries,
+    downloads in 80-symbol chunks, retries rate-limit/temporary failures,
+    and returns only usable OHLC data.
+    """
+    import time as _mcs_time
+
+    cleaned=[]
+    for s in tickers:
+        s=str(s).strip().upper()
+        if not s or s in {"NAN","NONE","NULL"}:
+            continue
+        if s.startswith("^") or " " in s or "DERIVATIVES" in s:
+            continue
+        # NSE equity symbols can contain &, -, and periods; retain them.
+        if not s.endswith(".NS"):
+            s=s+".NS"
+        cleaned.append(s)
+
+    cleaned=list(dict.fromkeys(cleaned))
+    result={}
+
+    for start in range(0,len(cleaned),80):
+        batch=cleaned[start:start+80]
+        data=None
+
+        for attempt in range(3):
+            try:
+                data=yf.download(
+                    tickers=batch,
+                    period="2y",
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    group_by="ticker"
+                )
+                if data is not None and not data.empty:
+                    break
+            except Exception as exc:
+                msg=str(exc).lower()
+                # Back off specifically for rate limiting / transient Yahoo errors.
+                if "rate" in msg or "too many" in msg or "429" in msg:
+                    _mcs_time.sleep(2**(attempt+1))
+                else:
+                    _mcs_time.sleep(1)
+
+        if data is None or data.empty:
+            continue
+
+        if isinstance(data.columns,pd.MultiIndex):
+            for yahoo_symbol in batch:
+                try:
+                    if yahoo_symbol in data.columns.get_level_values(0):
+                        z=data[yahoo_symbol].copy()
+                    elif yahoo_symbol in data.columns.get_level_values(1):
+                        z=data.xs(yahoo_symbol,axis=1,level=1).copy()
+                    else:
+                        continue
+
+                    if z is not None and not z.empty and "Close" in z.columns:
+                        z=z.dropna(subset=["Close"])
+                        if len(z)>=60:
+                            result[yahoo_symbol.removesuffix(".NS")]=z
+                except Exception:
+                    continue
+
+    return result
+
+
 def _kratter_download_batches(tickers, batch_size=40):
     """Serial/batched Yahoo download with graceful failure."""
     result={}
@@ -13551,6 +13626,13 @@ elif module == "🔥 Momentum Catalyst Scanner":
         ab_hold=a3.slider("Forward Evaluation Days",5,20,10,1,key="mcs_ab_hold")
         ab_min=st.slider("Minimum V2 / V3.1 Score",50,90,65,5,key="mcs_ab_min")
 
+        if len(stocks)>500:
+            st.info(
+                f"Large-universe mode detected ({len(stocks)} symbols). "
+                "The app will download NSE equity data in conservative chunks "
+                "and skip symbols with unavailable history. The first run may take longer."
+            )
+
         if st.button("🧪 RUN FACTOR ABLATION TEST",type="primary",key="mcs_ab_run"):
             if ab_start_date>=ab_end_date:
                 st.error("Test start date must be before the end date.")
@@ -13566,7 +13648,11 @@ elif module == "🔥 Momentum Catalyst Scanner":
                 status=st.empty()
 
                 with st.spinner("Running walk-forward factor ablation..."):
-                    ab_data=_kratter_download_batches(stocks)
+                    # Full NSE is large: use the dedicated conservative downloader.
+                    if len(stocks) > 500:
+                        ab_data=_mcs_large_universe_download(stocks)
+                    else:
+                        ab_data=_kratter_download_batches(stocks)
                     ab_benchmark,ab_source=_mcs_get_reliable_benchmark(stocks,ab_data,"2y")
                     if ab_benchmark.empty:
                         ab_benchmark=_mcs_build_universe_proxy(ab_data,analysis_ts,min_stocks=8)
