@@ -10260,6 +10260,243 @@ def _mcs_early_breakout_v31(symbol, df, benchmark=None, fundamentals=None):
 # V2 MARKET REGIME + BREAKOUT CONFIRMATION + TRADE PLAN
 # ============================================================
 
+
+# ============================================================
+# EARLY BREAKOUT V3.2 — BREAKOUT PROBABILITY + TRADE QUALITY
+# ============================================================
+
+def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
+    """V3.2 separates breakout probability from trade quality.
+
+    It deliberately does not require volume surge. Relative strength,
+    consolidation, close location and resistance pressure identify the
+    setup; R:R and risk distance determine whether it is tradable.
+    """
+    x=_mcs_prepare(df)
+    if x.empty or len(x)<60:
+        return None
+
+    r=x.iloc[-1]
+    close=float(r["Close"])
+    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
+    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
+        return None
+
+    distance=(resistance-close)/resistance*100
+    if distance>2.5:
+        return None
+
+    recent=x.iloc[-15:]
+    test_threshold=resistance*.99
+    tests=int((recent["High"]>=test_threshold).sum())
+
+    lows1=float(recent["Low"].iloc[:7].mean())
+    lows2=float(recent["Low"].iloc[7:].mean())
+    rising_lows=bool(lows2>lows1*1.005)
+
+    # Consolidation / compression
+    r7=recent.iloc[-7:]
+    r8=recent.iloc[:8]
+    range7=float(r7["High"].max()-r7["Low"].min())
+    range8=float(r8["High"].max()-r8["Low"].min())
+    compression=bool(range8>0 and range7<range8*.80)
+
+    recent5=x.iloc[-5:]
+    prior10=x.iloc[-15:-5]
+    rr5=float(recent5["High"].max()-recent5["Low"].min())
+    rr10=float(prior10["High"].max()-prior10["Low"].min())
+    range_contract=bool(rr10>0 and rr5<rr10*.75)
+
+    atr14=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else np.nan
+    atr5=float(x["ATR14"].iloc[-5:].mean())
+    atr20=float(x["ATR14"].iloc[-25:-5].mean())
+    atr_contract=bool(
+        np.isfinite(atr5) and np.isfinite(atr20) and atr5<atr20*.90
+    )
+    consolidation=bool(compression or (range_contract and atr_contract))
+
+    # Relative strength vs benchmark
+    rs20=np.nan
+    rs60=np.nan
+    if benchmark is not None and not benchmark.empty:
+        b=_mcs_prepare(benchmark)
+        if len(b)>=61:
+            stock20=float(r["Return 20D %"])
+            bench20=float(b.iloc[-1]["Return 20D %"])
+            rs20=stock20-bench20
+            stock60=(close/float(x["Close"].iloc[-61])-1)*100
+            bench60=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-61])-1)*100
+            rs60=stock60-bench60
+
+    rs_strong=bool(np.isfinite(rs20) and rs20>=5)
+    rs_positive=bool(np.isfinite(rs20) and rs20>=2)
+
+    # Close location
+    high=float(r["High"])
+    low=float(r["Low"])
+    day_range=high-low
+    clv=(close-low)/day_range if day_range>0 else np.nan
+    close_near_high=bool(np.isfinite(clv) and clv>=.80)
+    close_very_high=bool(np.isfinite(clv) and clv>=.90)
+
+    # Trend / regime
+    sma20=float(r["SMA20"])
+    sma50=float(r["SMA50"])
+    sma200=float(r["SMA200"])
+    trend_short=bool(close>sma20 and sma20>sma50)
+    trend_full=bool(trend_short and sma50>sma200)
+
+    # --------------------------------------------------------
+    # 1) BREAKOUT PROBABILITY SCORE — 100
+    # --------------------------------------------------------
+    bp=0
+    bp_reasons=[]
+
+    if distance<=.75:
+        bp+=20; bp_reasons.append("Very close to resistance")
+    elif distance<=1.25:
+        bp+=16; bp_reasons.append("Close to resistance")
+    elif distance<=2.0:
+        bp+=12; bp_reasons.append("Within 2% of resistance")
+    else:
+        bp+=7
+
+    if tests>=3:
+        bp+=15; bp_reasons.append(f"{tests} resistance tests")
+    elif tests==2:
+        bp+=12; bp_reasons.append("2 resistance tests")
+    elif tests==1:
+        bp+=7; bp_reasons.append("1 resistance test")
+
+    if rising_lows:
+        bp+=10; bp_reasons.append("Rising lows")
+
+    if consolidation:
+        bp+=20; bp_reasons.append("Consolidation/compression")
+
+    if close_very_high:
+        bp+=15; bp_reasons.append("Close very near daily high")
+    elif close_near_high:
+        bp+=10; bp_reasons.append("Close near daily high")
+
+    if rs_strong:
+        bp+=20; bp_reasons.append(f"Strong RS +{rs20:.1f}%")
+    elif rs_positive:
+        bp+=12; bp_reasons.append(f"Positive RS +{rs20:.1f}%")
+
+    bp=min(100,bp)
+
+    # --------------------------------------------------------
+    # 2) TRADE QUALITY / RISK-REWARD
+    # --------------------------------------------------------
+    # Conservative next-session confirmation entry above resistance.
+    entry=resistance*1.002
+
+    if not np.isfinite(atr14) or atr14<=0:
+        atr14=entry*.02
+
+    # Risk is based on ATR and recent structural low.
+    swing_low=float(x["Low"].iloc[-10:].min())
+    atr_stop=entry-1.5*atr14
+    structural_stop=swing_low*.995
+    stop=min(atr_stop,structural_stop)
+
+    risk=entry-stop
+    if risk<=0:
+        return None
+
+    # Projected targets using risk multiples.
+    target1=entry+2*risk
+    target2=entry+3*risk
+
+    reward1=target1-entry
+    rr1=reward1/risk if risk>0 else np.nan
+
+    # Quality components.
+    tq=0
+    tq_reasons=[]
+
+    if rr1>=2:
+        tq+=20; tq_reasons.append("R:R >= 2.0")
+    if rr1>=2.5:
+        tq+=5; tq_reasons.append("R:R >= 2.5")
+
+    risk_pct=risk/entry*100
+    if risk_pct<=2:
+        tq+=20; tq_reasons.append("Low risk distance")
+    elif risk_pct<=3:
+        tq+=12; tq_reasons.append("Moderate risk distance")
+    elif risk_pct<=4:
+        tq+=5
+    else:
+        tq_reasons.append("High risk distance")
+
+    if trend_full:
+        tq+=15; tq_reasons.append("Bullish MA stack")
+    elif trend_short:
+        tq+=10; tq_reasons.append("Bullish short trend")
+
+    if atr_contract:
+        tq+=10; tq_reasons.append("ATR contracting")
+
+    if consolidation:
+        tq+=10; tq_reasons.append("Tight base")
+
+    if rs_strong:
+        tq+=15; tq_reasons.append("Strong relative strength")
+    elif rs_positive:
+        tq+=8; tq_reasons.append("Positive relative strength")
+
+    if close_near_high:
+        tq+=5; tq_reasons.append("Strong close")
+
+    tq=min(100,tq)
+
+    # --------------------------------------------------------
+    # 3) FINAL DECISION
+    # --------------------------------------------------------
+    # Breakout probability gets more weight than trade quality, but both
+    # must clear minimum gates.
+    composite=.60*bp+.40*tq
+
+    if bp>=75 and tq>=70 and composite>=75 and rr1>=2:
+        status="🟢 A-Grade Breakout Trade"
+    elif bp>=70 and tq>=60 and composite>=68:
+        status="🟡 Breakout Ready — Confirm"
+    elif bp>=60:
+        status="🔵 Breakout Watch"
+    else:
+        status="⚪ Low Priority"
+
+    return {
+        "Symbol":symbol,
+        "V3.2 Composite":round(composite,1),
+        "Breakout Probability":int(bp),
+        "Trade Quality":int(tq),
+        "Status":status,
+        "Close":close,
+        "Resistance":resistance,
+        "Distance to Breakout %":distance,
+        "Confirmation Entry":entry,
+        "Stop Loss":stop,
+        "Risk %":risk_pct,
+        "Target 1":target1,
+        "Target 2":target2,
+        "Risk Reward":rr1,
+        "Resistance Tests 15D":tests,
+        "Rising Lows":rising_lows,
+        "Relative Strength 20D %":rs20,
+        "Relative Strength 60D %":rs60,
+        "Close Location %":clv*100 if np.isfinite(clv) else np.nan,
+        "Close Near Daily High":close_near_high,
+        "Consolidation":consolidation,
+        "ATR Contracting":atr_contract,
+        "Bullish MA Stack":trend_full,
+        "Breakout Reasons":" | ".join(bp_reasons),
+        "Trade Quality Reasons":" | ".join(tq_reasons)
+    }
+
+
 def _mcs_rsi(series, period=14):
     s=pd.Series(series,dtype="float64")
     delta=s.diff()
@@ -12820,6 +13057,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "Early Breakout",
             "🔥 Early Breakout V2",
             "🚀 Early Breakout V3.1",
+            "🎯 Early Breakout V3.2",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -13177,6 +13415,120 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     f"early_breakout_v31_{analysis_date.strftime('%Y%m%d')}.csv",
                     "text/csv",
                     key="mcs_v31_download"
+                )
+
+    if scan_mode=="🎯 Early Breakout V3.2":
+        st.markdown("---")
+        st.subheader("🎯 Early Breakout V3.2 — Probability + Trade Quality")
+        st.caption(
+            "Separates the probability of a near-term breakout from whether "
+            "the setup offers a tradable risk/reward."
+        )
+
+        v32_min=st.slider(
+            "Minimum V3.2 Composite",60,90,70,5,key="mcs_v32_min"
+        )
+        v32_run=st.button(
+            "🎯 RUN EARLY BREAKOUT V3.2",
+            key="mcs_v32_run",type="primary"
+        )
+
+        if v32_run:
+            v32_rows=[]
+            with st.spinner("Evaluating breakout probability and trade quality..."):
+                v32_data=_kratter_download_batches(stocks)
+                v32_benchmark,v32_source=_mcs_get_reliable_benchmark(
+                    stocks,v32_data,"2y"
+                )
+                if v32_benchmark.empty:
+                    v32_benchmark=_mcs_build_universe_proxy(
+                        v32_data,analysis_ts,min_stocks=8
+                    )
+                    v32_source="Universe proxy (fallback)"
+
+                for symbol in stocks:
+                    d=v32_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                    except Exception:
+                        continue
+                    if d.empty:
+                        continue
+
+                    try:
+                        row=_mcs_early_breakout_v32(
+                            symbol,d,v32_benchmark,
+                            fundamentals.get(str(symbol).upper(),{})
+                        )
+                        if row is not None and (
+                            row["V3.2 Composite"]>=v32_min
+                            and row["Breakout Probability"]>=60
+                        ):
+                            v32_rows.append(row)
+                    except Exception:
+                        continue
+
+            v32_df=pd.DataFrame(v32_rows)
+
+            if v32_df.empty:
+                st.warning(
+                    f"No V3.2 setups met the threshold for "
+                    f"{analysis_date.strftime('%d-%b-%Y')}."
+                )
+            else:
+                v32_df.insert(
+                    0,"Scan Date",analysis_date.strftime("%Y-%m-%d")
+                )
+
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("Setups",len(v32_df))
+                c2.metric(
+                    "🟢 A-Grade",
+                    int(v32_df["Status"].str.contains("A-Grade").sum())
+                )
+                c3.metric(
+                    "🟡 Confirm",
+                    int(v32_df["Status"].str.contains("Confirm").sum())
+                )
+                c4.metric(
+                    "Avg Composite",
+                    f'{v32_df["V3.2 Composite"].mean():.1f}'
+                )
+
+                st.caption(f"Benchmark source: {v32_source}")
+
+                cols=[
+                    "Scan Date","Symbol","V3.2 Composite",
+                    "Breakout Probability","Trade Quality","Status",
+                    "Close","Resistance","Distance to Breakout %",
+                    "Confirmation Entry","Stop Loss","Risk %",
+                    "Target 1","Target 2","Risk Reward",
+                    "Resistance Tests 15D","Relative Strength 20D %",
+                    "Close Location %","Consolidation","ATR Contracting",
+                    "Bullish MA Stack","Breakout Reasons",
+                    "Trade Quality Reasons"
+                ]
+                cols=[c for c in cols if c in v32_df.columns]
+
+                display=v32_df.sort_values(
+                    ["V3.2 Composite","Breakout Probability"],
+                    ascending=[False,False]
+                )[cols]
+
+                st.dataframe(display,width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download V3.2 Results",
+                    v32_df.to_csv(index=False).encode("utf-8"),
+                    f"early_breakout_v32_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="mcs_v32_download"
                 )
 
     if scan_mode=="🧪 V3.1 Factor Ablation Lab":
