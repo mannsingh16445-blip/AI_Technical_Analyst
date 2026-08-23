@@ -11294,7 +11294,145 @@ MACD = 1 point
 # 120-DAY HIGH BREAKOUT SCANNER
 # ============================================================
 
-elif module == "🎯 Buy / Sell Signal Engine":
+el
+# ============================================================
+# V3.1 FACTOR ABLATION ENGINE
+# ============================================================
+
+def _mcs_ablation_backtest(symbol, df, benchmark=None, fundamentals=None,
+                            start_ts=None, end_ts=None, min_score=65,
+                            max_hold_days=10):
+    d=_mcs_prepare(df)
+    if d.empty or len(d)<210:
+        return {}
+    d=d.sort_index()
+
+    bfull=_mcs_prepare(benchmark) if benchmark is not None and not benchmark.empty else pd.DataFrame()
+    if not bfull.empty:
+        bfull=bfull.sort_index()
+
+    variants=[
+        "V2 Baseline","V2 + Volume Surge","V2 + Relative Strength",
+        "V2 + Close Near High","V2 + Consolidation","V3.1 All Factors"
+    ]
+    results={v:[] for v in variants}
+    previous={v:False for v in variants}
+
+    last_signal_index=len(d)-max_hold_days-1
+    if last_signal_index<205:
+        return results
+
+    for i in range(205,last_signal_index+1):
+        hist=d.iloc[:i+1]
+        sig_date=d.index[i]
+        if start_ts is not None and sig_date<pd.Timestamp(start_ts):
+            continue
+        if end_ts is not None and sig_date>pd.Timestamp(end_ts):
+            continue
+
+        b=bfull.loc[bfull.index<=sig_date] if not bfull.empty else pd.DataFrame()
+        v2=_mcs_early_breakout_v2(symbol,hist,b,fundamentals or {})
+        v2_ok=bool(v2 is not None and v2.get("V2 Qualified",False)
+                   and float(v2.get("V2 Score",0))>=min_score)
+
+        if not v2_ok:
+            for v in variants:
+                previous[v]=False
+            continue
+
+        v31=_mcs_early_breakout_v31(symbol,hist,b,fundamentals or {})
+
+        def qualifies(v):
+            if v=="V2 Baseline":
+                return True
+            if v=="V2 + Volume Surge":
+                return bool(v31 and (v31.get("Volume Surge",False) or
+                                     v31.get("Test-Day Volume Stronger",False)))
+            if v=="V2 + Relative Strength":
+                rs=v31.get("RS 20D %",np.nan) if v31 else np.nan
+                return bool(np.isfinite(rs) and rs>=2.0)
+            if v=="V2 + Close Near High":
+                return bool(v31 and v31.get("Close Near Daily High",False))
+            if v=="V2 + Consolidation":
+                return bool(v31 and v31.get("Consolidation",False))
+            if v=="V3.1 All Factors":
+                return bool(v31 and v31.get("V3.1 Qualified",False)
+                            and float(v31.get("V3.1 Score",0))>=min_score)
+            return False
+
+        future=d.iloc[i+1:i+1+max_hold_days].copy()
+        if future.empty:
+            continue
+        entry_date=future.index[0]
+        if entry_date<=sig_date:
+            continue
+
+        resistance=v2.get("Resistance 20D",np.nan)
+        entry=float(future["Open"].iloc[0])
+        hits=future[future["Close"]>float(resistance)] if np.isfinite(resistance) else pd.DataFrame()
+        days=np.nan
+        breakout_date=""
+        if not hits.empty:
+            hit=hits.index[0]
+            days=int(future.index.get_loc(hit)+1)
+            breakout_date=hit.strftime("%Y-%m-%d")
+
+        forward=(float(future["Close"].iloc[-1])/entry-1)*100
+        max_gain=(float(future["High"].max())/entry-1)*100
+        max_dd=(float(future["Low"].min())/entry-1)*100
+
+        atr=float(v2.get("ATR14",np.nan))
+        if not np.isfinite(atr):
+            atr=entry*.02
+        risk=1.5*atr
+
+        for variant in variants:
+            current=qualifies(variant)
+            if current and previous[variant]:
+                continue
+            previous[variant]=current
+            if not current:
+                continue
+
+            results[variant].append({
+                "Variant":variant,"Symbol":symbol,
+                "Signal Date":sig_date.strftime("%Y-%m-%d"),
+                "Entry Date":entry_date.strftime("%Y-%m-%d"),
+                "V2 Score":float(v2.get("V2 Score",np.nan)),
+                "V3.1 Score":float(v31.get("V3.1 Score",np.nan)) if v31 else np.nan,
+                "Entry":entry,"Resistance":resistance,
+                "Breakout Date":breakout_date,"Days To Breakout":days,
+                "Breakout Within 5D":bool(np.isfinite(days) and days<=5),
+                "Forward Return %":forward,"Max Gain %":max_gain,
+                "Max Drawdown %":max_dd,
+                "Stop Hit":bool((future["Low"]<=entry-risk).any()),
+                "Target 1 Hit":bool((future["High"]>=entry+2*risk).any()),
+                "Target 2 Hit":bool((future["High"]>=entry+3*risk).any())
+            })
+    return results
+
+
+def _mcs_ablation_summary(rows):
+    df=pd.DataFrame(rows)
+    if df.empty:
+        return {"Signals":0,"Breakout <=5D %":np.nan,
+                "Avg Forward Return %":np.nan,
+                "Median Forward Return %":np.nan,
+                "Target 1 Hit %":np.nan,"Stop Hit %":np.nan,
+                "Avg Max Gain %":np.nan,"Avg Max Drawdown %":np.nan}
+    days=pd.to_numeric(df["Days To Breakout"],errors="coerce")
+    return {
+        "Signals":len(df),
+        "Breakout <=5D %":float((days<=5).mean()*100),
+        "Avg Forward Return %":float(df["Forward Return %"].mean()),
+        "Median Forward Return %":float(df["Forward Return %"].median()),
+        "Target 1 Hit %":float(df["Target 1 Hit"].mean()*100),
+        "Stop Hit %":float(df["Stop Hit"].mean()*100),
+        "Avg Max Gain %":float(df["Max Gain %"].mean()),
+        "Avg Max Drawdown %":float(df["Max Drawdown %"].mean())
+    }
+
+if module == "🎯 Buy / Sell Signal Engine":
 
     st.header(
         "🎯 Scanner Behaviour → BUY / SELL Signal Engine"
@@ -12683,6 +12821,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "Early Breakout",
             "🔥 Early Breakout V2",
             "🚀 Early Breakout V3.1",
+            "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
         ],
@@ -13040,6 +13179,117 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     "text/csv",
                     key="mcs_v31_download"
                 )
+
+    if scan_mode=="🧪 V3.1 Factor Ablation Lab":
+        st.markdown("---")
+        st.subheader("🧪 V3.1 Factor Ablation Lab")
+        st.caption(
+            "V2 baseline vs Volume Surge, Relative Strength, Close Near High, "
+            "Consolidation, and all four factors together."
+        )
+
+        import datetime as _dt_ab
+        ab_end=analysis_date
+        ab_start=ab_end-_dt_ab.timedelta(days=365)
+
+        a1,a2,a3=st.columns(3)
+        ab_start_date=a1.date_input("Test Start Date",value=ab_start,
+                                    max_value=_dt_ab.date.today(),key="mcs_ab_start")
+        ab_end_date=a2.date_input("Test End Date",value=ab_end,
+                                  max_value=_dt_ab.date.today(),key="mcs_ab_end")
+        ab_hold=a3.slider("Forward Evaluation Days",5,20,10,1,key="mcs_ab_hold")
+        ab_min=st.slider("Minimum V2 / V3.1 Score",50,90,65,5,key="mcs_ab_min")
+
+        if st.button("🧪 RUN FACTOR ABLATION TEST",type="primary",key="mcs_ab_run"):
+            if ab_start_date>=ab_end_date:
+                st.error("Test start date must be before the end date.")
+            elif not stocks:
+                st.error("No stocks are available in the selected universe.")
+            else:
+                start_ts=pd.Timestamp(ab_start_date)
+                end_ts=pd.Timestamp(ab_end_date)
+                variants=["V2 Baseline","V2 + Volume Surge","V2 + Relative Strength",
+                           "V2 + Close Near High","V2 + Consolidation","V3.1 All Factors"]
+                all_rows={v:[] for v in variants}
+                progress=st.progress(0)
+                status=st.empty()
+
+                with st.spinner("Running walk-forward factor ablation..."):
+                    ab_data=_kratter_download_batches(stocks)
+                    ab_benchmark,ab_source=_mcs_get_reliable_benchmark(stocks,ab_data,"2y")
+                    if ab_benchmark.empty:
+                        ab_benchmark=_mcs_build_universe_proxy(ab_data,analysis_ts,min_stocks=8)
+                        ab_source="Universe proxy (fallback)"
+
+                    for idx,symbol in enumerate(stocks,1):
+                        status.text(f"Testing {symbol} — {idx}/{len(stocks)} stocks")
+                        progress.progress(int(idx/len(stocks)*100))
+                        d=ab_data.get(symbol)
+                        if d is None or d.empty:
+                            continue
+                        try:
+                            d=d.copy()
+                            d.index=pd.to_datetime(d.index,errors="coerce")
+                            if getattr(d.index,"tz",None) is not None:
+                                d.index=d.index.tz_localize(None)
+                            d=d[~d.index.isna()].sort_index().loc[lambda z:z.index<=end_ts]
+                        except Exception:
+                            continue
+                        if len(d)<210:
+                            continue
+                        try:
+                            result=_mcs_ablation_backtest(
+                                symbol,d,ab_benchmark,
+                                fundamentals.get(str(symbol).upper(),{}),
+                                start_ts,end_ts,ab_min,ab_hold
+                            )
+                            for k,rows in result.items():
+                                all_rows[k].extend(rows)
+                        except Exception:
+                            continue
+
+                progress.empty()
+                status.empty()
+
+                summary_rows=[]
+                for variant,rows in all_rows.items():
+                    s=_mcs_ablation_summary(rows)
+                    s["Variant"]=variant
+                    summary_rows.append(s)
+
+                summary_df=pd.DataFrame(summary_rows)[[
+                    "Variant","Signals","Breakout <=5D %",
+                    "Avg Forward Return %","Median Forward Return %",
+                    "Target 1 Hit %","Stop Hit %",
+                    "Avg Max Gain %","Avg Max Drawdown %"
+                ]]
+
+                st.success(f"Factor ablation completed. Benchmark: {ab_source}")
+                st.dataframe(summary_df.sort_values(
+                    "Avg Forward Return %",ascending=False,na_position="last"
+                ),width="stretch",hide_index=True)
+
+                base=summary_df.loc[summary_df["Variant"]=="V2 Baseline"].iloc[0]
+                st.markdown("### Change vs V2 Baseline")
+                for _,row in summary_df.iterrows():
+                    if row["Variant"]=="V2 Baseline" or pd.isna(row["Avg Forward Return %"]):
+                        continue
+                    st.write(
+                        f"**{row['Variant']}** → "
+                        f"Return {(row['Avg Forward Return %']-base['Avg Forward Return %']):+.2f} pp | "
+                        f"Breakout {(row['Breakout <=5D %']-base['Breakout <=5D %']):+.1f} pp | "
+                        f"Stop {(row['Stop Hit %']-base['Stop Hit %']):+.1f} pp | "
+                        f"Signals {int(row['Signals'])}"
+                    )
+
+                detail=[pd.DataFrame(r) for r in all_rows.values() if r]
+                if detail:
+                    st.download_button(
+                        "⬇️ Download Factor Ablation Details",
+                        pd.concat(detail,ignore_index=True).to_csv(index=False).encode("utf-8"),
+                        f"breakout_factor_ablation_{ab_start_date}_{ab_end_date}.csv",
+                        "text/csv",key="mcs_ab_detail_download"
+                    )
 
     if scan_mode=="🚦 V2 + Regime & Trade Plan":
         st.markdown("---")
