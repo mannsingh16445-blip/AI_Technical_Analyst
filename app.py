@@ -13551,7 +13551,6 @@ elif module == "📚 Kratter Momentum Scanner":
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
-el
 # ============================================================
 # EMA 9/21/200 POWER BREAKOUT SCANNER
 # ============================================================
