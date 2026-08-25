@@ -1058,6 +1058,39 @@ def resolve_stock_universe(
     return []
 
 
+
+# ============================================================
+# CURRENT NSE F&O MEMBERSHIP NORMALIZATION
+# ============================================================
+
+# Safety layer for fallback/third-party symbol masters. NSE's recent
+# inclusion/exclusion notices are applied here so stale names such as
+# IPCALAB cannot reappear when a primary live contract source is unavailable.
+CURRENT_FNO_EXCLUSIONS = {
+    "ABBOTINDIA","ATUL","BATAINDIA","CANFINHOME","COROMANDEL","CUB",
+    "GNFC","GUJGASLTD","INDIAMART","IPCALAB","LALPATHLAB","METROPOLIS",
+    "NAVINFLUOR","PVRINOX","SUNTV","UBL",
+    "BERGEPAINT","DEEPAKNTR","ESCORTS","MRF","RAMCOCEM","APOLLOTYRE",
+    "JKCEMENT","LTTS","CYIENT","HFCL","NCC","TITAGARH","IGL","IIFL",
+    "IRCTC","HUDCO","PPLPHARMA","TATATECH","TORNTPOWER",
+    "SAMMAANCAP","EXIDEIND","NUVAMA"
+}
+
+CURRENT_FNO_ADDITIONS = {
+    "ADANIPOWER","COCHINSHIP","FORCEMOT","GODFRYPHLP",
+    "HYUNDAI","MOTILALOFS","NAM-INDIA","VMM"
+}
+
+def _normalize_current_fno_symbols(symbols):
+    clean=set()
+    for s in symbols:
+        s=str(s).strip().upper()
+        if s and s not in {"NAN","NONE","NULL"}:
+            clean.add(s)
+    clean -= CURRENT_FNO_EXCLUSIONS
+    clean |= CURRENT_FNO_ADDITIONS
+    return sorted(clean)
+
 # ============================================================
 # LOAD NSE F&O STOCK UNIVERSE
 # ============================================================
@@ -1183,7 +1216,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return symbols
+                    return _normalize_current_fno_symbols(symbols)
 
         except Exception:
             continue
@@ -1276,7 +1309,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return symbols
+                    return _normalize_current_fno_symbols(symbols)
 
         except Exception:
             continue
@@ -1358,7 +1391,7 @@ def load_fno_stocks():
             )
 
             if len(symbols) >= 100:
-                return symbols
+                return _normalize_current_fno_symbols(symbols)
 
     except Exception:
         pass
@@ -1398,13 +1431,7 @@ MCDOWELL-N UPL VEDL IDEA VOLTAS WHIRLPOOL WIPRO ZEEL ZYDUSLIFE
 ADANIPOWER COCHINSHIP HYUNDAI MOTILALOFS NAM-INDIA VMM
 """
 
-    return sorted(
-        set(
-            x.strip().upper()
-            for x in fallback.split()
-            if x.strip()
-        )
-    )
+    return _normalize_current_fno_symbols(fallback.split())
 
 
 # ============================================================
@@ -17072,8 +17099,9 @@ elif module == "🏆 Top 20 Stocks":
     if universe == "NSE F&O Stocks":
 
         st.caption(
-            "Recommended universe: individual NSE F&O "
-            "stocks. Index derivatives are excluded."
+            "Recommended universe: current NSE individual-stock F&O underlyings. "
+            "The app removes stale excluded symbols (including IPCALAB) and "
+            "adds the latest notified F&O additions when using a fallback source."
         )
 
     batch_size = st.sidebar.slider(
