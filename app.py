@@ -13588,8 +13588,8 @@ def _ema_power_prepare(df):
     d["CCI20"]=_ema_power_cci(d,20)
     d["VOL_SMA20"]=d["Volume"].rolling(20,min_periods=20).mean() if "Volume" in d else np.nan
     d["VOL_RATIO"]=d["Volume"]/d["VOL_SMA20"].replace(0,np.nan) if "Volume" in d else np.nan
-    prev_ema200=d["EMA200"].shift(10)
-    # ATR-normalized slope makes the angle comparable across ₹100 and ₹10,000 stocks.
+    # ATR-normalized slopes/angles for EMA9 and EMA21 make the angle
+    # comparable across stocks with very different price levels/volatility.
     prev_close=d["Close"].shift(1)
     tr=pd.concat([
         d["High"]-d["Low"],
@@ -13597,15 +13597,26 @@ def _ema_power_prepare(df):
         (d["Low"]-prev_close).abs()
     ],axis=1).max(axis=1)
     d["ATR14"]=tr.rolling(14,min_periods=14).mean()
-    d["EMA200_SLOPE10"]=(d["EMA200"]/prev_ema200-1)*100
-    d["EMA200_ANGLE10"] = np.degrees(
+
+    prev_ema21=d["EMA21"].shift(10)
+    prev_ema9=d["EMA9"].shift(5)
+
+    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
+    d["EMA21_SLOPE10"]=(d["EMA21"]/prev_ema21-1)*100
+    d["EMA9_SLOPE5"]=(d["EMA9"]/prev_ema9-1)*100
+
+    d["EMA21_ANGLE10"] = np.degrees(
         np.arctan(
-            (d["EMA200"]-prev_ema200) /
+            (d["EMA21"]-prev_ema21) /
             (10*d["ATR14"].replace(0,np.nan))
         )
     )
-    d["EMA21_SLOPE10"]=(d["EMA21"]/d["EMA21"].shift(10)-1)*100
-    d["EMA9_SLOPE5"]=(d["EMA9"]/d["EMA9"].shift(5)-1)*100
+    d["EMA9_ANGLE5"] = np.degrees(
+        np.arctan(
+            (d["EMA9"]-prev_ema9) /
+            (5*d["ATR14"].replace(0,np.nan))
+        )
+    )
     d["RES20_PREV"]=d["High"].rolling(20,min_periods=20).max().shift(1)
     d["EMA21_CROSS_200"]=(
         (d["EMA21"]>d["EMA200"]) &
@@ -13618,7 +13629,9 @@ def _ema_power_prepare(df):
     return d
 
 def _ema_power_signal(symbol,df,mode="Pre-breakout",
-                      angle_threshold=40.0,volume_threshold=1.5,
+                      ema21_angle_threshold=40.0,
+                      ema9_angle_threshold=40.0,
+                      volume_threshold=1.5,
                       rsi_threshold=55,cci_threshold=100):
     d=_ema_power_prepare(df)
     if len(d)<220:
@@ -13626,7 +13639,10 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
     r=d.iloc[-1]
     prev=d.iloc[-2]
 
-    required=[r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],r["EMA200_ANGLE10"]]
+    required=[
+        r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],
+        r["EMA21_ANGLE10"],r["EMA9_ANGLE5"]
+    ]
     if not all(np.isfinite(v) for v in required):
         return None
 
@@ -13636,7 +13652,8 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         d["EMA9_CROSS_21"].iloc[-10:].any()
     )
     bullish_cross=bool(d["EMA21_CROSS_200"].iloc[-20:].any())
-    steep_slope=bool(r["EMA200_ANGLE10"]>=angle_threshold)
+    steep_ema21=bool(r["EMA21_ANGLE10"]>=ema21_angle_threshold)
+    steep_ema9=bool(r["EMA9_ANGLE5"]>=ema9_angle_threshold)
 
     if mode=="Fresh Cross Only" and not bullish_cross:
         return None
@@ -13669,13 +13686,21 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         score+=10
         reasons.append("Price above EMA200")
 
-    if steep_slope:
-        score+=15
-        reasons.append(f"EMA200 angle {r['EMA200_ANGLE10']:.1f}°")
-    elif r["EMA200_ANGLE10"]>=angle_threshold*0.75:
+    if steep_ema21:
         score+=10
-    elif r["EMA200_ANGLE10"]>0:
-        score+=5
+        reasons.append(f"EMA21 angle {r['EMA21_ANGLE10']:.1f}°")
+    elif r["EMA21_ANGLE10"]>=ema21_angle_threshold*0.75:
+        score+=6
+    elif r["EMA21_ANGLE10"]>0:
+        score+=3
+
+    if steep_ema9:
+        score+=10
+        reasons.append(f"EMA9 angle {r['EMA9_ANGLE5']:.1f}°")
+    elif r["EMA9_ANGLE5"]>=ema9_angle_threshold*0.75:
+        score+=6
+    elif r["EMA9_ANGLE5"]>0:
+        score+=3
 
     if r["RSI9"]>=60 and r["RSI9"]>prev["RSI9"]:
         score+=15
@@ -13726,9 +13751,10 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         "EMA21":float(r["EMA21"]),
         "EMA200":float(r["EMA200"]),
         "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
-        "EMA200 Angle 10D °":float(r["EMA200_ANGLE10"]),
         "EMA21 Slope 10D %":float(r["EMA21_SLOPE10"]),
+        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
         "EMA9 Slope 5D %":float(r["EMA9_SLOPE5"]),
+        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
         "EMA21 > EMA200":bool(r["EMA21"]>r["EMA200"]),
         "Fresh EMA21/200 Cross":bullish_cross,
         "RSI9":float(r["RSI9"]),
@@ -13837,17 +13863,22 @@ if module == "🔥 Momentum Catalyst Scanner":
             ["Pre-breakout","Confirmed Breakout","Fresh Cross Only"],
             key="ema_power_mode"
         )
-        angle_thr=e2.slider(
-            "Minimum EMA200 angle (°)",
-            10,60,40,1,key="ema_power_angle",
-            help="ATR-normalized angle: atan(EMA200 change over 10 days ÷ 10×ATR14)."
+        ema21_angle_thr=e2.slider(
+            "Minimum EMA21 angle (°)",
+            10,60,40,1,key="ema_power_ema21_angle",
+            help="ATR-normalized EMA21 angle over the last 10 sessions."
         )
-        min_power=e3.slider(
+
+        ema9_angle_thr=e3.slider(
+            "Minimum EMA9 angle (°)",
+            10,60,40,1,key="ema_power_ema9_angle",
+            help="ATR-normalized EMA9 angle over the last 5 sessions."
+        )
+        e4,e5,e6=st.columns(3)
+        min_power=e4.slider(
             "Minimum Power Score",
             50,90,65,5,key="ema_power_min"
         )
-
-        e4,e5,e6=st.columns(3)
         vol_thr=e4.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
         rsi_thr=e5.slider("Minimum RSI(9)",50,70,55,1,key="ema_power_rsi")
         cci_thr=e6.slider("Minimum CCI(20)",0,150,100,10,key="ema_power_cci")
@@ -13879,7 +13910,8 @@ if module == "🔥 Momentum Catalyst Scanner":
 
                         result=_ema_power_signal(
                             symbol,d,ema_mode,
-                            angle_threshold=angle_thr,
+                            ema21_angle_threshold=ema21_angle_thr,
+                            ema9_angle_threshold=ema9_angle_thr,
                             volume_threshold=vol_thr,
                             rsi_threshold=rsi_thr,
                             cci_threshold=cci_thr
@@ -13898,8 +13930,8 @@ if module == "🔥 Momentum Catalyst Scanner":
             else:
                 ema_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
                 ema_df=ema_df.sort_values(
-                    ["Power Score","EMA200 Angle 10D °","Volume Ratio"],
-                    ascending=[False,False,False]
+                    ["Power Score","EMA21 Angle 10D °","EMA9 Angle 5D °","Volume Ratio"],
+                    ascending=[False,False,False,False]
                 )
 
                 a,b,c,dcol=st.columns(4)
@@ -13911,7 +13943,8 @@ if module == "🔥 Momentum Catalyst Scanner":
                 display_cols=[
                     "Scan Date","Symbol","Power Score","Rating","Close",
                     "EMA9","EMA21","EMA200","EMA200 Slope 10D %",
-                    "EMA200 Angle 10D °","EMA21 Slope 10D %","EMA9 Slope 5D %",
+                    "EMA21 Slope 10D %","EMA21 Angle 10D °",
+                    "EMA9 Slope 5D %","EMA9 Angle 5D °",
                     "EMA21 > EMA200","Fresh EMA21/200 Cross",
                     "RSI9","CCI20","Volume Ratio",
                     "Resistance 20D","Distance to Resistance %",
