@@ -10709,156 +10709,92 @@ def _mcs_early_breakout_v34(symbol, df, benchmark=None, fundamentals=None):
 
 
 # ============================================================
-# MULTIBAGGER INTELLIGENCE V2.1 — DISCOVERY + TIMING
+# MULTIBAGGER INTELLIGENCE V2.4 — SECTOR ROTATION + CATALYST
 # ============================================================
 
-def _mbv2_norm_cols(df):
+def _mbv24_norm_cols(df):
     x=df.copy()
     x.columns=[str(c).replace("\xa0"," ").strip() for c in x.columns]
     return x
 
-def _mbv2_score_linear(s, lo, hi):
-    s=pd.to_numeric(s, errors="coerce")
+def _mbv24_score_linear(s,lo,hi):
+    s=pd.to_numeric(s,errors="coerce")
     return ((s-lo)/(hi-lo)*100).clip(0,100)
 
-def _mbv2_fundamental_score(row):
-    def n(name):
+def _mbv24_sector_rotation(stock_data,sector_map,benchmark):
+    if not sector_map or benchmark is None or benchmark.empty:
+        return {}
+    b=_mcs_prepare(benchmark)
+    if b.empty:
+        return {}
+    periods={"3M":63,"6M":126,"12M":252}
+    bench={}
+    for lab,n in periods.items():
+        bench[lab]=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-1-n])-1)*100 if len(b)>n else np.nan
+    groups={}
+    for symbol,d in stock_data.items():
+        sector=sector_map.get(str(symbol).upper().strip())
+        if not sector or d is None or d.empty:
+            continue
         try:
-            return float(row.get(name, np.nan))
+            z=_mcs_prepare(d)
+            for lab,n in periods.items():
+                if len(z)>n:
+                    ret=(float(z["Close"].iloc[-1])/float(z["Close"].iloc[-1-n])-1)*100
+                    groups.setdefault(sector,{}).setdefault(lab,[]).append(ret)
         except Exception:
-            return np.nan
-    def avg(vals):
-        return float(pd.Series(vals,dtype="float64").mean(skipna=True))
-    growth=avg([
-        _mbv2_score_linear(pd.Series([n("5Y Historical Revenue Growth")]),10,30).iloc[0],
-        _mbv2_score_linear(pd.Series([n("5Y Historical EPS Growth")]),10,35).iloc[0],
-        _mbv2_score_linear(pd.Series([n("1Y Forward EPS Growth")]),10,35).iloc[0],
-        _mbv2_score_linear(pd.Series([n("1Y Forward Revenue Growth")]),8,25).iloc[0]])
-    quality=avg([
-        _mbv2_score_linear(pd.Series([n("ROCE")]),12,30).iloc[0],
-        _mbv2_score_linear(pd.Series([n("Return on Equity")]),12,25).iloc[0],
-        _mbv2_score_linear(pd.Series([n("EBITDA Margin")]),10,30).iloc[0],
-        _mbv2_score_linear(pd.Series([n("Net Profit Margin")]),5,20).iloc[0],
-        _mbv2_score_linear(pd.Series([n("5Y Avg Cash Flow Margin")]),5,25).iloc[0]])
-    financial=avg([
-        100-_mbv2_score_linear(pd.Series([n("Debt to Equity")]),0.1,1.5).iloc[0],
-        _mbv2_score_linear(pd.Series([n("Current Ratio")]),0.8,2.0).iloc[0],
-        100 if np.isfinite(n("Free Cash Flow")) and n("Free Cash Flow")>0 else 0])
-    ownership=avg([
-        _mbv2_score_linear(pd.Series([n("Promoter Holding Change – 6M")]),-2,5).iloc[0],
-        _mbv2_score_linear(pd.Series([n("FII Holding Change – 6M")]),-2,5).iloc[0],
-        _mbv2_score_linear(pd.Series([n("DII Holding Change – 6M")]),-2,5).iloc[0],
-        100-_mbv2_score_linear(pd.Series([n("Pledged Promoter Holdings")]),0,10).iloc[0]])
-    valuation=avg([
-        100-_mbv2_score_linear(pd.Series([n("PE Premium vs Sector")]),-30,50).iloc[0],
-        100-_mbv2_score_linear(pd.Series([n("Forward PE Ratio")]),10,60).iloc[0],
-        100-_mbv2_score_linear(pd.Series([n("Price / Free Cash Flow")]),5,60).iloc[0]])
-    market=avg([
-        _mbv2_score_linear(pd.Series([n("1M Return")]),-5,15).iloc[0],
-        n("Price Momentum Rank")])
-    parts=[growth,quality,financial,ownership,valuation,market]
-    score=float(np.nansum(np.array(parts)*np.array([.30,.25,.15,.10,.10,.10])))
-    coverage=float(np.isfinite(parts).sum()/len(parts)*100)
-    eligible=(np.isfinite(n("ROCE")) and n("ROCE")>=12 and
-              np.isfinite(n("Return on Equity")) and n("Return on Equity")>=10 and
-              np.isfinite(n("Debt to Equity")) and n("Debt to Equity")<=1.5 and
-              np.isfinite(n("Free Cash Flow")) and n("Free Cash Flow")>0)
-    return {
-        "Fundamental Score":round(score,1),"Growth Score":round(growth,1),
-        "Quality Score":round(quality,1),"Financial Strength Score":round(financial,1),
-        "Ownership Score":round(ownership,1),"Valuation Score":round(valuation,1),
-        "Market Confirmation Score":round(market,1),
-        "Fundamental Data Coverage %":round(coverage,1),
-        "Fundamental Eligible":eligible}
+            continue
+    out={}
+    for sector,vals in groups.items():
+        item={"Sector":sector}
+        rs=[]
+        for lab in periods:
+            arr=vals.get(lab,[])
+            sr=float(np.nanmean(arr)) if arr else np.nan
+            rel=sr-bench[lab] if np.isfinite(sr) and np.isfinite(bench[lab]) else np.nan
+            item[f"Sector {lab} Return %"]=sr
+            item[f"Sector {lab} RS %"]=rel
+            if np.isfinite(rel): rs.append(rel)
+        item["Sector Rotation Score"]=round(max(0,min(100,50+2*np.nanmean(rs))),1) if rs else np.nan
+        out[sector]=item
+    return out
 
-def _mbv2_combined_score(fund_score, tech_score, risk_pct, rr):
-    base=.55*fund_score+.45*tech_score
-    risk_bonus=5 if risk_pct<=3 else (3 if risk_pct<=5 else 0)
-    rr_bonus=5 if rr>=2.5 else (3 if rr>=2 else (1 if rr>=1.5 else 0))
-    return round(min(100,base+risk_bonus+rr_bonus),1)
-
-def _mbv2_classify(fund_score, tech_score, risk_pct, rr):
-    if fund_score>=75 and tech_score>=75 and risk_pct<=5 and rr>=2:
-        return "💎 High Conviction"
-    if fund_score>=75 and tech_score>=60:
-        return "🚀 Emerging Multibagger"
-    if fund_score>=75:
-        return "🟡 Fundamental Watchlist"
-    if tech_score>=75 and risk_pct<=7 and rr>=1.5:
-        return "🟢 Technical Watch"
-    if fund_score>=65 and tech_score>=60:
-        return "🔵 Developing"
-    return "⚪ Research Watch"
-
-
-# ============================================================
-# MULTIBAGGER INTELLIGENCE V2.2 — SUSTAINABILITY + CONVERGENCE
-# ============================================================
-
-def _mbv22_growth_sustainability(row):
-    """Score whether growth looks broad/sustainable rather than one-off."""
+def _mbv24_catalyst_score(row):
     def n(k):
         try: return float(row.get(k,np.nan))
         except Exception: return np.nan
+    vals=[]
+    for k in ["Catalyst Score","Technology Exposure"]:
+        v=n(k)
+        if np.isfinite(v): vals.append(max(0,min(100,v)))
+    for k,lo,hi in [("Order Book Growth %",5,40),("Capex Growth %",5,40),("Earnings Acceleration %",5,30)]:
+        v=n(k)
+        if np.isfinite(v): vals.append(float(_mbv24_score_linear(pd.Series([v]),lo,hi).iloc[0]))
+    f=n("Catalyst Freshness Days")
+    if np.isfinite(f): vals.append(100 if f<=30 else (75 if f<=90 else (50 if f<=180 else 25)))
+    return round(float(np.nanmean(vals)),1) if vals else np.nan
 
-    vals={
-        "sales5":n("5Y Historical Revenue Growth"),
-        "eps5":n("5Y Historical EPS Growth"),
-        "sales1":n("1Y Forward Revenue Growth"),
-        "eps1":n("1Y Forward EPS Growth"),
-        "margin":n("EBITDA Margin"),
-        "cfm":n("5Y Avg Cash Flow Margin"),
-        "fcf":n("Free Cash Flow")
-    }
+def _mbv24_final_score(discovery,sustain,rotation,catalyst,timing):
+    parts=[]; weights=[]
+    for v,w in [(discovery,.40),(sustain,.25),(rotation,.15),(catalyst,.10),(timing,.10)]:
+        if np.isfinite(v):
+            parts.append(v); weights.append(w)
+    return round(float(np.average(parts,weights=weights)),1) if parts else np.nan
 
-    # Sustainable zone: strong growth gets rewarded, but extreme one-off
-    # numbers are capped rather than allowed to dominate the score.
-    def growth_score(x, ideal_lo, ideal_hi):
-        if not np.isfinite(x): return np.nan
-        if x < 0: return 0.0
-        if x <= ideal_hi:
-            return min(100, max(0,(x-ideal_lo)/(ideal_hi-ideal_lo)*100))
-        # Diminishing returns above the sustainable zone.
-        return max(70, 100 - min(30,(x-ideal_hi)/max(ideal_hi,1)*30))
-
-    g=[
-        growth_score(vals["sales5"],10,35),
-        growth_score(vals["eps5"],10,40),
-        growth_score(vals["sales1"],8,30),
-        growth_score(vals["eps1"],10,40)
-    ]
-    margin=100 if np.isfinite(vals["margin"]) and vals["margin"]>=15 else (
-        60 if np.isfinite(vals["margin"]) and vals["margin"]>=10 else 30)
-    cfm=100 if np.isfinite(vals["cfm"]) and vals["cfm"]>=15 else (
-        60 if np.isfinite(vals["cfm"]) and vals["cfm"]>=5 else 30)
-    fcf=100 if np.isfinite(vals["fcf"]) and vals["fcf"]>0 else 0
-
-    growth=np.nanmean(g) if any(np.isfinite(g)) else 0
-    return round(float(.70*growth+.10*margin+.10*cfm+.10*fcf),1)
-
-def _mbv22_convergence_class(fund, sustain, tech, risk, rr):
-    if fund>=80 and sustain>=75 and tech>=75 and risk<=5 and rr>=2:
+def _mbv24_classify(discovery,sustain,rotation,catalyst,timing,risk,rr):
+    why_now=np.isfinite(rotation) and rotation>=65 and np.isfinite(catalyst) and catalyst>=65
+    strong=discovery>=78 and sustain>=70
+    if strong and why_now and np.isfinite(timing) and timing>=75 and (not np.isfinite(risk) or risk<=5) and (not np.isfinite(rr) or rr>=2):
         return "💎 High Conviction"
-    if fund>=75 and sustain>=70 and tech>=60:
+    if strong and why_now and np.isfinite(timing) and timing>=55:
         return "🚀 Emerging Multibagger"
-    if fund>=75 and sustain>=70 and tech<60:
-        return "🟡 Early Discovery"
-    if fund>=70 and sustain>=65 and tech>=70 and risk<=7 and rr>=1.5:
-        return "🟢 Fundamental + Technical"
-    if fund>=70 and sustain>=65:
-        return "🔵 Fundamental Watch"
-    if tech>=75 and risk<=7 and rr>=1.5:
-        return "⚪ Technical Candidate"
-    return "Research Watch"
-
-def _mbv22_final_score(fund, sustain, tech, risk, rr):
-    # Discovery is weighted more heavily than timing, because the objective
-    # is to identify businesses before full market recognition.
-    tech_component=tech if tech>0 else 0
-    base=.45*fund+.25*sustain+.30*tech_component
-    risk_bonus=(4 if risk<=3 else (2 if risk<=5 else 0)) if np.isfinite(risk) else 0
-    rr_bonus=(4 if rr>=2.5 else (2 if rr>=2 else (1 if rr>=1.5 else 0))) if np.isfinite(rr) else 0
-    return round(min(100,base+risk_bonus+rr_bonus),1)
+    if strong and why_now:
+        return "🔥 Catalyst + Sector Discovery"
+    if strong:
+        return "🟡 Fundamental Discovery"
+    if np.isfinite(timing) and timing>=75:
+        return "🟢 Technical Candidate"
+    return "🔵 Watch"
 
 def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
     """V3.2 separates breakout probability from trade quality.
@@ -13655,8 +13591,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "🎯 Early Breakout V3.2",
             "🏆 Early Breakout V3.3 Adaptive",
             "💎 Early Breakout V3.4 Risk/Reward",
-            "🏆 Multibagger Intelligence V2.1",
-            "💎 Multibagger Intelligence V2.2",
+            "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -14016,350 +13951,128 @@ elif module == "🔥 Momentum Catalyst Scanner":
                     key="mcs_v31_download"
                 )
 
-    if scan_mode=="💎 Multibagger Intelligence V2.2":
+    if scan_mode=="🚀 Multibagger Intelligence V2.4":
         st.markdown("---")
-        st.subheader("💎 Multibagger Intelligence V2.2 — Sustainability + Convergence")
+        st.subheader("🚀 Multibagger Intelligence V2.4 — Sector Rotation + Catalyst")
         st.caption(
-            "V2.1 discovery engine plus growth-sustainability scoring and a "
-            "fundamental/technical convergence matrix."
+            "Adds a 'why now?' layer. Sector rotation is calculated from the same "
+            "price data; technology/business catalyst evidence is optional and never invented."
         )
 
-        fund_file=st.file_uploader(
-            "Upload Multibagger fundamental CSV",
-            type=["csv"],key="mbv22_fund_csv"
-        )
+        fund_file=st.file_uploader("Upload Multibagger fundamental CSV",type=["csv"],key="mbv24_fund_csv")
+        catalyst_file=st.file_uploader("Optional Sector / Technology Catalyst CSV",type=["csv"],key="mbv24_cat_csv")
         c1,c2,c3=st.columns(3)
-        fund_min=c1.slider("Minimum Fundamental Score",50,90,65,5,key="mbv22_fund_min")
-        sustain_min=c2.slider("Minimum Sustainability Score",40,90,60,5,key="mbv22_sustain_min")
-        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv22_risk")
-
-        st.info(
-            "V2.2 caps the influence of extreme growth rates and gives more "
-            "weight to sustained growth, margins, cash generation and technical convergence."
-        )
+        fund_min=c1.slider("Minimum Fundamental Score",50,90,65,5,key="mbv24_fund_min")
+        sustain_min=c2.slider("Minimum Sustainability Score",40,90,60,5,key="mbv24_sustain_min")
+        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv24_risk")
 
         if fund_file is None:
-            st.info("Upload the same Multibagger Intelligence V1/V2.1 fundamental CSV.")
-        elif st.button("💎 RUN MULTIBAGGER INTELLIGENCE V2.2",key="mbv22_run",type="primary"):
+            st.info("Upload the V2.3/V2.2 fundamental CSV to begin.")
+        elif st.button("🚀 RUN MULTIBAGGER V2.4",key="mbv24_run",type="primary"):
             try:
-                fund_df=_mbv2_norm_cols(pd.read_csv(fund_file))
-                # Accept both the original fundamental CSV (Name/Ticker)
-                # and the V2.1 combined export (Company/Symbol).
-                if "Ticker" not in fund_df.columns and "Symbol" in fund_df.columns:
-                    fund_df["Ticker"]=fund_df["Symbol"]
-                if "Name" not in fund_df.columns and "Company" in fund_df.columns:
-                    fund_df["Name"]=fund_df["Company"]
-
-                # Also normalize the most common exported column variants.
-                if "Ticker" not in fund_df.columns:
-                    for candidate in ["Ticker Symbol","Stock","Stock Symbol","NSE Symbol"]:
-                        if candidate in fund_df.columns:
-                            fund_df["Ticker"]=fund_df[candidate]
-                            break
-                if "Name" not in fund_df.columns:
-                    for candidate in ["Company Name","Stock Name"]:
-                        if candidate in fund_df.columns:
-                            fund_df["Name"]=fund_df[candidate]
-                            break
-
+                fund_df=_mbv24_norm_cols(pd.read_csv(fund_file))
+                if "Ticker" not in fund_df.columns and "Symbol" in fund_df.columns: fund_df["Ticker"]=fund_df["Symbol"]
+                if "Name" not in fund_df.columns and "Company" in fund_df.columns: fund_df["Name"]=fund_df["Company"]
                 if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
-                    st.error(
-                        "Could not identify stock name/symbol columns. "
-                        "Accepted formats include Name/Ticker or Company/Symbol."
-                    )
+                    st.error("Use Name/Ticker or Company/Symbol columns.")
                 else:
                     lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
+                    cat_lookup={}
+                    if catalyst_file is not None:
+                        cdf=_mbv24_norm_cols(pd.read_csv(catalyst_file))
+                        if "Ticker" not in cdf.columns and "Symbol" in cdf.columns: cdf["Ticker"]=cdf["Symbol"]
+                        for _,r in cdf.iterrows(): cat_lookup[str(r.get("Ticker","")).upper().strip()]=r.to_dict()
+
+                    sector_map={}
+                    for _,r in fund_df.iterrows():
+                        t=str(r["Ticker"]).upper().strip()
+                        sec=r.get("Sector",r.get("Sub-Sector",""))
+                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
+                    for t,r in cat_lookup.items():
+                        sec=r.get("Sector",r.get("Sub-Sector",""))
+                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
+
+                    data=(_mcs_large_universe_download(stocks) if len(stocks)>500 else _kratter_download_batches(stocks))
+                    benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
+                    if benchmark.empty:
+                        benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
+                        bench_source="Universe proxy (fallback)"
+                    rotation_map=_mbv24_sector_rotation(data,sector_map,benchmark)
+
                     rows=[]
-                    with st.spinner("Calculating sustainability and technical convergence..."):
-                        data=(
-                            _mcs_large_universe_download(stocks)
-                            if len(stocks)>500 else _kratter_download_batches(stocks)
-                        )
-                        benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
-                        if benchmark.empty:
-                            benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
-                            bench_source="Universe proxy (fallback)"
+                    for symbol in stocks:
+                        fr=lookup.get(str(symbol).upper().strip())
+                        if fr is None: continue
+                        try:
+                            fs=_mbv23_fundamental_score(fr.to_dict())
+                            if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min: continue
+                            sustain=_mbv23_sustainability(fr.to_dict())
+                            if sustain<sustain_min: continue
+                            t=str(symbol).upper().strip()
+                            sec=sector_map.get(t,"")
+                            rot=rotation_map.get(sec,{})
+                            cat=cat_lookup.get(t,fr.to_dict())
+                            cat_score=_mbv24_catalyst_score(cat)
 
-                        for symbol in stocks:
-                            fr=lookup.get(str(symbol).upper().strip())
-                            if fr is None: continue
-                            try:
-                                fs=_mbv2_fundamental_score(fr.to_dict())
-                                if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min:
-                                    continue
+                            d=data.get(symbol); tech=None
+                            if d is not None and not d.empty:
+                                d=d.copy()
+                                d.index=pd.to_datetime(d.index,errors="coerce")
+                                if getattr(d.index,"tz",None) is not None: d.index=d.index.tz_localize(None)
+                                d=d[~d.index.isna()].sort_index(); d=d.loc[d.index<=analysis_ts]
+                                if len(d)>=210: tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
 
-                                sustain=_mbv22_growth_sustainability(fr.to_dict())
+                            ti=_mbv23_technical(tech)
+                            discovery=_mbv23_discovery_score(fs["Fundamental Score"],sustain,fs["Ownership Score"],fs["Valuation Score"])
+                            score=_mbv24_final_score(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"])
+                            status=_mbv24_classify(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"],ti["risk"],ti["rr"])
 
-                                d=data.get(symbol)
-                                tech=None
-                                if d is not None and not d.empty:
-                                    d=d.copy()
-                                    d.index=pd.to_datetime(d.index,errors="coerce")
-                                    if getattr(d.index,"tz",None) is not None:
-                                        d.index=d.index.tz_localize(None)
-                                    d=d[~d.index.isna()].sort_index()
-                                    d=d.loc[d.index<=analysis_ts]
-                                    if len(d)>=210:
-                                        tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
-
-                                if tech is None:
-                                    ts=0.0; tq=np.nan; risk=np.nan; rr=np.nan
-                                    entry=stop=t1=t2=distance=vr=tests=np.nan
-                                    consolidation=False
-                                else:
-                                    ts=float(tech.get("V3.4 Score",0))
-                                    tq=tech.get("Trade Quality V3.4",np.nan)
-                                    risk=float(tech.get("Risk V3.4 %",np.nan))
-                                    rr=float(tech.get("Realistic R:R",np.nan))
-                                    entry=tech.get("Confirmation Entry",np.nan)
-                                    stop=tech.get("Stop Loss V3.4",np.nan)
-                                    t1=tech.get("Target 1 V3.4",np.nan)
-                                    t2=tech.get("Target 2 V3.4",np.nan)
-                                    distance=tech.get("Distance to Breakout %",np.nan)
-                                    vr=tech.get("Volume Ratio",np.nan)
-                                    tests=tech.get("Resistance Tests 15D",np.nan)
-                                    consolidation=tech.get("Consolidation",False)
-
-                                final=_mbv22_final_score(
-                                    fs["Fundamental Score"],sustain,ts,
-                                    risk if np.isfinite(risk) else np.nan,
-                                    rr if np.isfinite(rr) else np.nan
-                                )
-                                status=_mbv22_convergence_class(
-                                    fs["Fundamental Score"],sustain,ts,
-                                    risk if np.isfinite(risk) else 99,
-                                    rr if np.isfinite(rr) else 0
-                                )
-
-                                rows.append({
-                                    "Scan Date":analysis_date.strftime("%Y-%m-%d"),
-                                    "Symbol":symbol,
-                                    "Company":fr.get("Name",symbol),
-                                    "Sector":fr.get("Sub-Sector",""),
-                                    "V2.2 Score":final,
-                                    "Status":status,
-                                    "Fundamental Score":fs["Fundamental Score"],
-                                    "Growth Sustainability Score":sustain,
-                                    "Technical V3.4 Score":ts,
-                                    "V3.4 Trade Quality":tq,
-                                    "Risk %":risk,
-                                    "Realistic R:R":rr,
-                                    "Entry":entry,"Stop Loss":stop,
-                                    "Target 1":t1,"Target 2":t2,
-                                    "Distance to Breakout %":distance,
-                                    "Volume Ratio":vr,
-                                    "Resistance Tests":tests,
-                                    "Consolidation":consolidation,
-                                    **{k:v for k,v in fs.items()
-                                       if k not in ["Fundamental Score"]},
-                                })
-                                for col in [
-                                    "Market Cap","5Y Historical Revenue Growth",
-                                    "5Y Historical EPS Growth","1Y Forward Revenue Growth",
-                                    "1Y Forward EPS Growth","ROCE","Return on Equity",
-                                    "EBITDA Margin","Net Profit Margin","Debt to Equity",
-                                    "Free Cash Flow","Promoter Holding Change – 6M",
-                                    "FII Holding Change – 6M","DII Holding Change – 6M",
-                                    "Pledged Promoter Holdings","PE Ratio","Forward PE Ratio",
-                                    "PE Premium vs Sector"]:
-                                    rows[-1][col]=fr.get(col,np.nan)
-                            except Exception:
-                                continue
+                            rows.append({
+                                "Scan Date":analysis_date.strftime("%Y-%m-%d"),"Symbol":symbol,"Company":fr.get("Name",symbol),
+                                "Sector":sec,"V2.4 Score":score,"Status":status,"Discovery Score":discovery,
+                                "Fundamental Score":fs["Fundamental Score"],"Growth Sustainability":sustain,
+                                "Sector Rotation Score":rot.get("Sector Rotation Score",np.nan),
+                                "Sector 3M RS %":rot.get("Sector 3M RS %",np.nan),"Sector 6M RS %":rot.get("Sector 6M RS %",np.nan),
+                                "Sector 12M RS %":rot.get("Sector 12M RS %",np.nan),
+                                "Catalyst Score":cat_score,"Theme":cat.get("Theme",""),"Catalyst":cat.get("Catalyst",""),
+                                "Technology Exposure":cat.get("Technology Exposure",np.nan),
+                                "Technical State":ti["state"],"Technical V3.4 Score":ti["score"],"V3.4 Trade Quality":ti["quality"],
+                                "Risk %":ti["risk"],"Realistic R:R":ti["rr"],
+                                "Entry":tech.get("Confirmation Entry",np.nan) if tech else np.nan,
+                                "Stop Loss":tech.get("Stop Loss V3.4",np.nan) if tech else np.nan,
+                                "Target 1":tech.get("Target 1 V3.4",np.nan) if tech else np.nan,
+                                "Distance to Breakout %":tech.get("Distance to Breakout %",np.nan) if tech else np.nan,
+                                "Volume Ratio":tech.get("Volume Ratio",np.nan) if tech else np.nan,
+                                "ROCE":fr.get("ROCE",np.nan),"ROE":fr.get("Return on Equity",np.nan),
+                                "Debt to Equity":fr.get("Debt to Equity",np.nan),"PE Ratio":fr.get("PE Ratio",np.nan)
+                            })
+                        except Exception:
+                            continue
 
                     out=pd.DataFrame(rows)
                     if out.empty:
-                        st.warning("No fundamentally eligible companies were found.")
+                        st.warning("No V2.4 candidates met the selected criteria.")
                     else:
-                        status_order=[
-                            "💎 High Conviction","🚀 Emerging Multibagger",
-                            "🟢 Fundamental + Technical","🟡 Early Discovery",
-                            "🔵 Fundamental Watch","⚪ Technical Candidate",
-                            "Research Watch"]
-                        out["_status"]=pd.Categorical(
-                            out["Status"],categories=status_order,ordered=True)
-                        out=out.sort_values(
-                            ["_status","V2.2 Score"],
-                            ascending=[True,False]).drop(columns="_status")
-
+                        order=["💎 High Conviction","🚀 Emerging Multibagger","🔥 Catalyst + Sector Discovery","🟡 Fundamental Discovery","🟢 Technical Candidate","🔵 Watch"]
+                        out["_o"]=pd.Categorical(out["Status"],categories=order,ordered=True)
+                        out=out.sort_values(["_o","V2.4 Score"],ascending=[True,False]).drop(columns="_o")
                         c1,c2,c3,c4,c5=st.columns(5)
                         c1.metric("Candidates",len(out))
                         c2.metric("💎 High",int(out["Status"].eq("💎 High Conviction").sum()))
                         c3.metric("🚀 Emerging",int(out["Status"].eq("🚀 Emerging Multibagger").sum()))
-                        c4.metric("🟢 Convergence",int(out["Status"].eq("🟢 Fundamental + Technical").sum()))
-                        c5.metric("🟡 Early Discovery",int(out["Status"].eq("🟡 Early Discovery").sum()))
-
+                        c4.metric("🔥 Catalyst",int(out["Status"].eq("🔥 Catalyst + Sector Discovery").sum()))
+                        c5.metric("Sector scored",int(out["Sector Rotation Score"].notna().sum()))
                         st.caption(f"Benchmark: {bench_source}")
-
-                        cols=[
-                            "Symbol","Company","Sector","Status","V2.2 Score",
-                            "Fundamental Score","Growth Sustainability Score",
-                            "Technical V3.4 Score","V3.4 Trade Quality","Risk %",
-                            "Realistic R:R","Entry","Stop Loss","Target 1","Target 2",
-                            "Distance to Breakout %","Volume Ratio","Resistance Tests",
-                            "ROCE","Return on Equity","5Y Historical Revenue Growth",
-                            "5Y Historical EPS Growth","1Y Forward EPS Growth",
-                            "Debt to Equity","Free Cash Flow","PE Ratio","Forward PE Ratio"
-                        ]
+                        cols=["Symbol","Company","Sector","Status","V2.4 Score","Discovery Score","Fundamental Score","Growth Sustainability",
+                              "Sector Rotation Score","Sector 3M RS %","Sector 6M RS %","Sector 12M RS %","Catalyst Score","Theme","Catalyst",
+                              "Technology Exposure","Technical State","Technical V3.4 Score","V3.4 Trade Quality","Risk %","Realistic R:R",
+                              "Entry","Stop Loss","Target 1","Distance to Breakout %","Volume Ratio","ROCE","ROE","Debt to Equity","PE Ratio"]
                         cols=[c for c in cols if c in out.columns]
                         st.dataframe(out[cols],width="stretch",hide_index=True)
-                        st.download_button(
-                            "⬇️ Download Multibagger V2.2 Results",
-                            out.to_csv(index=False).encode("utf-8"),
-                            f"multibagger_v22_{analysis_date.strftime('%Y%m%d')}.csv",
-                            "text/csv",key="mbv22_download")
+                        st.download_button("⬇️ Download Multibagger V2.4 Results",out.to_csv(index=False).encode("utf-8"),
+                                           f"multibagger_v24_{analysis_date.strftime('%Y%m%d')}.csv","text/csv",key="mbv24_download")
             except Exception as e:
-                st.error(f"Multibagger V2.2 error: {e}")
-
-    if scan_mode=="🏆 Multibagger Intelligence V2.1":
-        st.markdown("---")
-        st.subheader("🏆 Multibagger Intelligence V2.1 — Discovery + Technical Timing")
-        st.caption(
-            "Strong fundamentals are allowed into the discovery pipeline even when "
-            "V3.4 has not yet confirmed a breakout."
-        )
-
-        fund_file=st.file_uploader(
-            "Upload Multibagger fundamental CSV",type=["csv"],key="mbv21_fund_csv")
-        c1,c2,c3=st.columns(3)
-        mb_min=c1.slider("Minimum Combined Score",50,90,65,5,key="mbv21_min")
-        fund_min=c2.slider("Minimum Fundamental Score",50,90,65,5,key="mbv21_fund_min")
-        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv21_risk")
-
-        if fund_file is None:
-            st.info("Upload the Multibagger Intelligence V1 ranked CSV to begin.")
-        elif st.button("🏆 RUN MULTIBAGGER INTELLIGENCE V2.1",key="mbv21_run",type="primary"):
-            try:
-                fund_df=_mbv2_norm_cols(pd.read_csv(fund_file))
-                if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
-                    st.error("CSV must contain Name and Ticker columns.")
-                else:
-                    lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
-                    rows=[]
-                    with st.spinner("Building fundamental discovery + V3.4 timing map..."):
-                        data=(
-                            _mcs_large_universe_download(stocks)
-                            if len(stocks)>500 else _kratter_download_batches(stocks)
-                        )
-                        benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
-                        if benchmark.empty:
-                            benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
-                            bench_source="Universe proxy (fallback)"
-
-                        for symbol in stocks:
-                            fr=lookup.get(str(symbol).upper().strip())
-                            if fr is None: continue
-                            try:
-                                fs=_mbv2_fundamental_score(fr.to_dict())
-                                if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min:
-                                    continue
-
-                                d=data.get(symbol)
-                                tech=None
-                                if d is not None and not d.empty:
-                                    d=d.copy()
-                                    d.index=pd.to_datetime(d.index,errors="coerce")
-                                    if getattr(d.index,"tz",None) is not None:
-                                        d.index=d.index.tz_localize(None)
-                                    d=d[~d.index.isna()].sort_index()
-                                    d=d.loc[d.index<=analysis_ts]
-                                    if len(d)>=210:
-                                        tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
-
-                                if tech is None:
-                                    ts=0.0; tq=np.nan; risk=np.nan; rr=np.nan
-                                    entry=stop=t1=t2=distance=vr=tests=np.nan
-                                    consolidation=False
-                                else:
-                                    ts=float(tech.get("V3.4 Score",0))
-                                    tq=tech.get("Trade Quality V3.4",np.nan)
-                                    risk=float(tech.get("Risk V3.4 %",np.nan))
-                                    rr=float(tech.get("Realistic R:R",np.nan))
-                                    entry=tech.get("Confirmation Entry",np.nan)
-                                    stop=tech.get("Stop Loss V3.4",np.nan)
-                                    t1=tech.get("Target 1 V3.4",np.nan)
-                                    t2=tech.get("Target 2 V3.4",np.nan)
-                                    distance=tech.get("Distance to Breakout %",np.nan)
-                                    vr=tech.get("Volume Ratio",np.nan)
-                                    tests=tech.get("Resistance Tests 15D",np.nan)
-                                    consolidation=tech.get("Consolidation",False)
-
-                                if ts>0:
-                                    combined=_mbv2_combined_score(
-                                        fs["Fundamental Score"],ts,
-                                        risk if np.isfinite(risk) else 99,
-                                        rr if np.isfinite(rr) else 0)
-                                else:
-                                    combined=round(fs["Fundamental Score"]*.55,1)
-
-                                if combined<mb_min and fs["Fundamental Score"]<fund_min:
-                                    continue
-
-                                status=_mbv2_classify(
-                                    fs["Fundamental Score"],ts,
-                                    risk if np.isfinite(risk) else 99,
-                                    rr if np.isfinite(rr) else 0)
-
-                                row={
-                                    "Scan Date":analysis_date.strftime("%Y-%m-%d"),
-                                    "Symbol":symbol,"Company":fr.get("Name",symbol),
-                                    "Sector":fr.get("Sub-Sector",""),**fs,
-                                    "Technical V3.4 Score":ts,"V3.4 Trade Quality":tq,
-                                    "Risk %":risk,"Realistic R:R":rr,"Entry":entry,
-                                    "Stop Loss":stop,"Target 1":t1,"Target 2":t2,
-                                    "Distance to Breakout %":distance,"Volume Ratio":vr,
-                                    "Resistance Tests":tests,"Consolidation":consolidation,
-                                    "Status":status,"Combined Score":combined}
-                                for col in [
-                                    "Market Cap","5Y Historical Revenue Growth",
-                                    "5Y Historical EPS Growth","1Y Forward Revenue Growth",
-                                    "1Y Forward EPS Growth","ROCE","Return on Equity",
-                                    "EBITDA Margin","Net Profit Margin","Debt to Equity",
-                                    "Free Cash Flow","Promoter Holding Change – 6M",
-                                    "FII Holding Change – 6M","DII Holding Change – 6M",
-                                    "Pledged Promoter Holdings","PE Ratio","Forward PE Ratio",
-                                    "PE Premium vs Sector"]:
-                                    row[col]=fr.get(col,np.nan)
-                                rows.append(row)
-                            except Exception:
-                                continue
-
-                    out=pd.DataFrame(rows)
-                    if out.empty:
-                        st.warning("No fundamentally eligible companies met the selected threshold.")
-                    else:
-                        status_order=[
-                            "💎 High Conviction","🚀 Emerging Multibagger",
-                            "🟡 Fundamental Watchlist","🟢 Technical Watch",
-                            "🔵 Developing","⚪ Research Watch"]
-                        out["_status"]=pd.Categorical(out["Status"],categories=status_order,ordered=True)
-                        out=out.sort_values(["_status","Combined Score"],ascending=[True,False]).drop(columns="_status")
-
-                        c1,c2,c3,c4,c5=st.columns(5)
-                        c1.metric("Candidates",len(out))
-                        c2.metric("💎 High",int(out["Status"].eq("💎 High Conviction").sum()))
-                        c3.metric("🚀 Emerging",int(out["Status"].eq("🚀 Emerging Multibagger").sum()))
-                        c4.metric("🟡 Fundamental",int(out["Status"].eq("🟡 Fundamental Watchlist").sum()))
-                        c5.metric("Avg Fundamental",f'{out["Fundamental Score"].mean():.1f}')
-                        st.caption(f"Benchmark: {bench_source}")
-
-                        cols=[
-                            "Symbol","Company","Sector","Status","Combined Score",
-                            "Fundamental Score","Technical V3.4 Score","Growth Score",
-                            "Quality Score","Financial Strength Score","Ownership Score",
-                            "Valuation Score","Market Confirmation Score","V3.4 Trade Quality",
-                            "Risk %","Realistic R:R","Entry","Stop Loss","Target 1","Target 2",
-                            "Distance to Breakout %","Volume Ratio","Resistance Tests","ROCE",
-                            "Return on Equity","5Y Historical Revenue Growth","5Y Historical EPS Growth",
-                            "1Y Forward EPS Growth","Debt to Equity","Free Cash Flow","PE Ratio","Forward PE Ratio"]
-                        cols=[c for c in cols if c in out.columns]
-                        st.dataframe(out[cols],width="stretch",hide_index=True)
-                        st.download_button(
-                            "⬇️ Download Multibagger V2.1 Results",
-                            out.to_csv(index=False).encode("utf-8"),
-                            f"multibagger_v21_{analysis_date.strftime('%Y%m%d')}.csv",
-                            "text/csv",key="mbv21_download")
-            except Exception as e:
-                st.error(f"Multibagger V2.1 error: {e}")
+                st.error(f"Multibagger V2.4 error: {e}")
 
     if scan_mode=="💎 Early Breakout V3.4 Risk/Reward":
         st.markdown("---")
