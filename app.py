@@ -13629,6 +13629,7 @@ def _ema_power_prepare(df):
     return d
 
 def _ema_power_signal(symbol,df,mode="Pre-breakout",
+                      cross_lookback=20,
                       ema21_angle_threshold=40.0,
                       ema9_angle_threshold=40.0,
                       volume_threshold=1.5,
@@ -13655,8 +13656,20 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
     steep_ema21=bool(r["EMA21_ANGLE10"]>=ema21_angle_threshold)
     steep_ema9=bool(r["EMA9_ANGLE5"]>=ema9_angle_threshold)
 
-    if mode=="Fresh Cross Only" and not bullish_cross:
+    if mode=="Fresh Cross Today" and not bool(d["EMA21_CROSS_200"].iloc[-1]):
         return None
+
+    if mode=="Fresh Cross Within X Days" and not bool(
+        d["EMA21_CROSS_200"].iloc[-cross_lookback:].any()
+    ):
+        return None
+
+    if mode=="EMA9/21 + EMA21/200 Cross" and not (
+        bool(d["EMA21_CROSS_200"].iloc[-cross_lookback:].any())
+        and bool(d["EMA9_CROSS_21"].iloc[-cross_lookback:].any())
+    ):
+        return None
+
     if mode=="Pre-breakout" and not (established or recent_cross):
         return None
 
@@ -13860,9 +13873,37 @@ if module == "🔥 Momentum Catalyst Scanner":
         e1,e2,e3=st.columns(3)
         ema_mode=e1.selectbox(
             "Signal Mode",
-            ["Pre-breakout","Confirmed Breakout","Fresh Cross Only"],
+            ["Pre-breakout","Confirmed Breakout","Fresh Cross"],
             key="ema_power_mode"
         )
+
+        fresh_mode=None
+        cross_lookback=20
+        if ema_mode=="Fresh Cross":
+            fresh_mode=e1.selectbox(
+                "Fresh Cross Type",
+                [
+                    "Fresh Cross Today",
+                    "Fresh Cross Within X Days",
+                    "EMA9/21 + EMA21/200 Cross"
+                ],
+                key="ema_power_fresh_type",
+                help=(
+                    "Today = EMA21 crosses EMA200 on the latest session. "
+                    "Within X Days = EMA21 crossed EMA200 within the selected lookback. "
+                    "Dual Cross = EMA21/200 and EMA9/21 both crossed bullishly within the lookback."
+                )
+            )
+            if fresh_mode=="Fresh Cross Within X Days":
+                cross_lookback=st.slider(
+                    "Cross lookback (days)",2,20,5,1,
+                    key="ema_power_cross_lookback"
+                )
+            elif fresh_mode=="EMA9/21 + EMA21/200 Cross":
+                cross_lookback=st.slider(
+                    "Cross lookback (days)",2,20,10,1,
+                    key="ema_power_dual_cross_lookback"
+                )
         ema21_angle_thr=e2.slider(
             "Minimum EMA21 angle (°)",
             10,60,40,1,key="ema_power_ema21_angle",
@@ -13908,8 +13949,14 @@ if module == "🔥 Momentum Catalyst Scanner":
                         if len(d)<220:
                             continue
 
+                        internal_mode=(
+                            fresh_mode
+                            if ema_mode=="Fresh Cross" and fresh_mode is not None
+                            else ema_mode
+                        )
                         result=_ema_power_signal(
-                            symbol,d,ema_mode,
+                            symbol,d,internal_mode,
+                            cross_lookback=cross_lookback,
                             ema21_angle_threshold=ema21_angle_thr,
                             ema9_angle_threshold=ema9_angle_thr,
                             volume_threshold=vol_thr,
