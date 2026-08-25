@@ -13551,7 +13551,181 @@ elif module == "📚 Kratter Momentum Scanner":
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
-elif module == "🔥 Momentum Catalyst Scanner":
+el
+# ============================================================
+# EMA 9/21/200 POWER BREAKOUT SCANNER
+# ============================================================
+
+def _ema_power_rsi(close, period=9):
+    delta=close.diff()
+    gain=delta.clip(lower=0)
+    loss=-delta.clip(upper=0)
+    avg_gain=gain.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
+    avg_loss=loss.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
+    rs=avg_gain/avg_loss.replace(0,np.nan)
+    rsi=100-(100/(1+rs))
+    rsi=rsi.where(avg_loss.ne(0),100.0)
+    rsi=rsi.where(~((avg_gain==0)&(avg_loss==0)),50.0)
+    return rsi
+
+def _ema_power_cci(df, period=20):
+    tp=(df["High"]+df["Low"]+df["Close"])/3
+    sma=tp.rolling(period,min_periods=period).mean()
+    md=tp.rolling(period,min_periods=period).apply(
+        lambda x: np.mean(np.abs(x-np.mean(x))),raw=True
+    )
+    return (tp-sma)/(0.015*md.replace(0,np.nan))
+
+def _ema_power_prepare(df):
+    d=df.copy()
+    for c in ["Open","High","Low","Close","Volume"]:
+        if c in d.columns:
+            d[c]=pd.to_numeric(d[c],errors="coerce")
+    d=d.dropna(subset=["High","Low","Close"]).sort_index()
+    d["EMA9"]=d["Close"].ewm(span=9,adjust=False,min_periods=9).mean()
+    d["EMA21"]=d["Close"].ewm(span=21,adjust=False,min_periods=21).mean()
+    d["EMA200"]=d["Close"].ewm(span=200,adjust=False,min_periods=200).mean()
+    d["RSI9"]=_ema_power_rsi(d["Close"],9)
+    d["CCI20"]=_ema_power_cci(d,20)
+    d["VOL_SMA20"]=d["Volume"].rolling(20,min_periods=20).mean() if "Volume" in d else np.nan
+    d["VOL_RATIO"]=d["Volume"]/d["VOL_SMA20"].replace(0,np.nan) if "Volume" in d else np.nan
+    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
+    d["EMA21_SLOPE10"]=(d["EMA21"]/d["EMA21"].shift(10)-1)*100
+    d["EMA9_SLOPE5"]=(d["EMA9"]/d["EMA9"].shift(5)-1)*100
+    d["RES20_PREV"]=d["High"].rolling(20,min_periods=20).max().shift(1)
+    d["EMA21_CROSS_200"]=(
+        (d["EMA21"]>d["EMA200"]) &
+        (d["EMA21"].shift(1)<=d["EMA200"].shift(1))
+    )
+    d["EMA9_CROSS_21"]=(
+        (d["EMA9"]>d["EMA21"]) &
+        (d["EMA9"].shift(1)<=d["EMA21"].shift(1))
+    )
+    return d
+
+def _ema_power_signal(symbol,df,mode="Pre-breakout",
+                      slope_threshold=1.0,volume_threshold=1.5,
+                      rsi_threshold=55,cci_threshold=100):
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+    r=d.iloc[-1]
+    prev=d.iloc[-2]
+
+    required=[r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],r["EMA200_SLOPE10"]]
+    if not all(np.isfinite(v) for v in required):
+        return None
+
+    established=bool(r["EMA9"]>r["EMA21"]>r["EMA200"])
+    recent_cross=bool(
+        d["EMA21_CROSS_200"].iloc[-20:].any() or
+        d["EMA9_CROSS_21"].iloc[-10:].any()
+    )
+    bullish_cross=bool(d["EMA21_CROSS_200"].iloc[-20:].any())
+    steep_slope=bool(r["EMA200_SLOPE10"]>=slope_threshold)
+
+    if mode=="Fresh Cross Only" and not bullish_cross:
+        return None
+    if mode=="Pre-breakout" and not (established or recent_cross):
+        return None
+
+    resistance=float(r["RES20_PREV"]) if np.isfinite(r["RES20_PREV"]) else np.nan
+    distance=(
+        (resistance-float(r["Close"]))/resistance*100
+        if np.isfinite(resistance) and resistance>0 else np.nan
+    )
+    breakout=bool(np.isfinite(resistance) and r["Close"]>resistance)
+    near_resistance=bool(np.isfinite(distance) and 0<=distance<=3)
+
+    if mode=="Pre-breakout" and breakout and float(r["Close"])>resistance*1.01:
+        return None
+    if mode=="Confirmed Breakout" and not breakout:
+        return None
+
+    score=0
+    reasons=[]
+
+    if established:
+        score+=25
+        reasons.append("EMA9 > EMA21 > EMA200")
+    elif recent_cross and r["EMA9"]>r["EMA21"] and r["Close"]>r["EMA200"]:
+        score+=20
+        reasons.append("Fresh EMA transition")
+    elif r["Close"]>r["EMA200"]:
+        score+=10
+        reasons.append("Price above EMA200")
+
+    if steep_slope:
+        score+=15
+        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%/10D")
+    elif r["EMA200_SLOPE10"]>=0.5:
+        score+=10
+    elif r["EMA200_SLOPE10"]>0:
+        score+=5
+
+    if r["RSI9"]>=60 and r["RSI9"]>prev["RSI9"]:
+        score+=15
+        reasons.append(f"RSI9 {r['RSI9']:.1f} rising")
+    elif r["RSI9"]>=rsi_threshold and r["RSI9"]>=prev["RSI9"]:
+        score+=10
+        reasons.append(f"RSI9 {r['RSI9']:.1f}")
+
+    if r["CCI20"]>=150:
+        score+=10
+        reasons.append(f"CCI20 {r['CCI20']:.0f}")
+    elif r["CCI20"]>=cci_threshold:
+        score+=8
+        reasons.append(f"CCI20 {r['CCI20']:.0f}")
+    elif r["CCI20"]>0:
+        score+=4
+
+    if np.isfinite(r["VOL_RATIO"]):
+        if r["VOL_RATIO"]>=2:
+            score+=10
+            reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
+        elif r["VOL_RATIO"]>=volume_threshold:
+            score+=8
+            reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
+        elif r["VOL_RATIO"]>=1:
+            score+=4
+
+    if mode=="Confirmed Breakout":
+        score+=10
+        reasons.append("20D resistance breakout")
+    elif near_resistance:
+        score+=10
+        reasons.append(f"{distance:.2f}% from 20D resistance")
+    elif np.isfinite(distance) and distance<=5:
+        score+=5
+
+    score=min(100,score)
+    rating=("🟢 Power Setup" if score>=85 else
+            "🟡 Strong Setup" if score>=75 else
+            "🔵 Watch" if score>=65 else "⚪ Weak")
+
+    return {
+        "Symbol":symbol,
+        "Power Score":score,
+        "Rating":rating,
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
+        "EMA21 Slope 10D %":float(r["EMA21_SLOPE10"]),
+        "EMA9 Slope 5D %":float(r["EMA9_SLOPE5"]),
+        "EMA21 > EMA200":bool(r["EMA21"]>r["EMA200"]),
+        "Fresh EMA21/200 Cross":bullish_cross,
+        "RSI9":float(r["RSI9"]),
+        "CCI20":float(r["CCI20"]),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "Resistance 20D":resistance,
+        "Distance to Resistance %":distance,
+        "Breakout":breakout,
+        "Reasons":" | ".join(reasons)
+    }
+
+if module == "🔥 Momentum Catalyst Scanner":
 
     st.header("🔥 Momentum Catalyst Scanner")
     st.caption("Breakout-first scanner: resistance breakout + volume confirmation + strong close + trend, with momentum/fundamentals as confirmation.")
@@ -13618,6 +13792,7 @@ elif module == "🔥 Momentum Catalyst Scanner":
             "🎯 Early Breakout V3.2",
             "🏆 Early Breakout V3.3 Adaptive",
             "💎 Early Breakout V3.4 Risk/Reward",
+            "⚡ EMA 9/21 Power Breakout",
             "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
@@ -13627,6 +13802,116 @@ elif module == "🔥 Momentum Catalyst Scanner":
         key="mcs_scan_mode",
         help="Confirmed Breakout finds stocks already breaking resistance. Early Breakout finds stocks still below resistance but preparing to break out."
     )
+
+
+    # ========================================================
+    # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
+    # ========================================================
+
+    if scan_mode=="⚡ EMA 9/21 Power Breakout":
+        st.markdown("---")
+        st.subheader("⚡ EMA 9/21/200 Power Breakout")
+        st.caption(
+            "Experimental scanner based on EMA structure, normalized EMA200 "
+            "slope, RSI(9), CCI(20), volume participation and 20D resistance."
+        )
+
+        e1,e2,e3=st.columns(3)
+        ema_mode=e1.selectbox(
+            "Signal Mode",
+            ["Pre-breakout","Confirmed Breakout","Fresh Cross Only"],
+            key="ema_power_mode"
+        )
+        slope_thr=e2.slider(
+            "Minimum EMA200 slope (% over 10D)",
+            0.25,3.0,1.0,0.25,key="ema_power_slope"
+        )
+        min_power=e3.slider(
+            "Minimum Power Score",
+            50,90,65,5,key="ema_power_min"
+        )
+
+        e4,e5,e6=st.columns(3)
+        vol_thr=e4.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
+        rsi_thr=e5.slider("Minimum RSI(9)",50,70,55,1,key="ema_power_rsi")
+        cci_thr=e6.slider("Minimum CCI(20)",0,150,100,10,key="ema_power_cci")
+
+        if st.button(
+            "⚡ RUN EMA POWER BREAKOUT SCANNER",
+            key="ema_power_run",type="primary"
+        ):
+            ema_rows=[]
+            with st.spinner("Scanning EMA 9/21/200 + RSI(9) + CCI(20) + Volume..."):
+                ema_data=(
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks)>500 else _kratter_download_batches(stocks)
+                )
+
+                for symbol in stocks:
+                    d=ema_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                        if len(d)<220:
+                            continue
+
+                        result=_ema_power_signal(
+                            symbol,d,ema_mode,
+                            slope_threshold=slope_thr,
+                            volume_threshold=vol_thr,
+                            rsi_threshold=rsi_thr,
+                            cci_threshold=cci_thr
+                        )
+                        if result is not None and result["Power Score"]>=min_power:
+                            ema_rows.append(result)
+                    except Exception:
+                        continue
+
+            ema_df=pd.DataFrame(ema_rows)
+            if ema_df.empty:
+                st.warning(
+                    f"No EMA Power setups met the {min_power}-point threshold "
+                    f"for {analysis_date.strftime('%d-%b-%Y')}."
+                )
+            else:
+                ema_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
+                ema_df=ema_df.sort_values(
+                    ["Power Score","EMA200 Slope 10D %","Volume Ratio"],
+                    ascending=[False,False,False]
+                )
+
+                a,b,c,dcol=st.columns(4)
+                a.metric("Setups",len(ema_df))
+                b.metric("🟢 Power",int(ema_df["Rating"].eq("🟢 Power Setup").sum()))
+                c.metric("🟡 Strong",int(ema_df["Rating"].eq("🟡 Strong Setup").sum()))
+                dcol.metric("Avg Score",f'{ema_df["Power Score"].mean():.1f}')
+
+                display_cols=[
+                    "Scan Date","Symbol","Power Score","Rating","Close",
+                    "EMA9","EMA21","EMA200","EMA200 Slope 10D %",
+                    "EMA21 Slope 10D %","EMA9 Slope 5D %",
+                    "EMA21 > EMA200","Fresh EMA21/200 Cross",
+                    "RSI9","CCI20","Volume Ratio",
+                    "Resistance 20D","Distance to Resistance %",
+                    "Breakout","Reasons"
+                ]
+                st.dataframe(
+                    ema_df[display_cols],
+                    width="stretch",hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download EMA Power Results",
+                    ema_df.to_csv(index=False).encode("utf-8"),
+                    f"ema_power_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="ema_power_download"
+                )
 
     early_min=st.slider(
         "Minimum Early Breakout Score",
