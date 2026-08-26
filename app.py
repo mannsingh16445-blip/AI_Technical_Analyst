@@ -13779,6 +13779,98 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         "Reasons":" | ".join(reasons)
     }
 
+
+# ============================================================
+# EMA FRESH CROSS HISTORICAL COMPARISON
+# ============================================================
+
+def _ema_power_historical_signal(z, i, cross_mode, cross_lookback,
+                                 ema21_angle_threshold, ema9_angle_threshold,
+                                 volume_threshold, rsi_threshold, cci_threshold,
+                                 min_score):
+    if i < 220:
+        return None
+
+    r=z.iloc[i]
+    p=z.iloc[i-1]
+
+    required=[
+        r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],
+        r["EMA21_ANGLE10"],r["EMA9_ANGLE5"]
+    ]
+    if not all(np.isfinite(v) for v in required):
+        return None
+
+    established=bool(r["EMA9"]>r["EMA21"]>r["EMA200"])
+    cross21_bool=bool(z["EMA21_CROSS_200"].iloc[max(0,i-cross_lookback+1):i+1].any())
+    cross9_bool=bool(z["EMA9_CROSS_21"].iloc[max(0,i-cross_lookback+1):i+1].any())
+    today21=bool(z["EMA21_CROSS_200"].iloc[i])
+
+    if cross_mode=="Fresh Cross Today" and not today21:
+        return None
+    if cross_mode=="Fresh Cross Within X Days" and not cross21_bool:
+        return None
+    if cross_mode=="EMA9/21 + EMA21/200 Cross" and not (cross21_bool and cross9_bool):
+        return None
+
+    # Core trend requirement.
+    if not (r["Close"]>r["EMA200"] and r["EMA9"]>r["EMA21"]):
+        return None
+
+    score=0
+
+    if established:
+        score+=25
+    elif r["Close"]>r["EMA200"]:
+        score+=10
+
+    if r["EMA21_ANGLE10"]>=ema21_angle_threshold:
+        score+=10
+    elif r["EMA21_ANGLE10"]>=ema21_angle_threshold*0.75:
+        score+=6
+    elif r["EMA21_ANGLE10"]>0:
+        score+=3
+
+    if r["EMA9_ANGLE5"]>=ema9_angle_threshold:
+        score+=10
+    elif r["EMA9_ANGLE5"]>=ema9_angle_threshold*0.75:
+        score+=6
+    elif r["EMA9_ANGLE5"]>0:
+        score+=3
+
+    if r["RSI9"]>=60 and r["RSI9"]>p["RSI9"]:
+        score+=15
+    elif r["RSI9"]>=rsi_threshold and r["RSI9"]>=p["RSI9"]:
+        score+=10
+
+    if r["CCI20"]>=150:
+        score+=10
+    elif r["CCI20"]>=cci_threshold:
+        score+=8
+    elif r["CCI20"]>0:
+        score+=4
+
+    if np.isfinite(r["VOL_RATIO"]):
+        if r["VOL_RATIO"]>=2:
+            score+=10
+        elif r["VOL_RATIO"]>=volume_threshold:
+            score+=8
+        elif r["VOL_RATIO"]>=1:
+            score+=4
+
+    resistance=float(r["RES20_PREV"]) if np.isfinite(r["RES20_PREV"]) else np.nan
+    breakout=bool(np.isfinite(resistance) and r["Close"]>resistance)
+    if breakout:
+        score+=10
+    elif np.isfinite(resistance):
+        dist=(resistance-r["Close"])/resistance*100
+        if 0<=dist<=3:
+            score+=10
+        elif dist<=5:
+            score+=5
+
+    return int(min(score,100)) if score>=min_score else None
+
 if module == "🔥 Momentum Catalyst Scanner":
 
     st.header("🔥 Momentum Catalyst Scanner")
@@ -13847,6 +13939,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "🏆 Early Breakout V3.3 Adaptive",
             "💎 Early Breakout V3.4 Risk/Reward",
             "⚡ EMA 9/21 Power Breakout",
+            "📊 EMA Fresh Cross Comparison",
             "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
@@ -13857,6 +13950,159 @@ if module == "🔥 Momentum Catalyst Scanner":
         help="Confirmed Breakout finds stocks already breaking resistance. Early Breakout finds stocks still below resistance but preparing to break out."
     )
 
+
+
+    # ========================================================
+    # HISTORICAL EMA FRESH CROSS COMPARISON
+    # ========================================================
+
+    if scan_mode=="📊 EMA Fresh Cross Comparison":
+        st.markdown("---")
+        st.subheader("📊 EMA Fresh Cross Historical Comparison")
+        st.caption(
+            "Compares the three Fresh Cross definitions using historical daily data "
+            "without look-ahead bias."
+        )
+
+        c1,c2,c3=st.columns(3)
+        hist_period=c1.selectbox(
+            "History",["2y","3y","5y"],index=0,key="ema_hist_period"
+        )
+        forward_days=c2.selectbox(
+            "Forward return window",[5,10,20],index=0,key="ema_hist_forward"
+        )
+        min_score=c3.slider(
+            "Minimum Power Score",50,90,65,5,key="ema_hist_min_score"
+        )
+
+        c4,c5,c6,c7=st.columns(4)
+        h21=c4.slider("EMA21 angle ≥ °",10,60,40,1,key="ema_hist_21")
+        h9=c5.slider("EMA9 angle ≥ °",10,60,40,1,key="ema_hist_9")
+        hv=c6.slider("Volume / SMA20 ≥",1.0,3.0,1.5,0.25,key="ema_hist_vol")
+        hr=c7.slider("RSI9 ≥",50,70,55,1,key="ema_hist_rsi")
+        hc=st.slider("CCI20 ≥",0,150,100,10,key="ema_hist_cci")
+
+        if st.button(
+            "📊 RUN FRESH CROSS COMPARISON",
+            key="ema_hist_run",type="primary"
+        ):
+            variants=[
+                ("Fresh Cross Today",1),
+                ("Fresh Cross Within X Days",5),
+                ("EMA9/21 + EMA21/200 Cross",10)
+            ]
+            summary_rows=[]
+            signal_rows=[]
+
+            with st.spinner("Backtesting the three EMA fresh-cross definitions..."):
+                data=(
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks)>500
+                    else _kratter_download_batches(stocks)
+                )
+
+                for symbol in stocks:
+                    raw=data.get(symbol)
+                    if raw is None or raw.empty:
+                        continue
+                    try:
+                        z=_ema_power_prepare(raw)
+                        z.index=pd.to_datetime(z.index,errors="coerce")
+                        if getattr(z.index,"tz",None) is not None:
+                            z.index=z.index.tz_localize(None)
+                        z=z[~z.index.isna()].sort_index()
+                        z=z.loc[z.index<=analysis_ts]
+                    except Exception:
+                        continue
+
+                    if len(z)<240:
+                        continue
+
+                    for variant,lookback in variants:
+                        trades=[]
+                        last_signal_idx=-10_000
+
+                        # Avoid repeated signals while a previous signal is still
+                        # being evaluated. One signal per stock at a time.
+                        for i in range(220,len(z)-forward_days):
+                            if i-last_signal_idx<5:
+                                continue
+
+                            score=_ema_power_historical_signal(
+                                z,i,variant,lookback,h21,h9,hv,hr,hc,min_score
+                            )
+                            if score is None:
+                                continue
+
+                            entry=float(z["Close"].iloc[i])
+                            future=z.iloc[i+1:i+1+forward_days]
+                            if future.empty:
+                                continue
+
+                            ret=(float(future["Close"].iloc[-1])/entry-1)*100
+                            max_gain=(float(future["High"].max())/entry-1)*100
+                            max_dd=(float(future["Low"].min())/entry-1)*100
+
+                            cross_date=z.index[i].strftime("%Y-%m-%d")
+                            trades.append((ret,max_gain,max_dd))
+                            signal_rows.append({
+                                "Variant":variant,
+                                "Symbol":symbol,
+                                "Signal Date":cross_date,
+                                "Power Score":score,
+                                f"Forward Return {forward_days}D %":ret,
+                                "Max Gain %":max_gain,
+                                "Max Drawdown %":max_dd
+                            })
+                            last_signal_idx=i
+
+                        if trades:
+                            arr=np.array(trades,dtype=float)
+                            summary_rows.append({
+                                "Variant":variant,
+                                "Signals":len(trades),
+                                "Positive Return %":float(np.mean(arr[:,0]>0)*100),
+                                f"Avg Return {forward_days}D %":float(np.mean(arr[:,0])),
+                                f"Median Return {forward_days}D %":float(np.median(arr[:,0])),
+                                "Avg Max Gain %":float(np.mean(arr[:,1])),
+                                "Avg Max Drawdown %":float(np.mean(arr[:,2])),
+                                "Worst Drawdown %":float(np.min(arr[:,2]))
+                            })
+                        else:
+                            summary_rows.append({
+                                "Variant":variant,"Signals":0,
+                                "Positive Return %":np.nan,
+                                f"Avg Return {forward_days}D %":np.nan,
+                                f"Median Return {forward_days}D %":np.nan,
+                                "Avg Max Gain %":np.nan,
+                                "Avg Max Drawdown %":np.nan,
+                                "Worst Drawdown %":np.nan
+                            })
+
+            summary_df=pd.DataFrame(summary_rows)
+            detail_df=pd.DataFrame(signal_rows)
+
+            if summary_df.empty or summary_df["Signals"].sum()==0:
+                st.warning("No historical signals were generated with the selected settings.")
+            else:
+                st.dataframe(summary_df.round(2),width="stretch",hide_index=True)
+
+                if not detail_df.empty:
+                    st.markdown("### Signal-level results")
+                    st.dataframe(
+                        detail_df.sort_values(
+                            ["Variant","Signal Date","Power Score"],
+                            ascending=[True,True,False]
+                        ),
+                        width="stretch",hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Fresh Cross Comparison",
+                        detail_df.to_csv(index=False).encode("utf-8"),
+                        f"ema_fresh_cross_comparison_{analysis_date.strftime('%Y%m%d')}.csv",
+                        "text/csv",key="ema_hist_download"
+                    )
 
     # ========================================================
     # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
