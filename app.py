@@ -14053,6 +14053,17 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
     }
 
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _ema_company_name(symbol):
+    """Best-effort company name lookup for signal output."""
+    s=str(symbol).strip().upper()
+    try:
+        info=yf.Ticker(f"{s}.NS").info
+        return info.get("shortName") or info.get("longName") or s
+    except Exception:
+        return s
+
 # ============================================================
 # EMA 9/21 THREE-STAGE STRATEGY
 # ============================================================
@@ -14143,7 +14154,8 @@ def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
         if r["EMA21_ANGLE10"]>=angle_threshold: score+=5
         if r["EMA200_SLOPE10"]>0: score+=5
         if r["CCI20"]>0: score+=5
-        return {"Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
+        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
+                "Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
                 "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
                 "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
                 "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
@@ -14172,7 +14184,8 @@ def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
         if r["RSI9"]>50: score+=5
         if r["CCI20"]>0: score+=5
         if r["EMA200_SLOPE10"]>0: score+=5
-        return {"Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
+        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
+                "Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
                 "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
                 "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
                 "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
@@ -14548,7 +14561,8 @@ if module == "🔥 Momentum Catalyst Scanner":
         st.markdown("---")
         st.subheader("🧩 EMA 9/21 Three-Stage Strategy")
         st.caption(
-            "Three stages from the chart examples: Early Reversal, Fresh Momentum Cross, and Retest Continuation."
+            "Three stages from the chart examples: Early Reversal, Fresh Momentum Cross, and Retest Continuation. "
+            "Signal output now includes the company name."
         )
         run_mode=st.radio(
             "Run Mode",["Current Scan","Historical Backtest"],
@@ -14599,7 +14613,7 @@ if module == "🔥 Momentum Catalyst Scanner":
                     a.metric("Setups",len(out))
                     b.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
                     c.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
-                    cols=["Signal Date","Symbol","Setup","Signal","Setup Score","Close",
+                    cols=["Signal Date","Symbol","Stock Name","Setup","Signal","Setup Score","Close",
                           "EMA9","EMA21","EMA200","EMA9 Angle 5D °","EMA21 Angle 10D °",
                           "EMA Gap %","RSI9","RSI9 WMA21","CCI20","Volume Ratio","Reasons"]
                     st.dataframe(out[[x for x in cols if x in out.columns]],width="stretch",hide_index=True)
@@ -14631,6 +14645,7 @@ if module == "🔥 Momentum Catalyst Scanner":
                                 d,setup,fwd,min_score,angle,gap,rsi,vol
                             ):
                                 rec["Symbol"]=symbol
+                                rec["Stock Name"]=_ema_company_name(symbol)
                                 all_rows.append(rec)
                         except Exception:
                             continue
