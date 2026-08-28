@@ -13560,6 +13560,190 @@ elif module == "📚 Kratter Momentum Scanner":
 # EMA9 / EMA21 BUY-SELL CROSSOVER SIGNAL
 # ============================================================
 
+
+# ============================================================
+# EMA9 < EMA21 > EMA200 + RSI9/WMA21 + CCI(20) RECOVERY SETUP
+# ============================================================
+
+def _wma(series, period):
+    weights=np.arange(1,period+1,dtype=float)
+    return series.rolling(period,min_periods=period).apply(
+        lambda x: np.dot(x,weights)/weights.sum(), raw=True
+    )
+
+def _ema921_rsi_cci_setup(symbol, df,
+                          rsi_min=50.0,
+                          cci_target=100.0,
+                          cci_lookback=3,
+                          ema_gap_max_pct=2.0,
+                          require_gap_tightening=True,
+                          require_wma_rising=True,
+                          cci_mode="Toward +100",
+                          volume_threshold=1.0,
+                          require_volume=True):
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+
+    # RSI(9) on price, then WMA(21) of RSI(9), matching the chart concept.
+    d["RSI9_WMA21"]=_wma(d["RSI9"],21)
+    d["RSI9_WMA21_SLOPE5"]=(d["RSI9_WMA21"]/d["RSI9_WMA21"].shift(5)-1)*100
+    d["EMA_GAP_PCT"]=(d["EMA21"]-d["EMA9"])/d["EMA21"]*100
+    d["EMA_GAP_CHANGE"] = d["EMA_GAP_PCT"].diff()
+    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
+
+    r=d.iloc[-1]
+    p=d.iloc[-2]
+
+    req=[
+        r["EMA9"],r["EMA21"],r["EMA200"],
+        r["RSI9"],r["RSI9_WMA21"],r["CCI20"]
+    ]
+    if not all(np.isfinite(v) for v in req):
+        return None
+
+    # Core price structure requested by the user:
+    # EMA9 is still below EMA21 (pullback/early-turn structure)
+    # while both remain above the long-term EMA200 regime.
+    trend_structure=bool(
+        r["EMA9"]<r["EMA21"] and
+        r["EMA9"]>r["EMA200"] and
+        r["EMA21"]>r["EMA200"]
+    )
+    if not trend_structure:
+        return None
+
+    # EMA9 must be close to EMA21, indicating an early-turn setup rather than
+    # a deep pullback. Measure the gap as a percentage of EMA21.
+    ema_gap_pct=(r["EMA21"]-r["EMA9"])/r["EMA21"]*100
+    if not np.isfinite(ema_gap_pct) or ema_gap_pct>ema_gap_max_pct:
+        return None
+
+    # RSI9 crosses above WMA21 today and RSI is already above 50.
+    rsi_cross=bool(
+        r["RSI9"]>r["RSI9_WMA21"] and
+        p["RSI9"]<=p["RSI9_WMA21"] and
+        r["RSI9"]>rsi_min
+    )
+    if not rsi_cross:
+        return None
+
+    # CCI momentum: rising for several sessions. We support two chart-useful
+    # modes: (1) early recovery toward +100, or (2) fresh bullish break of +100.
+    lb=max(1,int(cci_lookback))
+    cci_vals=d["CCI20"].iloc[-(lb+1):]
+    cci_rising=bool(
+        len(cci_vals)==lb+1 and
+        (cci_vals.diff().iloc[1:]>0).all()
+    )
+    cci_current=float(r["CCI20"])
+    cci_prev=float(p["CCI20"])
+
+    if cci_mode=="Toward +100":
+        cci_condition=bool(cci_rising and 0 < cci_current < cci_target)
+    else:
+        cci_condition=bool(
+            cci_rising and
+            cci_current >= cci_target and
+            cci_prev < cci_target
+        )
+    if not cci_condition:
+        return None
+
+    # The chart suggests the signal is strongest when EMA9 is compressed
+    # beneath EMA21 and that gap is narrowing toward a bullish turn.
+    gap_tightening=bool(r["EMA_GAP_CHANGE"]<=0)
+    if require_gap_tightening and not gap_tightening:
+        return None
+
+    # RSI-WMA recovery is stronger when the WMA itself is no longer falling.
+    wma_rising=bool(
+        not require_wma_rising or
+        (np.isfinite(r["RSI9_WMA21_SLOPE5"]) and r["RSI9_WMA21_SLOPE5"]>=0)
+    )
+    if not wma_rising:
+        return None
+
+    volume_ok=(
+        np.isfinite(r["VOL_RATIO"]) and
+        r["VOL_RATIO"]>=volume_threshold
+    )
+
+    # Directional volume support: recent positive closes should carry at least
+    # as much volume as recent negative closes. This matches the visual pattern
+    # of green volume expanding as price begins to turn upward.
+    recent_up_volume=False
+    if len(d)>=4 and "Volume" in d.columns:
+        recent=d.iloc[-3:]
+        price_change=recent["Close"].diff()
+        up_days=recent[price_change>0]
+        recent_up_volume=(
+            len(up_days)>0 and
+            float(up_days["Volume"].mean())>=float(recent["Volume"].mean())
+        )
+
+    volume_support=bool(volume_ok and (recent_up_volume or r["Volume"]>=d["Volume"].iloc[-5:].mean()))
+    if require_volume and not volume_support:
+        return None
+
+    # Score is a quality measure; core conditions above are mandatory.
+    score=60
+    reasons=[
+        "EMA9 < EMA21 and both above EMA200",
+        f"EMA9 is {ema_gap_pct:.2f}% below EMA21",
+        f"RSI9 {r['RSI9']:.1f} crossed above RSI WMA21 {r['RSI9_WMA21']:.1f}",
+        f"CCI20 rising ({r['CCI20']:.1f})"
+    ]
+    if gap_tightening:
+        score+=10
+        reasons.append("EMA9-EMA21 gap tightening")
+    if wma_rising:
+        score+=5
+        reasons.append("RSI WMA21 rising")
+    if r["EMA200_SLOPE10"]>0:
+        score+=5
+        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%")
+    if volume_support:
+        score+=20
+        reasons.append(f"Volume support {r['VOL_RATIO']:.2f}x SMA20")
+    elif volume_ok:
+        score+=10
+        reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
+
+    if r["EMA9_ANGLE5"]>0:
+        score+=10
+        reasons.append(f"EMA9 angle {r['EMA9_ANGLE5']:.1f}°")
+    if r["EMA21_ANGLE10"]>0:
+        score+=10
+        reasons.append(f"EMA21 angle {r['EMA21_ANGLE10']:.1f}°")
+
+    return {
+        "Symbol":symbol,
+        "Signal":"BUY",
+        "Setup Score":int(min(score,100)),
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
+        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
+        "RSI9":float(r["RSI9"]),
+        "RSI9 WMA21":float(r["RSI9_WMA21"]),
+        "RSI9 Cross Above WMA21":True,
+        "CCI20":cci_current,
+        "CCI Rising":cci_rising,
+        "CCI Distance to +100":float(cci_target-cci_current),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "Volume Support":bool(volume_support),
+        "EMA9-EMA21 Gap %":float(ema_gap_pct),
+        "EMA Gap Tightening":bool(gap_tightening),
+        "RSI WMA21 Rising":bool(wma_rising),
+        "RSI WMA21 Slope 5D %":float(r["RSI9_WMA21_SLOPE5"]),
+        "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
+        "Below EMA21 %":float(ema21_distance),
+        "Reasons":" | ".join(reasons)
+    }
+
 def _ema921_cross_signal(symbol, df, direction="Both",
                          angle_threshold=40.0,
                          rsi_buy=55.0, rsi_sell=45.0,
@@ -13937,6 +14121,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "💎 Early Breakout V3.4 Risk/Reward",
             "⚡ EMA 9/21 Power Breakout",
             "🔄 EMA9/21 Buy-Sell Crossover",
+            "🎯 EMA9<EMA21 + RSI-WMA + CCI Setup",
             "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
@@ -13952,6 +14137,136 @@ if module == "🔥 Momentum Catalyst Scanner":
     # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
     # ========================================================
 
+
+
+    if scan_mode=="🎯 EMA9<EMA21 + RSI-WMA + CCI Setup":
+        st.markdown("---")
+        st.subheader("🎯 EMA9 < EMA21 Pullback + RSI9/WMA21 + CCI20 Recovery")
+        st.caption(
+            "Looks for the specific early-turn structure: EMA9 remains below EMA21 "
+            "but both are above EMA200, while RSI9 crosses above its WMA21 above 50 "
+            "and CCI20 is rising toward +100."
+        )
+
+        c1,c2,c3=st.columns(3)
+        cci_lb=c1.slider(
+            "CCI rising lookback (days)",2,5,3,1,key="ema_rsi_cci_lb"
+        )
+        rsi_min=c2.slider(
+            "RSI9 minimum",45,70,50,1,key="ema_rsi_cci_rsi"
+        )
+        cci_target=c3.slider(
+            "CCI target ceiling",70,120,100,5,key="ema_rsi_cci_target"
+        )
+
+        c4,c5,c6=st.columns(3)
+        ema_gap_max=c4.slider(
+            "Maximum EMA9-EMA21 gap (%)",0.25,5.0,2.0,0.25,
+            key="ema_rsi_cci_gap",
+            help="EMA9 must remain below EMA21 but within this percentage gap."
+        )
+        gap_tighten=c5.checkbox(
+            "Require EMA gap tightening",value=True,key="ema_rsi_cci_gap_tighten",
+            help="Requires today's EMA9-EMA21 gap to be no wider than yesterday's gap."
+        )
+        cci_mode=c6.selectbox(
+            "CCI mode",
+            ["Toward +100","Fresh Cross +100"],
+            key="ema_rsi_cci_mode",
+            help="Toward +100 finds early recovery below +100; Fresh Cross +100 finds the first bullish move through +100."
+        )
+
+        c7,c8,c9=st.columns(3)
+        vol_thr=c7.slider(
+            "Minimum Volume / SMA20",0.75,3.0,1.0,0.25,key="ema_rsi_cci_vol"
+        )
+        require_vol=c8.checkbox(
+            "Require volume support",value=True,key="ema_rsi_cci_req_vol"
+        )
+        wma_rise=c9.checkbox(
+            "Require RSI-WMA21 rising",value=True,key="ema_rsi_cci_wma_rise"
+        )
+
+        if st.button(
+            "🎯 RUN EMA9/21 RSI-WMA CCI SETUP",
+            key="ema_rsi_cci_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner(
+                "Scanning EMA9/21 structure + RSI9/WMA21 cross + CCI recovery..."
+            ):
+                setup_data=(
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks)>500 else _kratter_download_batches(stocks)
+                )
+
+                for symbol in stocks:
+                    d=setup_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                        if len(d)<220:
+                            continue
+
+                        result=_ema921_rsi_cci_setup(
+                            symbol,d,
+                            rsi_min=rsi_min,
+                            cci_target=cci_target,
+                            cci_lookback=cci_lb,
+                            ema_gap_max_pct=ema_gap_max,
+                            require_gap_tightening=gap_tighten,
+                            require_wma_rising=wma_rise,
+                            cci_mode=cci_mode,
+                            volume_threshold=vol_thr,
+                            require_volume=require_vol
+                        )
+                        if result is not None:
+                            result["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
+                            rows.append(result)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    "No setups matched the requested EMA9/21 + RSI-WMA + CCI conditions."
+                )
+            else:
+                out=out.sort_values(
+                    ["Setup Score","CCI20","Volume Ratio"],
+                    ascending=[False,False,False]
+                )
+                a,b,c,dcol=st.columns(4)
+                a.metric("Setups",len(out))
+                b.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
+                c.metric("RSI9 >50",int((out["RSI9"]>50).sum()))
+                dcol.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
+
+                display_cols=[
+                    "Signal Date","Symbol","Signal","Setup Score","Close",
+                    "EMA9","EMA21","EMA200","Below EMA21 %",
+                    "EMA9 Angle 5D °","EMA21 Angle 10D °",
+                    "RSI9","RSI9 WMA21","RSI9 Cross Above WMA21",
+                    "CCI20","CCI Rising","CCI Distance to +100",
+                    "Volume Ratio","Volume Support","EMA9-EMA21 Gap %",
+                    "EMA Gap Tightening","RSI WMA21 Rising","RSI WMA21 Slope 5D %",
+                    "EMA200 Slope 10D %","Reasons"
+                ]
+                display_cols=[c for c in display_cols if c in out.columns]
+                st.dataframe(out[display_cols],width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download EMA9/21 RSI-WMA CCI Setup",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"ema921_rsi_wma_cci_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="ema_rsi_cci_download"
+                )
 
     if scan_mode=="🔄 EMA9/21 Buy-Sell Crossover":
         st.markdown("---")
