@@ -13573,11 +13573,13 @@ def _wma(series, period):
 
 def _ema921_rsi_cci_setup(symbol, df,
                           rsi_min=50.0,
+                          rsi_cross_lookback=3,
                           cci_target=100.0,
                           cci_lookback=3,
-                          ema_gap_max_pct=2.0,
-                          require_gap_tightening=True,
-                          require_wma_rising=True,
+                          cci_rising_fraction=0.67,
+                          ema_gap_max_pct=3.0,
+                          require_gap_tightening=False,
+                          require_wma_rising=False,
                           cci_mode="Toward +100",
                           volume_threshold=1.0,
                           require_volume=True):
@@ -13619,12 +13621,21 @@ def _ema921_rsi_cci_setup(symbol, df,
     if not np.isfinite(ema_gap_pct) or ema_gap_pct>ema_gap_max_pct:
         return None
 
-    # RSI9 crosses above WMA21 today and RSI is already above 50.
-    rsi_cross=bool(
+    # RSI9 must be above its WMA21 and above the minimum level, with the
+    # bullish cross allowed to have occurred within a short lookback window.
+    rsi_bull_state=bool(r["RSI9"]>r["RSI9_WMA21"] and r["RSI9"]>rsi_min)
+    rsi_cross_today=bool(
         r["RSI9"]>r["RSI9_WMA21"] and
-        p["RSI9"]<=p["RSI9_WMA21"] and
-        r["RSI9"]>rsi_min
+        p["RSI9"]<=p["RSI9_WMA21"]
     )
+    rsi_cross_recent=bool(
+        (
+            (d["RSI9"]>d["RSI9_WMA21"]) &
+            (d["RSI9"].shift(1)<=d["RSI9_WMA21"].shift(1))
+        ).iloc[-max(1,int(rsi_cross_lookback)):]
+        .any()
+    )
+    rsi_cross=bool(rsi_bull_state and (rsi_cross_today or rsi_cross_recent))
     if not rsi_cross:
         return None
 
@@ -13632,9 +13643,12 @@ def _ema921_rsi_cci_setup(symbol, df,
     # modes: (1) early recovery toward +100, or (2) fresh bullish break of +100.
     lb=max(1,int(cci_lookback))
     cci_vals=d["CCI20"].iloc[-(lb+1):]
+    cci_diff=cci_vals.diff().iloc[1:]
+    positive_steps=int((cci_diff>0).sum())
     cci_rising=bool(
         len(cci_vals)==lb+1 and
-        (cci_vals.diff().iloc[1:]>0).all()
+        positive_steps>=max(1,int(np.ceil(lb*cci_rising_fraction))) and
+        float(cci_vals.iloc[-1])>float(cci_vals.iloc[0])
     )
     cci_current=float(r["CCI20"])
     cci_prev=float(p["CCI20"])
@@ -13691,7 +13705,7 @@ def _ema921_rsi_cci_setup(symbol, df,
     reasons=[
         "EMA9 < EMA21 and both above EMA200",
         f"EMA9 is {ema_gap_pct:.2f}% below EMA21",
-        f"RSI9 {r['RSI9']:.1f} crossed above RSI WMA21 {r['RSI9_WMA21']:.1f}",
+        f"RSI9 {r["RSI9"]:.1f} above WMA21 {r["RSI9_WMA21"]:.1f} (cross in lookback)",
         f"CCI20 rising ({r['CCI20']:.1f})"
     ]
     if gap_tightening:
@@ -13730,6 +13744,7 @@ def _ema921_rsi_cci_setup(symbol, df,
         "RSI9":float(r["RSI9"]),
         "RSI9 WMA21":float(r["RSI9_WMA21"]),
         "RSI9 Cross Above WMA21":True,
+        "RSI Cross Lookback":int(rsi_cross_lookback),
         "CCI20":cci_current,
         "CCI Rising":cci_rising,
         "CCI Distance to +100":float(cci_target-cci_current),
@@ -14148,32 +14163,38 @@ if module == "🔥 Momentum Catalyst Scanner":
             "and CCI20 is rising toward +100."
         )
 
+        preset=st.selectbox(
+            "Setup strictness",
+            ["Balanced","Strict","Early / Relaxed"],
+            index=0,key="ema_rsi_cci_preset",
+            help="Balanced allows short timing differences between RSI and CCI while keeping the EMA structure strict."
+        )
+
         c1,c2,c3=st.columns(3)
         cci_lb=c1.slider(
-            "CCI rising lookback (days)",2,5,3,1,key="ema_rsi_cci_lb"
+            "CCI lookback (days)",2,5,3,1,key="ema_rsi_cci_lb"
         )
         rsi_min=c2.slider(
             "RSI9 minimum",45,70,50,1,key="ema_rsi_cci_rsi"
         )
-        cci_target=c3.slider(
-            "CCI target ceiling",70,120,100,5,key="ema_rsi_cci_target"
+        rsi_x=c3.slider(
+            "RSI cross recency (days)",0,5,3,1,key="ema_rsi_cci_rsi_x"
         )
 
         c4,c5,c6=st.columns(3)
         ema_gap_max=c4.slider(
-            "Maximum EMA9-EMA21 gap (%)",0.25,5.0,2.0,0.25,
-            key="ema_rsi_cci_gap",
-            help="EMA9 must remain below EMA21 but within this percentage gap."
+            "Maximum EMA9-EMA21 gap (%)",0.5,5.0,
+            2.0 if preset=="Strict" else (3.0 if preset=="Balanced" else 4.0),
+            0.25,key="ema_rsi_cci_gap",
+            help="EMA9 remains below EMA21 but should stay close."
         )
         gap_tighten=c5.checkbox(
-            "Require EMA gap tightening",value=True,key="ema_rsi_cci_gap_tighten",
-            help="Requires today's EMA9-EMA21 gap to be no wider than yesterday's gap."
+            "Require EMA gap tightening",value=(preset=="Strict"),
+            key="ema_rsi_cci_gap_tighten"
         )
         cci_mode=c6.selectbox(
-            "CCI mode",
-            ["Toward +100","Fresh Cross +100"],
-            key="ema_rsi_cci_mode",
-            help="Toward +100 finds early recovery below +100; Fresh Cross +100 finds the first bullish move through +100."
+            "CCI mode",["Toward +100","Fresh Cross +100"],
+            key="ema_rsi_cci_mode"
         )
 
         c7,c8,c9=st.columns(3)
@@ -14184,7 +14205,8 @@ if module == "🔥 Momentum Catalyst Scanner":
             "Require volume support",value=True,key="ema_rsi_cci_req_vol"
         )
         wma_rise=c9.checkbox(
-            "Require RSI-WMA21 rising",value=True,key="ema_rsi_cci_wma_rise"
+            "Require RSI-WMA21 rising",value=(preset!="Early / Relaxed"),
+            key="ema_rsi_cci_wma_rise"
         )
 
         if st.button(
@@ -14217,8 +14239,10 @@ if module == "🔥 Momentum Catalyst Scanner":
                         result=_ema921_rsi_cci_setup(
                             symbol,d,
                             rsi_min=rsi_min,
-                            cci_target=cci_target,
+                            rsi_cross_lookback=rsi_x,
+                            cci_target=100.0,
                             cci_lookback=cci_lb,
+                            cci_rising_fraction=(1.0 if preset=="Strict" else (0.67 if preset=="Balanced" else 0.50)),
                             ema_gap_max_pct=ema_gap_max,
                             require_gap_tightening=gap_tighten,
                             require_wma_rising=wma_rise,
