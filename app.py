@@ -14127,7 +14127,8 @@ def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
         if r["EMA9_ANGLE5"]>0: score+=5
         if r["EMA21_ANGLE10"]>0: score+=5
         if r["EMA200_SLOPE10"]>0: score+=5
-        return {"Setup":setup,"Signal":"WATCH","Setup Score":min(100,score),
+        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
+                "Setup":setup,"Signal":"WATCH","Setup Score":min(100,score),
                 "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
                 "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
                 "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
@@ -14601,6 +14602,8 @@ if module == "🔥 Momentum Catalyst Scanner":
                             sig=_ema_three_stage_current(symbol,d,setup,angle,gap,rsi,vol)
                             if sig is not None and sig["Setup Score"]>=min_score:
                                 sig["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
+                                sig["Symbol"]=sig.get("Symbol",symbol)
+                                sig["Stock Name"]=sig.get("Stock Name",_ema_company_name(symbol))
                                 rows.append(sig)
                         except Exception:
                             continue
