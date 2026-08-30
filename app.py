@@ -14197,36 +14197,95 @@ def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
                 "Reasons":" | ".join(reasons)}
     return None
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _ema_three_stage_download(tickers, period="3y"):
+    """Download enough history for EMA200 + historical signal backtesting."""
+    result={}
+    ticker_list=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
+    for start in range(0,len(ticker_list),40):
+        batch=ticker_list[start:start+40]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
+        try:
+            d=yf.download(
+                tickers=yahoo,period=period,interval="1d",
+                auto_adjust=False,progress=False,threads=False,group_by="ticker"
+            )
+        except Exception:
+            continue
+        if d is None or d.empty:
+            continue
+        if len(batch)==1:
+            stock=d.copy()
+            if isinstance(stock.columns,pd.MultiIndex):
+                lv0=stock.columns.get_level_values(0)
+                lv1=stock.columns.get_level_values(1)
+                if "Close" in lv0: stock.columns=lv0
+                elif "Close" in lv1: stock.columns=lv1
+            if "Close" in stock.columns:
+                result[batch[0]]=stock.dropna(subset=["Close"])
+            continue
+        if isinstance(d.columns,pd.MultiIndex):
+            for symbol,yahoo_symbol in zip(batch,yahoo):
+                stock=None
+                for key in (yahoo_symbol,symbol):
+                    try:
+                        if key in d.columns.get_level_values(0):
+                            stock=d[key].copy(); break
+                        if key in d.columns.get_level_values(1):
+                            stock=d.xs(key,axis=1,level=1).copy(); break
+                    except Exception:
+                        pass
+                if stock is not None and not stock.empty and "Close" in stock.columns:
+                    result[symbol]=stock.dropna(subset=["Close"])
+    return result
+
 def _ema_three_stage_backtest(df, setup, forward_days, min_score,
                               angle_threshold, gap_max, rsi_min, volume_ratio):
     d=_ema_three_stage_features(df)
     results=[]
     if len(d)<260:
         return results
-    last=-999
+
+    # Precompute indicators once. Test each historical bar without repeatedly
+    # downloading/rebuilding data.
+    last_signal=-999
     for i in range(220,len(d)-forward_days):
-        if i-last<5:
+        if i-last_signal<5:
             continue
-        sig=_ema_three_stage_current(
-            "HIST",d.iloc[:i+1],setup,angle_threshold,gap_max,rsi_min,volume_ratio
-        )
+        past=d.iloc[:i+1].copy()
+
+        try:
+            sig=_ema_three_stage_current(
+                "HIST",past,setup,angle_threshold,gap_max,rsi_min,volume_ratio
+            )
+        except Exception:
+            continue
+
         if sig is None or sig["Setup Score"]<min_score:
             continue
+
         entry=float(d["Close"].iloc[i])
         fut=d.iloc[i+1:i+1+forward_days]
+        if len(fut)<forward_days:
+            continue
+
         ret=(float(fut["Close"].iloc[-1])/entry-1)*100
         max_gain=(float(fut["High"].max())/entry-1)*100
         max_dd=(float(fut["Low"].min())/entry-1)*100
+
         results.append({
-            "Symbol": "HIST",
-            "Signal Date": d.index[i].strftime("%Y-%m-%d"),
-            "Power Score":sig["Setup Score"],
-            f"Forward {forward_days}D Return %":ret,
-            "Max Gain %":max_gain,
-            "Max Drawdown %":max_dd
+            "Signal Date":d.index[i].strftime("%Y-%m-%d"),
+            "Power Score":int(sig["Setup Score"]),
+            f"Forward {forward_days}D Return %":round(ret,3),
+            "Max Gain %":round(max_gain,3),
+            "Max Drawdown %":round(max_dd,3)
         })
-        last=i
+        last_signal=i
+
     return results
+
+
 
 if module == "🔥 Momentum Catalyst Scanner":
 
@@ -14629,11 +14688,20 @@ if module == "🔥 Momentum Catalyst Scanner":
         else:
             fwd=st.selectbox("Forward return window",[5,10,20],key="ema3_fwd")
             years=st.selectbox("History",["2y","3y","5y"],index=1,key="ema3_hist")
-            if st.button("📊 BACKTEST SELECTED STAGE",key="ema3_bt",type="primary"):
+            bt_scope=st.radio(
+                "Backtest scope",
+                ["Selected Setup","Compare All 3 Setups"],
+                horizontal=True,key="ema3_bt_scope"
+            )
+            if st.button("📊 RUN EMA THREE-STAGE BACKTEST",key="ema3_bt",type="primary"):
                 all_rows=[]
-                with st.spinner("Backtesting selected EMA stage..."):
-                    data=(_mcs_large_universe_download(stocks)
-                          if len(stocks)>500 else _kratter_download_batches(stocks))
+                setups_to_test=(
+                    [setup] if bt_scope=="Selected Setup"
+                    else ["Early Reversal","Fresh Momentum","Retest Continuation"]
+                )
+                with st.spinner(f"Backtesting {bt_scope.lower()} over {years} history..."):
+                    # Use the selected period here; the old version always used 2y.
+                    data=_ema_three_stage_download(stocks,years)
                     for symbol in stocks:
                         d=data.get(symbol)
                         if d is None or d.empty: continue
@@ -14644,12 +14712,13 @@ if module == "🔥 Momentum Catalyst Scanner":
                                 d.index=d.index.tz_localize(None)
                             d=d[~d.index.isna()].sort_index()
                             d=d.loc[d.index<=analysis_ts]
-                            for rec in _ema_three_stage_backtest(
-                                d,setup,fwd,min_score,angle,gap,rsi,vol
-                            ):
-                                rec["Symbol"]=symbol
-                                rec["Stock Name"]=_ema_company_name(symbol)
-                                all_rows.append(rec)
+                            for current_setup in setups_to_test:
+                                for rec in _ema_three_stage_backtest(
+                                    d,current_setup,fwd,min_score,angle,gap,rsi,vol
+                                ):
+                                    rec["Symbol"]=symbol
+                                    rec["Stock Name"]=_ema_company_name(symbol)
+                                    all_rows.append(rec)
                         except Exception:
                             continue
                 out=pd.DataFrame(all_rows)
@@ -14657,22 +14726,28 @@ if module == "🔥 Momentum Catalyst Scanner":
                     st.warning("No historical signals matched the selected setup.")
                 else:
                     retcol=f"Forward {fwd}D Return %"
-                    summary=pd.DataFrame([{
-                        "Setup":setup,
-                        "Signals":len(out),
-                        "Positive Return %":(out[retcol]>0).mean()*100,
-                        "Average Return %":out[retcol].mean(),
-                        "Median Return %":out[retcol].median(),
-                        "Average Max Gain %":out["Max Gain %"].mean(),
-                        "Average Max Drawdown %":out["Max Drawdown %"].mean(),
-                        "Worst Max Drawdown %":out["Max Drawdown %"].min()
-                    }]).round(2)
+                    summary_rows=[]
+                    for sname,g in out.groupby("Setup"):
+                        summary_rows.append({
+                            "Setup":sname,
+                            "Signals":len(g),
+                            "Positive Return %":(g[retcol]>0).mean()*100,
+                            "Average Return %":g[retcol].mean(),
+                            "Median Return %":g[retcol].median(),
+                            "Average Max Gain %":g["Max Gain %"].mean(),
+                            "Average Max Drawdown %":g["Max Drawdown %"].mean(),
+                            "Worst Max Drawdown %":g["Max Drawdown %"].min()
+                        })
+                    summary=pd.DataFrame(summary_rows).round(2)
                     st.dataframe(summary,width="stretch",hide_index=True)
-                    st.dataframe(out.round(2),width="stretch",hide_index=True)
+                    st.dataframe(
+                        out.sort_values(["Setup","Signal Date"]),
+                        width="stretch",hide_index=True
+                    )
                     st.download_button(
                         "⬇️ Download Three-Stage Backtest",
                         out.to_csv(index=False).encode("utf-8"),
-                        f"ema_three_stage_backtest_{setup.lower().replace(' ','_')}_{fwd}d.csv",
+                        f"ema_three_stage_backtest_{fwd}d.csv",
                         "text/csv",key="ema3_bt_download"
                     )
 
