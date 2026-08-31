@@ -16115,573 +16115,596 @@ if module == "🔥 Momentum Catalyst Scanner":
                     )
 
 
-elif module == "📊 Options Next-Day Analyzer":
+el
+# ============================================================
+# OPTIONS NEXT-DAY ANALYZER V2 — CONFLUENCE ENGINE
+# ============================================================
 
-    st.header("📊 Options Next-Day Analyzer")
+def _opt_wma(series, period=21):
+    s=pd.to_numeric(series, errors="coerce")
+    weights=np.arange(1, period+1, dtype=float)
+    return s.rolling(period,min_periods=period).apply(
+        lambda x: np.dot(x,weights)/weights.sum(), raw=True
+    )
 
+def _opt_technical_v2(df):
+    if df is None or df.empty:
+        return {}
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+    req=["Open","High","Low","Close","Volume"]
+    if any(c not in x.columns for c in req):
+        return {}
+    for c in req:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=req).sort_index()
+    if len(x)<220:
+        return {}
+
+    x["EMA9"]=x["Close"].ewm(span=9,adjust=False).mean()
+    x["EMA21"]=x["Close"].ewm(span=21,adjust=False).mean()
+    x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
+    x["RSI9"]=_options_rsi(x["Close"],9)
+    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
+    x["CCI20"]=_options_cci(x,20)
+    x["ATR14"]=_options_atr(x,14)
+    x["VOL_SMA20"]=x["Volume"].rolling(20,min_periods=20).mean()
+    x["VOL_RATIO"]=x["Volume"]/x["VOL_SMA20"].replace(0,np.nan)
+    x["BB_MID"]=x["Close"].rolling(20,min_periods=20).mean()
+    x["BB_STD"]=x["Close"].rolling(20,min_periods=20).std()
+    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
+    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
+    x["BB_WIDTH"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
+
+    high=x["High"]; low=x["Low"]; close=x["Close"]
+    tr=pd.concat([high-low,(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
+    up=high.diff()
+    down=-low.diff()
+    plus_dm=pd.Series(np.where((up>down)&(up>0),up,0),index=x.index)
+    minus_dm=pd.Series(np.where((down>up)&(down>0),down,0),index=x.index)
+    atr=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    pdi=100*plus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
+    mdi=100*minus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
+    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
+    x["ADX14"]=dx.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    x["PLUS_DI"]=pdi
+    x["MINUS_DI"]=mdi
+
+    r=x.iloc[-1]; p=x.iloc[-2]
+    atr_pct=float(r["ATR14"]/r["Close"]*100) if r["Close"] else np.nan
+    expected_move=1.0*float(r["ATR14"])
+
+    bullish=(
+        r["Close"]>r["EMA200"] and
+        r["EMA9"]>r["EMA21"] and
+        r["EMA21"]>r["EMA200"] and
+        r["RSI9"]>50 and r["RSI9"]>r["RSI9_WMA21"] and
+        r["CCI20"]>0
+    )
+    bearish=(
+        r["Close"]<r["EMA200"] and
+        r["EMA9"]<r["EMA21"] and
+        r["EMA21"]<r["EMA200"] and
+        r["RSI9"]<50 and r["RSI9"]<r["RSI9_WMA21"] and
+        r["CCI20"]<0
+    )
+
+    return {
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "RSI9":float(r["RSI9"]),
+        "RSI9 WMA21":float(r["RSI9_WMA21"]),
+        "CCI20":float(r["CCI20"]),
+        "ATR14":float(r["ATR14"]),
+        "ATR %":atr_pct,
+        "Volume Ratio":float(r["VOL_RATIO"]),
+        "BB Width %":float(r["BB_WIDTH"]),
+        "ADX14":float(r["ADX14"]),
+        "+DI":float(r["PLUS_DI"]),
+        "-DI":float(r["MINUS_DI"]),
+        "Expected Move (1 ATR)":expected_move,
+        "Bullish Technical":bool(bullish),
+        "Bearish Technical":bool(bearish),
+        "EMA9/21 State":(
+            "Bullish" if r["EMA9"]>r["EMA21"]
+            else "Bearish" if r["EMA9"]<r["EMA21"] else "Flat"
+        )
+    }
+
+def _options_next_day_v2_row(row, tech):
+    chg=float(row.get("Chg %",np.nan))
+    oi=float(row.get("OI Chg %",np.nan))
+    pcr=float(row.get("Put Call Ratio (PCR)",np.nan))
+    pcrchg=float(row.get("PCR Change 1D",np.nan))
+    vol=float(row.get("Volume (Times)",np.nan))
+    position=_options_position_classification(chg,oi)
+
+    bull=0.0; bear=0.0; sell=0.0
+    reasons_b=[]; reasons_s=[]
+
+    # Underlying technical: 40 points.
+    if tech:
+        if tech["Bullish Technical"]:
+            bull+=20; reasons_b.append("EMA9>EMA21>EMA200 + RSI/CCI bullish")
+        elif tech["Bearish Technical"]:
+            bear+=20; reasons_s.append("EMA9<EMA21<EMA200 + RSI/CCI bearish")
+
+        if tech["ADX14"]>=20:
+            if tech["+DI"]>tech["-DI"]: bull+=8; reasons_b.append("ADX trend supports bulls")
+            elif tech["-DI"]>tech["+DI"]: bear+=8; reasons_s.append("ADX trend supports bears")
+
+        if tech["Volume Ratio"]>=1.5:
+            if chg>0: bull+=7; reasons_b.append("High volume with positive price")
+            elif chg<0: bear+=7; reasons_s.append("High volume with negative price")
+
+        # Squeeze/expansion logic.
+        if tech["BB Width %"]<6:
+            if chg>0: bull+=3; reasons_b.append("BB compression")
+            elif chg<0: bear+=3; reasons_s.append("BB compression")
+        elif tech["BB Width %"]>10:
+            sell+=3
+
+    # Derivatives positioning: 35 points.
+    if position=="Long Buildup":
+        bull+=20; reasons_b.append("Futures long buildup")
+    elif position=="Short Covering":
+        bull+=12; reasons_b.append("Short covering")
+    elif position=="Short Buildup":
+        bear+=20; reasons_s.append("Futures short buildup")
+    elif position=="Long Unwinding":
+        bear+=12; reasons_s.append("Long unwinding")
+
+    if np.isfinite(pcr):
+        if pcr>=1.10: bull+=8; reasons_b.append("PCR ≥1.10")
+        elif pcr<=0.70: bear+=8; reasons_s.append("PCR ≤0.70")
+
+    if np.isfinite(pcrchg):
+        if pcrchg>0: bull+=min(5,abs(pcrchg)*100); reasons_b.append("PCR improving")
+        elif pcrchg<0: bear+=min(5,abs(pcrchg)*100); reasons_s.append("PCR falling")
+
+    # Participation: 15 points.
+    if np.isfinite(vol):
+        if vol>=2:
+            if chg>0: bull+=7
+            elif chg<0: bear+=7
+        elif vol>=1:
+            if chg>0: bull+=4
+            elif chg<0: bear+=4
+
+    # Selling is only preferred in a low-directional regime.
+    if tech:
+        trendless=(not tech["Bullish Technical"] and not tech["Bearish Technical"])
+        if trendless and 0.85<=pcr<=1.15 if np.isfinite(pcr) else False:
+            sell+=20
+        if tech["ADX14"]<18:
+            sell+=15
+
+    total=max(bull,bear,sell)
+    if total<60:
+        signal="⚪ Avoid / Wait"
+    elif bull>=80 and bull>bear and bull>sell:
+        signal="🟢 Strong Call Candidate"
+    elif bear>=80 and bear>bull and bear>sell:
+        signal="🔴 Strong Put Candidate"
+    elif sell>=65 and sell>bull and sell>bear:
+        signal="🟡 Option Selling Candidate"
+    elif bull>bear and bull>=60:
+        signal="🔵 Bullish Bias"
+    elif bear>bull and bear>=60:
+        signal="🔵 Bearish Bias"
+    else:
+        signal="⚠️ Conflicted"
+
+    return {
+        "Call Score V2":round(min(100,bull),1),
+        "Put Score V2":round(min(100,bear),1),
+        "Selling Score V2":round(min(100,sell),1),
+        "Signal V2":signal,
+        "Call Reasons":" | ".join(reasons_b),
+        "Put Reasons":" | ".join(reasons_s),
+        "Expected Move":tech.get("Expected Move (1 ATR)",np.nan) if tech else np.nan
+    }
+
+
+# ============================================================
+# OPTIONS NEXT-DAY ANALYZER V2 — CONFLUENCE ENGINE
+# ============================================================
+
+def _opt_wma(series, period=21):
+    s=pd.to_numeric(series, errors="coerce")
+    weights=np.arange(1, period+1, dtype=float)
+    return s.rolling(period,min_periods=period).apply(
+        lambda x: np.dot(x,weights)/weights.sum(), raw=True
+    )
+
+def _opt_technical_v2(df):
+    if df is None or df.empty:
+        return {}
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+    req=["Open","High","Low","Close","Volume"]
+    if any(c not in x.columns for c in req):
+        return {}
+    for c in req:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=req).sort_index()
+    if len(x)<220:
+        return {}
+
+    x["EMA9"]=x["Close"].ewm(span=9,adjust=False).mean()
+    x["EMA21"]=x["Close"].ewm(span=21,adjust=False).mean()
+    x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
+    x["RSI9"]=_options_rsi(x["Close"],9)
+    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
+    x["CCI20"]=_options_cci(x,20)
+    x["ATR14"]=_options_atr(x,14)
+    x["VOL_SMA20"]=x["Volume"].rolling(20,min_periods=20).mean()
+    x["VOL_RATIO"]=x["Volume"]/x["VOL_SMA20"].replace(0,np.nan)
+    x["BB_MID"]=x["Close"].rolling(20,min_periods=20).mean()
+    x["BB_STD"]=x["Close"].rolling(20,min_periods=20).std()
+    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
+    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
+    x["BB_WIDTH"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
+
+    high=x["High"]; low=x["Low"]; close=x["Close"]
+    tr=pd.concat([high-low,(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
+    up=high.diff()
+    down=-low.diff()
+    plus_dm=pd.Series(np.where((up>down)&(up>0),up,0),index=x.index)
+    minus_dm=pd.Series(np.where((down>up)&(down>0),down,0),index=x.index)
+    atr=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    pdi=100*plus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
+    mdi=100*minus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
+    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
+    x["ADX14"]=dx.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    x["PLUS_DI"]=pdi
+    x["MINUS_DI"]=mdi
+
+    r=x.iloc[-1]; p=x.iloc[-2]
+    atr_pct=float(r["ATR14"]/r["Close"]*100) if r["Close"] else np.nan
+    expected_move=1.0*float(r["ATR14"])
+
+    bullish=(
+        r["Close"]>r["EMA200"] and
+        r["EMA9"]>r["EMA21"] and
+        r["EMA21"]>r["EMA200"] and
+        r["RSI9"]>50 and r["RSI9"]>r["RSI9_WMA21"] and
+        r["CCI20"]>0
+    )
+    bearish=(
+        r["Close"]<r["EMA200"] and
+        r["EMA9"]<r["EMA21"] and
+        r["EMA21"]<r["EMA200"] and
+        r["RSI9"]<50 and r["RSI9"]<r["RSI9_WMA21"] and
+        r["CCI20"]<0
+    )
+
+    return {
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "RSI9":float(r["RSI9"]),
+        "RSI9 WMA21":float(r["RSI9_WMA21"]),
+        "CCI20":float(r["CCI20"]),
+        "ATR14":float(r["ATR14"]),
+        "ATR %":atr_pct,
+        "Volume Ratio":float(r["VOL_RATIO"]),
+        "BB Width %":float(r["BB_WIDTH"]),
+        "ADX14":float(r["ADX14"]),
+        "+DI":float(r["PLUS_DI"]),
+        "-DI":float(r["MINUS_DI"]),
+        "Expected Move (1 ATR)":expected_move,
+        "Bullish Technical":bool(bullish),
+        "Bearish Technical":bool(bearish),
+        "EMA9/21 State":(
+            "Bullish" if r["EMA9"]>r["EMA21"]
+            else "Bearish" if r["EMA9"]<r["EMA21"] else "Flat"
+        )
+    }
+
+def _options_next_day_v2_row(row, tech):
+    chg=float(row.get("Chg %",np.nan))
+    oi=float(row.get("OI Chg %",np.nan))
+    pcr=float(row.get("Put Call Ratio (PCR)",np.nan))
+    pcrchg=float(row.get("PCR Change 1D",np.nan))
+    vol=float(row.get("Volume (Times)",np.nan))
+    position=_options_position_classification(chg,oi)
+
+    bull=0.0; bear=0.0; sell=0.0
+    reasons_b=[]; reasons_s=[]
+
+    # Underlying technical: 40 points.
+    if tech:
+        if tech["Bullish Technical"]:
+            bull+=20; reasons_b.append("EMA9>EMA21>EMA200 + RSI/CCI bullish")
+        elif tech["Bearish Technical"]:
+            bear+=20; reasons_s.append("EMA9<EMA21<EMA200 + RSI/CCI bearish")
+
+        if tech["ADX14"]>=20:
+            if tech["+DI"]>tech["-DI"]: bull+=8; reasons_b.append("ADX trend supports bulls")
+            elif tech["-DI"]>tech["+DI"]: bear+=8; reasons_s.append("ADX trend supports bears")
+
+        if tech["Volume Ratio"]>=1.5:
+            if chg>0: bull+=7; reasons_b.append("High volume with positive price")
+            elif chg<0: bear+=7; reasons_s.append("High volume with negative price")
+
+        # Squeeze/expansion logic.
+        if tech["BB Width %"]<6:
+            if chg>0: bull+=3; reasons_b.append("BB compression")
+            elif chg<0: bear+=3; reasons_s.append("BB compression")
+        elif tech["BB Width %"]>10:
+            sell+=3
+
+    # Derivatives positioning: 35 points.
+    if position=="Long Buildup":
+        bull+=20; reasons_b.append("Futures long buildup")
+    elif position=="Short Covering":
+        bull+=12; reasons_b.append("Short covering")
+    elif position=="Short Buildup":
+        bear+=20; reasons_s.append("Futures short buildup")
+    elif position=="Long Unwinding":
+        bear+=12; reasons_s.append("Long unwinding")
+
+    if np.isfinite(pcr):
+        if pcr>=1.10: bull+=8; reasons_b.append("PCR ≥1.10")
+        elif pcr<=0.70: bear+=8; reasons_s.append("PCR ≤0.70")
+
+    if np.isfinite(pcrchg):
+        if pcrchg>0: bull+=min(5,abs(pcrchg)*100); reasons_b.append("PCR improving")
+        elif pcrchg<0: bear+=min(5,abs(pcrchg)*100); reasons_s.append("PCR falling")
+
+    # Participation: 15 points.
+    if np.isfinite(vol):
+        if vol>=2:
+            if chg>0: bull+=7
+            elif chg<0: bear+=7
+        elif vol>=1:
+            if chg>0: bull+=4
+            elif chg<0: bear+=4
+
+    # Selling is only preferred in a low-directional regime.
+    if tech:
+        trendless=(not tech["Bullish Technical"] and not tech["Bearish Technical"])
+        if trendless and 0.85<=pcr<=1.15 if np.isfinite(pcr) else False:
+            sell+=20
+        if tech["ADX14"]<18:
+            sell+=15
+
+    total=max(bull,bear,sell)
+    if total<60:
+        signal="⚪ Avoid / Wait"
+    elif bull>=80 and bull>bear and bull>sell:
+        signal="🟢 Strong Call Candidate"
+    elif bear>=80 and bear>bull and bear>sell:
+        signal="🔴 Strong Put Candidate"
+    elif sell>=65 and sell>bull and sell>bear:
+        signal="🟡 Option Selling Candidate"
+    elif bull>bear and bull>=60:
+        signal="🔵 Bullish Bias"
+    elif bear>bull and bear>=60:
+        signal="🔵 Bearish Bias"
+    else:
+        signal="⚠️ Conflicted"
+
+    return {
+        "Call Score V2":round(min(100,bull),1),
+        "Put Score V2":round(min(100,bear),1),
+        "Selling Score V2":round(min(100,sell),1),
+        "Signal V2":signal,
+        "Call Reasons":" | ".join(reasons_b),
+        "Put Reasons":" | ".join(reasons_s),
+        "Expected Move":tech.get("Expected Move (1 ATR)",np.nan) if tech else np.nan
+    }
+
+if module == "📊 Options Next-Day Analyzer":
+
+    st.header("📊 Next-Day Options Analyzer V3")
     st.markdown(
         """
-        Upload your **end-of-day derivatives CSV** after market close.
-        The analyzer combines futures/OI positioning with the latest
-        underlying price/volume data and Fibonacci support/resistance
-        to generate a plan for the **next trading session**.
-
-        **This module is independent of the Minervini SEPA/VCP scanner.**
+        **Multi-day EOD confluence:** upload up to **5 consecutive EOD derivatives
+        files**. The analyzer uses persistence across days for price, futures OI,
+        PCR and participation, then combines that with the latest underlying
+        technical regime. The latest day remains the actual next-day trigger.
         """
     )
 
-    st.sidebar.subheader("📊 Options Analyzer Settings")
-
+    st.sidebar.subheader("📊 Next-Day Analyzer V3")
     options_universe=st.sidebar.selectbox(
         "Underlying Universe",
-        [
-            "Nifty 50",
-            "Nifty 500",
-            "Nifty Midcap 100",
-            "Nifty Smallcap 250",
-            "NSE F&O Stocks",
-            "Full NSE"
-        ],
-        key="options_universe"
+        ["Nifty 50","Nifty 500","Nifty Midcap 100",
+         "Nifty Smallcap 250","NSE F&O Stocks","Full NSE"],
+        key="options_v3_universe"
     )
-
     options_period=st.sidebar.selectbox(
-        "Underlying Market Data Period",
-        ["1y","2y","3y","5y"],
-        index=1,
-        key="options_period"
+        "Underlying history",["1y","2y","3y","5y"],index=1,key="options_v3_period"
+    )
+    fib_look=st.sidebar.select_slider(
+        "Fib / swing lookback",options=[40,60,80,100],value=60,key="options_v3_fib"
+    )
+    call_thr=st.sidebar.slider("Strong Call threshold",65,95,80,1,key="options_v3_call")
+    put_thr=st.sidebar.slider("Strong Put threshold",65,95,80,1,key="options_v3_put")
+    min_history=st.sidebar.slider("Minimum days required",2,5,5,1,key="options_v3_days")
+
+    files=st.file_uploader(
+        "📤 Upload EOD derivatives CSV files (2–5 recommended)",
+        type=["csv"],accept_multiple_files=True,key="options_v3_files",
+        help="Upload consecutive EOD files. The analyzer will use the latest 5 unique dates available."
     )
 
-    options_fib_lookback=st.sidebar.select_slider(
-        "Fibonacci lookback (days)",
-        options=[40,50,60,80,100],
-        value=60,
-        key="options_fib_lookback"
-    )
-
-    min_call_score=st.sidebar.slider(
-        "Strong Call threshold",
-        70,95,80,1,
-        key="options_call_threshold_independent"
-    )
-
-    min_put_score=st.sidebar.slider(
-        "Strong Put threshold",
-        70,95,80,1,
-        key="options_put_threshold_independent"
-    )
-
-    options_file=st.file_uploader(
-        "📤 Upload EOD derivatives CSV",
-        type=["csv"],
-        key="options_eod_csv_independent"
-    )
-
-    if options_file is not None:
+    if files:
+        if len(files)>5:
+            st.warning("More than 5 files were uploaded. Only the most recent 5 unique EOD dates will be used.")
         try:
-            option_df,option_meta=_read_options_eod_csv(options_file)
-
-            if option_df.empty:
-                st.warning("The uploaded CSV contains no stock rows.")
+            hist,errors=_options_v3_prepare_history(files)
+            if errors:
+                for err in errors: st.warning(err)
+            if hist.empty:
+                st.error("No valid EOD derivatives files could be read.")
             else:
+                unique_dates=sorted(hist["Date"].dropna().unique())
+                if len(unique_dates)<min_history:
+                    st.warning(
+                        f"Only {len(unique_dates)} unique EOD date(s) were found. "
+                        f"Upload at least {min_history} different trading days."
+                    )
+
+                latest_date=max(unique_dates) if unique_dates else None
+                latest=hist[hist["Date"]==latest_date].copy()
+
                 c1,c2,c3,c4=st.columns(4)
+                c1.metric("Files received",len(files))
+                c2.metric("Unique EOD days",len(unique_dates))
+                c3.metric("Latest EOD",str(latest_date)[:10] if latest_date else "N/A")
+                c4.metric("Symbols latest day",latest["Symbol"].nunique())
 
-                c1.metric("Stocks in CSV",len(option_df))
-                c2.metric(
-                    "EOD Date",
-                    str(option_meta.get(
-                        "Date",
-                        option_df["Date"].iloc[0]
-                        if "Date" in option_df.columns else ""
-                    ))
-                )
-                c3.metric(
-                    "OI Trend",
-                    "Available"
-                    if "OI Trend" in option_df.columns
-                    else "Missing"
-                )
-                c4.metric(
-                    "PCR",
-                    "Available"
-                    if "Put Call Ratio (PCR)" in option_df.columns
-                    else "Missing"
-                )
+                if st.button("🔍 RUN 5-DAY NEXT-DAY ANALYZER",type="primary",key="options_v3_run"):
+                    symbols=latest["Symbol"].dropna().astype(str).str.upper().str.strip().unique().tolist()
 
-                st.info(
-                    "The uploaded EOD file is treated as information "
-                    "available after the market close. Signals are "
-                    "intended for the next trading session."
-                )
+                    with st.spinner("Building 5-day derivatives history and latest technical confluence..."):
+                        market=download_batches(symbols,options_period,50)
 
-                if st.button(
-                    "🔍 ANALYZE FOR NEXT TRADING DAY",
-                    type="primary",
-                    key="options_analyze_independent"
-                ):
-                    # Load only stocks present in the uploaded CSV.
-                    symbols=[
-                        str(s).strip().upper()
-                        for s in option_df["Symbol"].dropna().unique()
-                    ]
+                    rows=[]
+                    for sym in symbols:
+                        g=hist[hist["Symbol"]==sym].sort_values("Date").tail(5)
+                        latest_row=g.iloc[-1]
+                        tech=_opt_technical_v2(market.get(sym))
+                        multi=_options_v3_multi_day_score(g,tech)
+                        if not multi:
+                            continue
 
-                    with st.spinner(
-                        "Analyzing underlying trend, Fibonacci levels "
-                        "and derivatives positioning..."
-                    ):
-                        options_market=download_batches(
-                            symbols,
-                            options_period,
-                            50
-                        )
-
-                        option_result=run_options_next_day_analysis(
-                            option_df,
-                            options_market,
-                            options_fib_lookback
-                        )
-
-                        # Phase 2: Bollinger Bands + ADX + ATR.
-                        phase2_rows=[]
-                        for _, _orow in option_result.iterrows():
-                            _sym=str(_orow["Symbol"]).strip().upper()
-                            _snap=_options_phase2_snapshot(
-                                options_market.get(_sym)
-                            )
-                            phase2_rows.append(_snap)
-
-                        phase2_df=pd.DataFrame(phase2_rows)
-
-                        if not phase2_df.empty:
-                            for _col in phase2_df.columns:
-                                option_result[_col]=phase2_df[_col].values
-
-                            # Keep the original score intact and create
-                            # a separate Phase-2 technical confluence score.
-                            option_result["Technical Confluence Score"]=(
-                                option_result["BB Bullish Points"].fillna(0)
-                                +option_result["BB Bearish Points"].fillna(0)
-                                +option_result["BB/ADX Selling Points"].fillna(0)
-                            )
-
-                            # Directional confirmation: only reward BB/ADX
-                            # points that agree with the existing signal.
-                            option_result["Phase 2 Bullish Confirm"]=(
-                                option_result["BB Bullish Points"].fillna(0)
-                            )
-                            option_result["Phase 2 Bearish Confirm"]=(
-                                option_result["BB Bearish Points"].fillna(0)
-                            )
-                            option_result["Phase 2 Selling Confirm"]=(
-                                option_result["BB/ADX Selling Points"].fillna(0)
-                            )
-
-                            # Add Phase-2 points to the relevant score with
-                            # a conservative cap. This avoids letting one
-                            # indicator dominate the original OI/Fib model.
-                            option_result["Call Score"]=np.minimum(
-                                100,
-                                option_result["Call Score"].astype(float)
-                                +option_result["Phase 2 Bullish Confirm"].astype(float)
-                            ).round(1)
-
-                            option_result["Put Score"]=np.minimum(
-                                100,
-                                option_result["Put Score"].astype(float)
-                                +option_result["Phase 2 Bearish Confirm"].astype(float)
-                            ).round(1)
-
-                            option_result["Selling Score"]=np.minimum(
-                                100,
-                                option_result["Selling Score"].astype(float)
-                                +option_result["Phase 2 Selling Confirm"].astype(float)
-                            ).round(1)
-
-                        # Phase 3: confluence, conflict detection and regime.
-                        phase3_df=pd.DataFrame([
-                            _options_phase3_confluence(r)
-                            for _,r in option_result.iterrows()
-                        ])
-                        if not phase3_df.empty:
-                            for col in phase3_df.columns:
-                                option_result[col]=phase3_df[col].values
-                            option_result["Phase 3 Signal"]=option_result.apply(
-                                _options_phase3_final_signal,axis=1
-                            )
-                            option_result["Final Confluence Score"]=option_result[
-                                ["Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score"]
-                            ].max(axis=1).round(1)
-
-                        # Phase 1: explain the signal and build
-                        # underlying-based entry/SL/target levels.
-                        plan_df=pd.DataFrame(
-                            option_result.apply(
-                                _options_phase1_plan, axis=1
-                            ).tolist()
-                        )
-                        for col in plan_df.columns:
-                            option_result[col]=plan_df[col].values
-
-                        rr=option_result.apply(
-                            lambda r: _options_phase1_rr(
-                                r["Direction"],
-                                r["Underlying Trigger"],
-                                r["Underlying Invalidation"],
-                                r["Underlying Target 1"],
-                                r["Underlying Target 2"]
+                        row={
+                            "Stock":latest_row.get("Stock Name",sym),
+                            "Symbol":sym,
+                            "Latest EOD":str(latest_row.get("Date",""))[:10],
+                            "Close":latest_row.get("Close",np.nan),
+                            "Signal":multi["5D Signal"],
+                            "5D Call Score":multi["5D Call Score"],
+                            "5D Put Score":multi["5D Put Score"],
+                            "5D Price Change %":multi["5D Price Change %"],
+                            "Bullish Days":multi["Bullish Days"],
+                            "Bearish Days":multi["Bearish Days"],
+                            "Long Buildup Days":multi["Long Buildup Days"],
+                            "Short Buildup Days":multi["Short Buildup Days"],
+                            "Short Covering Days":multi["Short Covering Days"],
+                            "Long Unwinding Days":multi["Long Unwinding Days"],
+                            "Avg PCR":multi["Avg PCR"],
+                            "Latest PCR":multi["Latest PCR"],
+                            "PCR Trend":multi["PCR Trend"],
+                            "Avg Volume x":multi["Avg Volume x"],
+                            "Latest Volume x":multi["Latest Volume x"],
+                            "Position":_options_position_classification(
+                                latest_row.get("Chg %",np.nan),
+                                latest_row.get("OI Chg %",np.nan)
                             ),
-                            axis=1
-                        )
-                        option_result["RR Target 1"]=[x[0] for x in rr]
-                        option_result["RR Target 2"]=[x[1] for x in rr]
-                        option_result["Contract Guidance"]=option_result[
-                            "Direction"
-                        ].map(_options_phase1_contract_note)
+                            "Latest Future OI Chg %":latest_row.get("OI Chg %",np.nan),
+                            "Latest OI Trend":latest_row.get("OI Trend",""),
+                            "Call OI":latest_row.get("Cumulative Call OI",np.nan),
+                            "Put OI":latest_row.get("Cumulative Put OI",np.nan),
+                            "Call Reasons":multi["5D Call Reasons"],
+                            "Put Reasons":multi["5D Put Reasons"]
+                        }
 
-                    if option_result.empty:
-                        st.warning(
-                            "No candidates could be calculated. "
-                            "Check the CSV symbols and market-data availability."
-                        )
+                        if tech:
+                            row.update({
+                                "Trend":(
+                                    "Bullish" if tech["Bullish Technical"]
+                                    else "Bearish" if tech["Bearish Technical"]
+                                    else "Neutral"
+                                ),
+                                "EMA9":tech["EMA9"],
+                                "EMA21":tech["EMA21"],
+                                "EMA200":tech["EMA200"],
+                                "RSI9":tech["RSI9"],
+                                "RSI9 WMA21":tech["RSI9 WMA21"],
+                                "CCI20":tech["CCI20"],
+                                "ADX14":tech["ADX14"],
+                                "+DI":tech["+DI"],
+                                "-DI":tech["-DI"],
+                                "Volume Ratio":tech["Volume Ratio"],
+                                "ATR %":tech["ATR %"],
+                                "Expected Move":tech["Expected Move (1 ATR)"]
+                            })
+                        rows.append(row)
+
+                    result=pd.DataFrame(rows)
+                    if result.empty:
+                        st.warning("No multi-day candidates were calculated.")
                     else:
-                        def _options_final_signal(r):
-                            call=float(r["Call Score"])
-                            put=float(r["Put Score"])
-                            sell=float(r["Selling Score"])
+                        priority={
+                            "🟢 Strong Call Candidate":6,
+                            "🔴 Strong Put Candidate":6,
+                            "🔵 Bullish Bias":4,
+                            "🔵 Bearish Bias":4,
+                            "⚠️ Conflicted":2,
+                            "⚪ Avoid / Wait":1
+                        }
+                        result["_p"]=result["Signal"].map(priority).fillna(0)
+                        result=result.sort_values(
+                            ["_p","5D Call Score","5D Put Score"],
+                            ascending=[False,False,False]
+                        ).drop(columns="_p")
 
-                            if (
-                                call>=min_call_score
-                                and call>put
-                                and call>sell
-                            ):
-                                return "🟢 Strong Call Candidate"
+                        a,b,c,d,e=st.columns(5)
+                        a.metric("Analysed",len(result))
+                        b.metric("🟢 Strong Calls",int(result["Signal"].eq("🟢 Strong Call Candidate").sum()))
+                        c.metric("🔴 Strong Puts",int(result["Signal"].eq("🔴 Strong Put Candidate").sum()))
+                        d.metric("🔵 Bias",int(result["Signal"].isin(["🔵 Bullish Bias","🔵 Bearish Bias"]).sum()))
+                        e.metric("⚠️ Conflicted",int(result["Signal"].eq("⚠️ Conflicted").sum()))
 
-                            if (
-                                put>=min_put_score
-                                and put>call
-                                and put>sell
-                            ):
-                                return "🔴 Strong Put Candidate"
-
-                            if sell>=75 and sell>call and sell>put:
-                                return "🟡 Option Selling Candidate"
-
-                            if max(call,put)>=65:
-                                return "🔵 Option Buying Candidate"
-
-                            return "⚪ Avoid / Wait"
-
-                        option_result["Signal"]=option_result.apply(
-                            _options_final_signal,
-                            axis=1
-                        )
-
-                        calls=option_result[
-                            option_result["Signal"]==
-                            "🟢 Strong Call Candidate"
+                        display=[
+                            "Stock","Symbol","Latest EOD","Close","Signal",
+                            "5D Call Score","5D Put Score","5D Price Change %",
+                            "Bullish Days","Bearish Days","Long Buildup Days",
+                            "Short Buildup Days","Short Covering Days","Long Unwinding Days",
+                            "Avg PCR","Latest PCR","PCR Trend",
+                            "Avg Volume x","Latest Volume x","Position",
+                            "Latest Future OI Chg %","Latest OI Trend",
+                            "Trend","EMA9","EMA21","EMA200","RSI9","RSI9 WMA21",
+                            "CCI20","ADX14","+DI","-DI","Volume Ratio","ATR %",
+                            "Expected Move"
                         ]
-                        puts=option_result[
-                            option_result["Signal"]==
+                        display=[c for c in display if c in result.columns]
+                        st.dataframe(result[display],width="stretch",hide_index=True)
+
+                        strong=result[result["Signal"].isin([
+                            "🟢 Strong Call Candidate",
                             "🔴 Strong Put Candidate"
-                        ]
-                        sellers=option_result[
-                            option_result["Signal"]==
-                            "🟡 Option Selling Candidate"
-                        ]
-                        buyers=option_result[
-                            option_result["Signal"]==
-                            "🔵 Option Buying Candidate"
-                        ]
+                        ])].head(15)
 
-                        a,b,c,d=st.columns(4)
-                        a.metric("🟢 Strong Calls",len(calls))
-                        b.metric("🔴 Strong Puts",len(puts))
-                        c.metric("🟡 Selling",len(sellers))
-                        d.metric("🔵 Buying",len(buyers))
-
-                        st.subheader("📈 Next-Day Options Analysis")
-
-                        display_cols=[
-                            "Stock","Symbol","Close","Trend",
-                            "Call Score","Put Score","Selling Score",
-                            "Signal","Position","OI Trend","PCR",
-                            "Future OI Chg %","Fib Support Price",
-                            "Fib Resistance Price"
-                        ]
-                        display_cols=[
-                            c for c in display_cols
-                            if c in option_result.columns
-                        ]
-
-                        st.dataframe(
-                            option_result[display_cols],
-                            width="stretch",
-                            hide_index=True
-                        )
-
-                        explanation_pool=option_result[
-                            option_result["Signal"].isin([
-                                "🟢 Strong Call Candidate",
-                                "🔴 Strong Put Candidate",
-                                "🟡 Option Selling Candidate",
-                                "🔵 Option Buying Candidate"
-                            ])
-                        ].head(20)
-
-                        st.subheader("📈 Phase 4 — Backtesting & Validation")
-
-                        st.caption(
-                            "Phase 4 validates the technical/regime component using "
-                            "the next trading session. It does not invent option "
-                            "premium or IV data. Full derivatives validation requires "
-                            "historical OI/PCR fields for each past date."
-                        )
-
-                        with st.expander("Run historical validation",expanded=False):
-                            st.info(
-                                "Upload one or more historical OHLC CSV files. "
-                                "Each file should contain Date, Open, High, Low and Close. "
-                                "The filename is used as the stock symbol."
+                        if not strong.empty:
+                            st.subheader("🎯 Highest-Confidence Next-Day Candidates")
+                            pick=st.selectbox(
+                                "Select candidate",strong["Symbol"].tolist(),key="options_v3_pick"
                             )
-
-                            bt_files=st.file_uploader(
-                                "Historical OHLC CSV files",
-                                type=["csv"],
-                                accept_multiple_files=True,
-                                key="options_phase4_files"
-                            )
-
-                            if bt_files:
-                                bt_history={}
-                                for bf in bt_files:
-                                    try:
-                                        bdf=pd.read_csv(bf)
-                                        date_col=next(
-                                            (c for c in bdf.columns
-                                             if str(c).strip().lower() in
-                                             ["date","datetime","timestamp"]),
-                                            None
-                                        )
-                                        if date_col:
-                                            bdf[date_col]=pd.to_datetime(
-                                                bdf[date_col],errors="coerce"
-                                            )
-                                            bdf=bdf.dropna(subset=[date_col]).set_index(date_col).sort_index()
-
-                                        bdf=_options_normalize_columns(bdf)
-
-                                        symbol=Path(bf.name).stem.upper()
-                                        bt_history[symbol]=bdf
-                                    except Exception as exc:
-                                        st.error(
-                                            f"Could not read {bf.name}: {exc}"
-                                        )
-
-                                if bt_history:
-                                    bt_result=_options_phase4_build_backtest(bt_history)
-
-                                    if bt_result.empty:
-                                        st.warning(
-                                            "No historical signals were generated. "
-                                            "Provide sufficiently long daily OHLC "
-                                            "history (preferably 1+ year)."
-                                        )
-                                    else:
-                                        metrics=_options_phase4_metrics(bt_result)
-
-                                        m1,m2,m3,m4,m5=st.columns(5)
-                                        m1.metric("Signals",int(metrics.get("Signals",0)))
-                                        m2.metric("Triggered",int(metrics.get("Triggered",0)))
-                                        m3.metric("Win Rate",f'{metrics.get("Win Rate %",0):.1f}%')
-                                        m4.metric("Avg Return",f'{metrics.get("Average Return %",0):.2f}%')
-                                        m5.metric("Max DD",f'{metrics.get("Max Drawdown %",0):.2f}%')
-
-                                        st.dataframe(
-                                            bt_result,
-                                            width="stretch",
-                                            hide_index=True
-                                        )
-
-                                        csv_data=bt_result.to_csv(index=False).encode("utf-8")
-                                        st.download_button(
-                                            "⬇️ Download Backtest Results",
-                                            csv_data,
-                                            "options_phase4_backtest.csv",
-                                            "text/csv",
-                                            key="options_phase4_download"
-                                        )
-
-                                        st.markdown("**Validation metrics**")
-                                        st.write({
-                                            k:round(v,3) if isinstance(v,(float,np.floating)) and np.isfinite(v) else v
-                                            for k,v in metrics.items()
-                                        })
-
-                        st.subheader("🧠 Phase 3 — Confluence & Market Regime")
-
-                        regime_counts=option_result["Market Regime"].value_counts()
-                        d1,d2,d3,d4=st.columns(4)
-                        d1.metric("🚀 Trending Bull",int(regime_counts.get("🚀 Trending Bull",0)))
-                        d2.metric("🔻 Trending Bear",int(regime_counts.get("🔻 Trending Bear",0)))
-                        d3.metric("🟡 Range / Compression",int(regime_counts.get("🟡 Range / Compression",0)+regime_counts.get("🟡 Weak / Range",0)))
-                        d4.metric("⚠️ Conflicted",int((option_result["Conflict Count"]>=1).sum()))
-                        st.caption("Phase 3 combines derivatives, trend, Bollinger, ADX/DI, Fibonacci and participation. Conflicts reduce directional confidence.")
-
-                        phase3_cols=[
-                            "Stock","Symbol","Market Regime",
-                            "Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score",
-                            "Conflict Status","Phase 3 Signal",
-                            "Bullish Factors","Bearish Factors","Conflict Details"
-                        ]
-                        phase3_cols=[c for c in phase3_cols if c in option_result.columns]
-                        st.dataframe(option_result[phase3_cols].head(50),width="stretch",hide_index=True)
-
-                        st.subheader("📐 Bollinger + ADX + ATR Analysis")
-
-                        if not explanation_pool.empty:
-                            _bb_row=explanation_pool.iloc[0]
-
-                            bc1,bc2,bc3,bc4,bc5=st.columns(5)
-                            bc1.metric(
-                                "BB State",
-                                str(_bb_row.get("BB State","N/A"))
-                            )
-                            bc2.metric(
-                                "BB Width",
-                                f'{float(_bb_row.get("BB Width",np.nan)):.4f}'
-                                if np.isfinite(float(_bb_row.get("BB Width",np.nan)))
-                                else "N/A"
-                            )
-                            bc3.metric(
-                                "ADX(14)",
-                                f'{float(_bb_row.get("ADX14",np.nan)):.1f}'
-                                if np.isfinite(float(_bb_row.get("ADX14",np.nan)))
-                                else "N/A"
-                            )
-                            bc4.metric(
-                                "ATR(14)",
-                                f'{float(_bb_row.get("ATR14",np.nan)):.2f}'
-                                if np.isfinite(float(_bb_row.get("ATR14",np.nan)))
-                                else "N/A"
-                            )
-                            bc5.metric(
-                                "ATR %",
-                                f'{float(_bb_row.get("ATR %",np.nan)):.2f}%'
-                                if np.isfinite(float(_bb_row.get("ATR %",np.nan)))
-                                else "N/A"
-                            )
-
-                            st.caption(
-                                "Phase 2 adds Bollinger Band state, ADX trend "
-                                "strength and ATR volatility confirmation to "
-                                "the existing derivatives + Fibonacci model."
-                            )
-
-                        st.subheader("🔎 Why This Signal?")
-
-                        if not explanation_pool.empty:
-                            selected_symbol=st.selectbox(
-                                "Select candidate",
-                                explanation_pool["Symbol"].tolist(),
-                                key="options_phase1_candidate"
-                            )
-                            selected=explanation_pool[
-                                explanation_pool["Symbol"]==selected_symbol
-                            ].iloc[0]
-
-                            e1,e2,e3,e4=st.columns(4)
-                            e1.metric("Signal",selected["Signal"])
-                            e2.metric("Call Score",f'{selected["Call Score"]:.1f}')
-                            e3.metric("Put Score",f'{selected["Put Score"]:.1f}')
-                            e4.metric("Selling Score",f'{selected["Selling Score"]:.1f}')
-
-                            st.markdown("**Phase 3 confluence**")
-                            st.write(f'**Market regime:** {selected.get("Market Regime","N/A")}')
-                            st.write(f'**Phase 3 signal:** {selected.get("Phase 3 Signal","N/A")}')
-                            st.write(f'**Conflict:** {selected.get("Conflict Status","N/A")}')
-                            if str(selected.get("Conflict Details","None"))!="None":
-                                st.warning(selected.get("Conflict Details",""))
-
-                            st.markdown("**Contributing factors**")
-                            for reason in str(selected["Why Signal"]).split(" | "):
-                                if reason:
-                                    st.write("• "+reason)
-
-                            p1,p2=st.columns(2)
-                            with p1:
-                                st.markdown("**Next-day plan**")
-                                st.write(f'**Direction:** {selected[ "Market Regime","Phase 3 Call Score","Phase 3 Put Score",
-                            "Phase 3 Selling Score","Conflict Status","Phase 3 Signal",
-                            "Direction"]}')
-                                st.write(f'**Preferred:** {selected["Preferred Contract"]}')
-                                if np.isfinite(selected["Underlying Trigger"]):
-                                    st.write(f'**Trigger:** {selected["Underlying Trigger"]:.2f}')
-                                    st.write(f'**Invalidation / SL:** {selected["Underlying Invalidation"]:.2f}')
-                            with p2:
-                                st.markdown("**Targets**")
-                                if np.isfinite(selected["Underlying Target 1"]):
-                                    st.write(f'**Target 1:** {selected["Underlying Target 1"]:.2f}')
-                                if np.isfinite(selected["Underlying Target 2"]):
-                                    st.write(f'**Target 2:** {selected["Underlying Target 2"]:.2f}')
-                                if np.isfinite(selected["RR Target 1"]):
-                                    st.write(f'**R:R to T1:** {selected["RR Target 1"]:.2f}')
-                                if np.isfinite(selected["RR Target 2"]):
-                                    st.write(f'**R:R to T2:** {selected["RR Target 2"]:.2f}')
-
-                            st.caption(selected["Contract Guidance"])
+                            r=strong[strong["Symbol"]==pick].iloc[0]
+                            p1,p2,p3,p4=st.columns(4)
+                            p1.metric("Signal",r["Signal"])
+                            p2.metric("Call Score",f'{r["5D Call Score"]:.1f}')
+                            p3.metric("Put Score",f'{r["5D Put Score"]:.1f}')
+                            p4.metric("Expected Move",f'{r["Expected Move"]:.2f}' if pd.notna(r["Expected Move"]) else "N/A")
+                            st.write(f"**5-day price:** {r['5D Price Change %']:.2f}% | **Position:** {r['Position']} | **PCR trend:** {r['PCR Trend']:.2f}")
+                            st.write(f"**Call evidence:** {r['Call Reasons']}")
+                            st.write(f"**Put evidence:** {r['Put Reasons']}")
                             st.warning(
-                                "Phase 1 uses underlying-stock levels. "
-                                "It does not invent option premiums or IV. "
-                                "Use the underlying trigger/invalidation to manage "
-                                "the selected ATM/near-ITM option."
+                                "This score determines underlying directional confidence. "
+                                "Precise strike/expiry/IV selection still requires actual option-chain data."
                             )
 
                         st.download_button(
-                            "⬇️ Download Next-Day Options Report",
-                            option_result.to_csv(index=False),
-                            "Options_Next_Day_Analysis.csv",
-                            "text/csv",
-                            key="options_download_independent"
-                        )
-
-                        st.subheader("⭐ Strong Candidates")
-
-                        top=option_result[
-                            option_result["Signal"].isin([
-                                "🟢 Strong Call Candidate",
-                                "🔴 Strong Put Candidate",
-                                "🟡 Option Selling Candidate",
-                                "🔵 Option Buying Candidate"
-                            ])
-                        ].head(30)
-
-                        top_cols=[
-                            "Stock","Symbol","Close","Call Score",
-                            "Put Score","Selling Score","Signal",
-                            "Trend","Position","OI Trend","PCR",
-                            "Fib Support Price","Fib Resistance Price"
-                        ]
-                        top_cols=[
-                            c for c in top_cols
-                            if c in top.columns
-                        ]
-
-                        st.dataframe(
-                            top[top_cols],
-                            width="stretch",
-                            hide_index=True
-                        )
-
-                        st.info(
-                            "IV, option premium, bid/ask spread and "
-                            "strike-specific analysis are not included "
-                            "unless those fields are present in your CSV."
+                            "⬇️ Download 5-Day Next-Day Options Report",
+                            result.to_csv(index=False).encode("utf-8"),
+                            "Options_Next_Day_Analysis_V3_5Day.csv",
+                            "text/csv",key="options_v3_download"
                         )
 
         except Exception as exc:
-            st.error(
-                f"Could not analyze the uploaded derivatives CSV: {exc}"
-            )
+            st.error(f"Could not analyze the uploaded EOD derivatives files: {exc}")
+
 
 
 elif module == "🏆 Minervini SEPA + VCP Scanner":
