@@ -16505,6 +16505,113 @@ def _options_next_day_v2_row(row, tech):
 # OPTIONS NEXT-DAY ANALYZER V3 — MULTI-DAY HISTORY HELPERS
 # ============================================================
 
+
+# ============================================================
+# OPTIONS NEXT-DAY ANALYZER V4 — CURRENT PRICE STRUCTURE
+# ============================================================
+
+def _options_v4_structure(df):
+    if df is None or df.empty:
+        return {}
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+    req=["Open","High","Low","Close","Volume"]
+    if any(c not in x.columns for c in req):
+        return {}
+    for c in req:
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=req).sort_index()
+    if len(x)<220:
+        return {}
+
+    c=x["Close"]; h=x["High"]; l=x["Low"]; v=x["Volume"]
+    x["EMA9"]=c.ewm(span=9,adjust=False).mean()
+    x["EMA21"]=c.ewm(span=21,adjust=False).mean()
+    x["EMA50"]=c.ewm(span=50,adjust=False).mean()
+    x["EMA200"]=c.ewm(span=200,adjust=False).mean()
+    x["SMA20"]=c.rolling(20,min_periods=20).mean()
+    x["VOL20"]=v.rolling(20,min_periods=20).mean()
+    x["ATR14"]=_options_atr(x,14)
+    x["RSI9"]=_options_rsi(c,9)
+    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
+    x["CCI20"]=_options_cci(x,20)
+
+    r=x.iloc[-1]; p=x.iloc[-2]
+    ema9,ema21,ema50,ema200=[float(r[k]) for k in ["EMA9","EMA21","EMA50","EMA200"]]
+    close=float(r["Close"]); atr=float(r["ATR14"])
+    vol_ratio=float(r["Volume"]/r["VOL20"]) if pd.notna(r["VOL20"]) and r["VOL20"] else np.nan
+
+    high20=float(h.iloc[-21:-1].max()); low20=float(l.iloc[-21:-1].min())
+    breakout=close>high20
+    breakdown=close<low20
+
+    # Structure: priority is breakout/breakdown, then pullback/consolidation,
+    # then established trend.
+    ema_bull=ema9>ema21>ema50>ema200
+    ema_bear=ema9<ema21<ema50<ema200
+    recent_high=float(h.tail(10).max()); recent_low=float(l.tail(10).min())
+
+    bull_pullback=(
+        ema9>ema21 and close>ema50 and
+        (recent_high-close)/recent_high*100>=1.0 and
+        close>=ema21*0.985
+    )
+    bear_pullback=(
+        ema9<ema21 and close<ema50 and
+        (close-recent_low)/recent_low*100>=1.0 and
+        close<=ema21*1.015
+    )
+
+    range20=(high20-low20)/close*100 if close else np.nan
+    consolidation=bool(np.isfinite(range20) and range20<=8 and
+                        (recent_high-recent_low)<=max(4*atr,close*0.04))
+
+    if breakout and vol_ratio>=1.5:
+        structure="Bullish Breakout"
+    elif breakdown and vol_ratio>=1.5:
+        structure="Bearish Breakdown"
+    elif bull_pullback:
+        structure="Bullish Pullback"
+    elif bear_pullback:
+        structure="Bearish Pullback"
+    elif consolidation and ema9>=ema21 and close>ema200:
+        structure="Bullish Consolidation"
+    elif consolidation and ema9<=ema21 and close<ema200:
+        structure="Bearish Consolidation"
+    elif ema_bull:
+        structure="Established Uptrend"
+    elif ema_bear:
+        structure="Established Downtrend"
+    elif close>ema200:
+        structure="Above 200 EMA / Mixed"
+    elif close<ema200:
+        structure="Below 200 EMA / Mixed"
+    else:
+        structure="Range / Mixed"
+
+    return {
+        "Current Structure":structure,
+        "EMA Stack":"9>21>50>200" if ema_bull else "9<21<50<200" if ema_bear else "Mixed",
+        "Price vs EMA200 %":(close-ema200)/ema200*100 if ema200 else np.nan,
+        "20D Breakout":breakout,
+        "20D Breakdown":breakdown,
+        "Consolidation":consolidation,
+        "Bullish Pullback":bull_pullback,
+        "Bearish Pullback":bear_pullback,
+        "Near 20D High":close>=high20*0.98,
+        "Near 20D Low":close<=low20*1.02,
+        "RSI9":float(r["RSI9"]),
+        "RSI9 WMA21":float(r["RSI9_WMA21"]),
+        "CCI20":float(r["CCI20"]),
+        "Volume Ratio":vol_ratio,
+        "ATR %":atr/close*100 if close else np.nan,
+        "EMA9":ema9,"EMA21":ema21,"EMA50":ema50,"EMA200":ema200,
+        "Structure Direction":"Bullish" if structure.startswith("Bullish") or "Uptrend" in structure else
+                              "Bearish" if structure.startswith("Bearish") or "Downtrend" in structure else
+                              "Neutral"
+    }
+
 def _options_v3_prepare_history(uploaded_files):
     frames=[]
     errors=[]
@@ -16774,6 +16881,43 @@ if module == "📊 Options Next-Day Analyzer":
                         rows.append(row)
 
                     result=pd.DataFrame(rows)
+
+                    # V4: classify the current price structure for every symbol
+                    # using the latest underlying OHLCV data.
+                    if not result.empty:
+                        structure_rows=[]
+                        for _sym in result["Symbol"].astype(str):
+                            structure_rows.append(_options_v4_structure(market.get(_sym)))
+                        _sdf=pd.DataFrame(structure_rows)
+                        if not _sdf.empty:
+                            for _col in _sdf.columns:
+                                result[_col]=_sdf[_col].values
+
+                            # Structure-aware directional adjustment.
+                            def _structure_adjust(r):
+                                call=float(r.get("5D Call Score",0) or 0)
+                                put=float(r.get("5D Put Score",0) or 0)
+                                stc=str(r.get("Current Structure",""))
+                                if stc in {"Bullish Breakout","Established Uptrend","Bullish Pullback","Bullish Consolidation"}:
+                                    call=min(100,call+8)
+                                elif stc in {"Bearish Breakdown","Established Downtrend","Bearish Pullback","Bearish Consolidation"}:
+                                    put=min(100,put+8)
+                                return pd.Series({
+                                    "Call Score V4":round(call,1),
+                                    "Put Score V4":round(put,1),
+                                    "Structure-Aware Signal":(
+                                        "🟢 Call — Structure Confirmed" if call>=80 and call>put
+                                        else "🔴 Put — Structure Confirmed" if put>=80 and put>call
+                                        else "🔵 Bullish — Await Trigger" if call>=65 and call>put
+                                        else "🔵 Bearish — Await Trigger" if put>=65 and put>call
+                                        else "⚠️ Structure Conflict / Wait"
+                                    )
+                                })
+                            _adj=result.apply(_structure_adjust,axis=1)
+                            result["Call Score V4"]=_adj["Call Score V4"].values
+                            result["Put Score V4"]=_adj["Put Score V4"].values
+                            result["Structure-Aware Signal"]=_adj["Structure-Aware Signal"].values
+
                     if result.empty:
                         st.warning("No multi-day candidates were calculated.")
                     else:
@@ -16803,6 +16947,9 @@ if module == "📊 Options Next-Day Analyzer":
                             "5D Call Score","5D Put Score","5D Price Change %",
                             "Bullish Days","Bearish Days","Long Buildup Days",
                             "Short Buildup Days","Short Covering Days","Long Unwinding Days",
+                            "Current Structure","EMA Stack","Structure-Aware Signal",
+                            "Call Score V4","Put Score V4","20D Breakout","20D Breakdown",
+                            "Bullish Pullback","Bearish Pullback","Consolidation",
                             "Avg PCR","Latest PCR","PCR Trend",
                             "Avg Volume x","Latest Volume x","Position",
                             "Latest Future OI Chg %","Latest OI Trend",
