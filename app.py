@@ -16958,12 +16958,96 @@ if module == "📊 Options Next-Day Analyzer":
                             "Expected Move"
                         ]
                         display=[c for c in display if c in result.columns]
-                        st.dataframe(result[display],width="stretch",hide_index=True)
+                        # ------------------------------------------------
+                        # READABLE DECISION DASHBOARD
+                        # ------------------------------------------------
+                        st.subheader("📋 Next-Day Decision Dashboard")
+                        st.caption(
+                            "The dashboard shows only the fields needed for decision making. "
+                            "The Detailed Analysis tab retains the full model output."
+                        )
 
-                        strong=result[result["Signal"].isin([
-                            "🟢 Strong Call Candidate",
-                            "🔴 Strong Put Candidate"
-                        ])].head(15)
+                        readable=result.copy()
+                        if "Structure-Aware Signal" in readable.columns:
+                            readable["_priority"]=readable["Structure-Aware Signal"].map({
+                                "🟢 Call — Structure Confirmed":6,
+                                "🔴 Put — Structure Confirmed":6,
+                                "🔵 Bullish — Await Trigger":4,
+                                "🔵 Bearish — Await Trigger":4,
+                                "⚠️ Structure Conflict / Wait":2
+                            }).fillna(1)
+                            readable=readable.sort_values(
+                                ["_priority","Call Score V4","Put Score V4","5D Call Score","5D Put Score"],
+                                ascending=[False,False,False,False,False]
+                            ).drop(columns="_priority")
+                        else:
+                            readable=readable.sort_values(
+                                ["5D Call Score","5D Put Score"],
+                                ascending=[False,False]
+                            )
+
+                        dashboard_cols=[
+                            "Stock","Symbol","Structure-Aware Signal","Current Structure",
+                            "Structure Readiness","Call Score V4","Put Score V4",
+                            "5D Call Score","5D Put Score","Position",
+                            "5D Price Change %","Latest PCR","PCR Trend",
+                            "EMA Stack","RSI9","CCI20","ADX14","Volume Ratio",
+                            "Expected Move"
+                        ]
+                        dashboard_cols=[c for c in dashboard_cols if c in readable.columns]
+
+                        tab1,tab2=st.tabs(["🎯 Decision Dashboard","🔎 Detailed Analysis"])
+
+                        with tab1:
+                            st.dataframe(
+                                readable[dashboard_cols].head(30),
+                                width="stretch",hide_index=True
+                            )
+
+                            st.markdown("### ⭐ Top candidates")
+                            top_readable=readable.head(10)
+                            for _, rr in top_readable.iterrows():
+                                with st.container(border=True):
+                                    q1,q2,q3,q4=st.columns(4)
+                                    q1.metric("Stock",str(rr.get("Stock","")))
+                                    q2.metric("Signal",str(rr.get("Structure-Aware Signal",rr.get("Signal",""))))
+                                    q3.metric("Structure",str(rr.get("Current Structure","N/A")))
+                                    q4.metric(
+                                        "Call / Put",
+                                        f'{float(rr.get("Call Score V4",rr.get("5D Call Score",0))):.0f} / '
+                                        f'{float(rr.get("Put Score V4",rr.get("5D Put Score",0))):.0f}'
+                                    )
+
+                                    st.write(
+                                        f"**Position:** {rr.get('Position','N/A')}  | "
+                                        f"**5D price:** {rr.get('5D Price Change %',np.nan):.2f}%  | "
+                                        f"**PCR:** {rr.get('Latest PCR',np.nan):.2f}  | "
+                                        f"**PCR trend:** {rr.get('PCR Trend',np.nan):.2f}"
+                                    )
+                                    st.write(
+                                        f"**EMA:** {rr.get('EMA Stack','N/A')}  | "
+                                        f"**RSI9:** {rr.get('RSI9',np.nan):.1f}  | "
+                                        f"**CCI20:** {rr.get('CCI20',np.nan):.1f}  | "
+                                        f"**ADX:** {rr.get('ADX14',np.nan):.1f}  | "
+                                        f"**Volume:** {rr.get('Volume Ratio',np.nan):.2f}x"
+                                    )
+                                    st.write(
+                                        f"**5-day evidence:** {rr.get('Call Reasons','') or rr.get('Put Reasons','')}"
+                                    )
+
+                        with tab2:
+                            st.dataframe(
+                                result[display],
+                                width="stretch",hide_index=True
+                            )
+
+                        # Use the structure-aware signal for the candidate list.
+                        strong=readable[
+                            readable.get("Structure-Aware Signal","").isin([
+                                "🟢 Call — Structure Confirmed",
+                                "🔴 Put — Structure Confirmed"
+                            ])
+                        ].head(15)
 
                         if not strong.empty:
                             st.subheader("🎯 Highest-Confidence Next-Day Candidates")
