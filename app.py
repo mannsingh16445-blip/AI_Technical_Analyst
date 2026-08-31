@@ -16115,7 +16115,6 @@ if module == "🔥 Momentum Catalyst Scanner":
                     )
 
 
-el
 # ============================================================
 # OPTIONS NEXT-DAY ANALYZER V2 — CONFLUENCE ENGINE
 # ============================================================
