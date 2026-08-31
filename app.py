@@ -16500,6 +16500,149 @@ def _options_next_day_v2_row(row, tech):
         "Expected Move":tech.get("Expected Move (1 ATR)",np.nan) if tech else np.nan
     }
 
+
+# ============================================================
+# OPTIONS NEXT-DAY ANALYZER V3 — MULTI-DAY HISTORY HELPERS
+# ============================================================
+
+def _options_v3_prepare_history(uploaded_files):
+    frames=[]
+    errors=[]
+    for uf in uploaded_files or []:
+        try:
+            df,meta=_read_options_eod_csv(uf)
+            if df.empty:
+                continue
+            fallback_date=meta.get("Date","")
+            if "Date" not in df.columns:
+                df["Date"]=fallback_date
+            df["Date"]=pd.to_datetime(df["Date"],errors="coerce")
+            if df["Date"].isna().all() and fallback_date:
+                df["Date"]=pd.to_datetime(fallback_date,errors="coerce")
+            df["_File"]=uf.name
+            frames.append(df)
+        except Exception as exc:
+            errors.append(f"{uf.name}: {exc}")
+    if not frames:
+        return pd.DataFrame(),errors
+    hist=pd.concat(frames,ignore_index=True)
+    hist["Symbol"]=hist["Symbol"].astype(str).str.upper().str.strip()
+    hist=hist.dropna(subset=["Symbol"])
+    hist=hist.sort_values(["Symbol","Date","_File"])
+    hist=hist.drop_duplicates(["Symbol","Date"],keep="last")
+    return hist,errors
+
+def _options_v3_symbol_features(g):
+    g=g.sort_values("Date").tail(5).copy()
+    if g.empty:
+        return {}
+    def num(c):
+        return pd.to_numeric(g[c],errors="coerce") if c in g.columns else pd.Series(np.nan,index=g.index)
+    def last(c):
+        s=num(c)
+        return float(s.iloc[-1]) if len(s) and pd.notna(s.iloc[-1]) else np.nan
+    def mean(c):
+        s=num(c).dropna()
+        return float(s.mean()) if len(s) else np.nan
+    def delta(c):
+        s=num(c).dropna()
+        return float(s.iloc[-1]-s.iloc[0]) if len(s)>=2 else np.nan
+
+    daily=num("Chg %"); oi=num("OI Chg %")
+    pcr=num("Put Call Ratio (PCR)")
+    bullish_days=int((daily>0).sum()); bearish_days=int((daily<0).sum())
+
+    lbs=sbs=scs=lus=0
+    for pc,oc in zip(daily,oi):
+        cls=_options_position_classification(pc,oc)
+        lbs+=int(cls=="Long Buildup"); sbs+=int(cls=="Short Buildup")
+        scs+=int(cls=="Short Covering"); lus+=int(cls=="Long Unwinding")
+
+    return {
+        "History Days":len(g),
+        "Latest EOD":g["Date"].iloc[-1],
+        "5D Price Change %":delta("Close"),
+        "Bullish Days":bullish_days,"Bearish Days":bearish_days,
+        "5D OI Chg Change %":delta("OI Chg %"),
+        "Avg OI Chg %":mean("OI Chg %"),
+        "Latest PCR":last("Put Call Ratio (PCR)"),
+        "Avg PCR":mean("Put Call Ratio (PCR)"),
+        "PCR Trend":delta("Put Call Ratio (PCR)"),
+        "Latest PCR Change 1D":last("PCR Change 1D"),
+        "Avg Volume x":mean("Volume (Times)"),
+        "Latest Volume x":last("Volume (Times)"),
+        "Avg Delivery x":mean("Delivery (Times)"),
+        "Long Buildup Days":lbs,
+        "Short Buildup Days":sbs,
+        "Short Covering Days":scs,
+        "Long Unwinding Days":lus,
+    }
+
+def _options_v3_multi_day_score(g,tech):
+    f=_options_v3_symbol_features(g)
+    if not f:
+        return {}
+    call=put=0.0
+    cb=[]; pb=[]
+
+    if f["Bullish Days"]>=3: call+=12; cb.append("3+ bullish days")
+    elif f["Bullish Days"]>=2: call+=8; cb.append("2 bullish days")
+    if f["Bearish Days"]>=3: put+=12; pb.append("3+ bearish days")
+    elif f["Bearish Days"]>=2: put+=8; pb.append("2 bearish days")
+
+    if pd.notna(f["5D Price Change %"]):
+        if f["5D Price Change %"]>=2: call+=8; cb.append(f"5D price +{f['5D Price Change %']:.1f}%")
+        elif f["5D Price Change %"]<=-2: put+=8; pb.append(f"5D price {f['5D Price Change %']:.1f}%")
+
+    if f["Long Buildup Days"]>=2: call+=12; cb.append(f"{f['Long Buildup Days']} long-buildup days")
+    if f["Short Covering Days"]>=2: call+=8; cb.append(f"{f['Short Covering Days']} short-covering days")
+    if f["Short Buildup Days"]>=2: put+=12; pb.append(f"{f['Short Buildup Days']} short-buildup days")
+    if f["Long Unwinding Days"]>=2: put+=8; pb.append(f"{f['Long Unwinding Days']} long-unwinding days")
+
+    if pd.notna(f["Latest PCR"]):
+        if f["Latest PCR"]>=1.10: call+=8; cb.append("PCR ≥1.10")
+        elif f["Latest PCR"]<=0.70: put+=8; pb.append("PCR ≤0.70")
+    if pd.notna(f["PCR Trend"]):
+        if f["PCR Trend"]>0.05: call+=7; cb.append("PCR improving")
+        elif f["PCR Trend"]<-0.05: put+=7; pb.append("PCR declining")
+    if pd.notna(f["Avg PCR"]):
+        if f["Avg PCR"]>=1.05: call+=5
+        elif f["Avg PCR"]<=0.75: put+=5
+
+    if f["Avg Volume x"]>=1.25:
+        if f["5D Price Change %"]>0: call+=7; cb.append("5D participation bullish")
+        elif f["5D Price Change %"]<0: put+=7; pb.append("5D participation bearish")
+    if f["Latest Volume x"]>=1.5:
+        if f["5D Price Change %"]>0: call+=5
+        elif f["5D Price Change %"]<0: put+=5
+    if f["Avg Delivery x"]>=1.25:
+        if f["5D Price Change %"]>0: call+=3
+        elif f["5D Price Change %"]<0: put+=3
+
+    if tech:
+        if tech.get("Bullish Technical"): call+=12; cb.append("Bullish technical regime")
+        if tech.get("Bearish Technical"): put+=12; pb.append("Bearish technical regime")
+        if tech.get("ADX14",0)>=18:
+            if tech.get("+DI",0)>tech.get("-DI",0): call+=5
+            elif tech.get("-DI",0)>tech.get("+DI",0): put+=5
+
+    conflict=abs(call-put)<15
+    if conflict: signal="⚠️ Conflicted"
+    elif call>=80 and call>put: signal="🟢 Strong Call Candidate"
+    elif put>=80 and put>call: signal="🔴 Strong Put Candidate"
+    elif call>=65 and call>put: signal="🔵 Bullish Bias"
+    elif put>=65 and put>call: signal="🔵 Bearish Bias"
+    else: signal="⚪ Avoid / Wait"
+
+    return {
+        **f,
+        "5D Call Score":round(min(100,call),1),
+        "5D Put Score":round(min(100,put),1),
+        "5D Signal":signal,
+        "5D Call Reasons":" | ".join(cb),
+        "5D Put Reasons":" | ".join(pb),
+    }
+
 if module == "📊 Options Next-Day Analyzer":
 
     st.header("📊 Next-Day Options Analyzer V3")
