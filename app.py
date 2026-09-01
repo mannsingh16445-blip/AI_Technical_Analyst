@@ -16533,12 +16533,24 @@ def _options_v4_structure(df):
     x["SMA20"]=c.rolling(20,min_periods=20).mean()
     x["VOL20"]=v.rolling(20,min_periods=20).mean()
     x["ATR14"]=_options_atr(x,14)
+
+    x["BB_MID"]=x["SMA20"]
+    x["BB_STD"]=c.rolling(20,min_periods=20).std()
+    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
+    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
+    x["BB_WIDTH_PCT"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
+    x["BB_WIDTH_AVG20"]=x["BB_WIDTH_PCT"].rolling(20,min_periods=10).mean()
     x["RSI9"]=_options_rsi(c,9)
     x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
     x["CCI20"]=_options_cci(x,20)
 
     r=x.iloc[-1]; p=x.iloc[-2]
     ema9,ema21,ema50,ema200=[float(r[k]) for k in ["EMA9","EMA21","EMA50","EMA200"]]
+
+    bb_width=float(r["BB_WIDTH_PCT"]) if pd.notna(r["BB_WIDTH_PCT"]) else np.nan
+    bb_avg=float(r["BB_WIDTH_AVG20"]) if pd.notna(r["BB_WIDTH_AVG20"]) else np.nan
+    bb_compressed=bool(np.isfinite(bb_width) and np.isfinite(bb_avg) and bb_width<=bb_avg*0.75)
+    bb_extreme=bool(np.isfinite(bb_width) and np.isfinite(bb_avg) and bb_width<=bb_avg*0.60)
     close=float(r["Close"]); atr=float(r["ATR14"])
     vol_ratio=float(r["Volume"]/r["VOL20"]) if pd.notna(r["VOL20"]) and r["VOL20"] else np.nan
 
@@ -16571,6 +16583,14 @@ def _options_v4_structure(df):
         structure="Bullish Breakout"
     elif breakdown and vol_ratio>=1.5:
         structure="Bearish Breakdown"
+    elif bb_extreme and ema9>=ema21 and close>ema200:
+        structure="Bullish BB Compression"
+    elif bb_extreme and ema9<=ema21 and close<ema200:
+        structure="Bearish BB Compression"
+    elif bb_compressed and ema9>=ema21 and close>ema200:
+        structure="Bullish Consolidation / BB Compression"
+    elif bb_compressed and ema9<=ema21 and close<ema200:
+        structure="Bearish Consolidation / BB Compression"
     elif bull_pullback:
         structure="Bullish Pullback"
     elif bear_pullback:
@@ -16593,6 +16613,10 @@ def _options_v4_structure(df):
     return {
         "Current Structure":structure,
         "EMA Stack":"9>21>50>200" if ema_bull else "9<21<50<200" if ema_bear else "Mixed",
+        "BB Width %":bb_width,
+        "BB Width / 20D Avg":(bb_width/bb_avg if np.isfinite(bb_avg) and bb_avg else np.nan),
+        "BB Compression":bb_compressed,
+        "BB Extreme Compression":bb_extreme,
         "Price vs EMA200 %":(close-ema200)/ema200*100 if ema200 else np.nan,
         "20D Breakout":breakout,
         "20D Breakdown":breakdown,
@@ -17156,6 +17180,18 @@ if module == "📊 Options Next-Day Analyzer":
                                     "Expected Move":tech["Expected Move (1 ATR)"]
                                 })
 
+                            structure=_options_v4_structure(market.get(sym))
+                            if structure:
+                                row.update({
+                                    "Current Structure":structure["Current Structure"],
+                                    "EMA Stack":structure["EMA Stack"],
+                                    "BB Width %":structure["BB Width %"],
+                                    "BB Width / 20D Avg":structure["BB Width / 20D Avg"],
+                                    "BB Compression":structure["BB Compression"],
+                                    "BB Extreme Compression":structure["BB Extreme Compression"],
+                                    "Structure Direction":structure["Structure Direction"]
+                                })
+
                             sec_name=row["Sector"]
                             sec_adj,sec_regime=_sector_rotation_stock_adjustment(sec_name,sector_summary)
                             row["Sector Rotation Regime"]=sec_regime
@@ -17214,6 +17250,7 @@ if module == "📊 Options Next-Day Analyzer":
                                 "Sector Rotation Regime","Sector Rotation Adj",
                                 "Sector-Adjusted Call Score","Sector-Adjusted Put Score",
                                 "Current Structure","Structure Readiness",
+                                "BB Compression","BB Extreme Compression","BB Width %",
                                 "Position","5D Price Change %","Latest PCR","PCR Trend",
                                 "EMA Stack","RSI9","RSI9 WMA21","CCI20","ADX14",
                                 "Volume Ratio","Expected Move"
