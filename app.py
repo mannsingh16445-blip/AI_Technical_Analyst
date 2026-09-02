@@ -16558,6 +16558,8 @@ def _options_v4_structure(df):
     bb_compressed=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.25)
     bb_extreme=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.15)
 
+    close=float(r["Close"])
+    atr=float(r["ATR14"])
     bb_upper=float(r["BB_UPPER"])
     bb_lower=float(r["BB_LOWER"])
     bb_mid=float(r["BB_MID"])
@@ -16570,7 +16572,6 @@ def _options_v4_structure(df):
     )
     bull_bb_break=bool(close>bb_upper and prev_close<=float(p["BB_UPPER"]))
     bear_bb_break=bool(close<bb_lower and prev_close>=float(p["BB_LOWER"]))
-    close=float(r["Close"]); atr=float(r["ATR14"])
     vol_ratio=float(r["Volume"]/r["VOL20"]) if pd.notna(r["VOL20"]) and r["VOL20"] else np.nan
 
     high20=float(h.iloc[-21:-1].max()); low20=float(l.iloc[-21:-1].min())
