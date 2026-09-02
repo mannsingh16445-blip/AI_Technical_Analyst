@@ -16540,6 +16540,8 @@ def _options_v4_structure(df):
     x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
     x["BB_WIDTH_PCT"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
     x["BB_WIDTH_AVG20"]=x["BB_WIDTH_PCT"].rolling(20,min_periods=10).mean()
+    x["BB_WIDTH_PCTL120"]=x["BB_WIDTH_PCT"].rolling(120,min_periods=60).rank(pct=True)
+    x["BB_MID_SLOPE5"]=x["BB_MID"].pct_change(5)*100
     x["RSI9"]=_options_rsi(c,9)
     x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
     x["CCI20"]=_options_cci(x,20)
@@ -16549,8 +16551,25 @@ def _options_v4_structure(df):
 
     bb_width=float(r["BB_WIDTH_PCT"]) if pd.notna(r["BB_WIDTH_PCT"]) else np.nan
     bb_avg=float(r["BB_WIDTH_AVG20"]) if pd.notna(r["BB_WIDTH_AVG20"]) else np.nan
-    bb_compressed=bool(np.isfinite(bb_width) and np.isfinite(bb_avg) and bb_width<=bb_avg*0.75)
-    bb_extreme=bool(np.isfinite(bb_width) and np.isfinite(bb_avg) and bb_width<=bb_avg*0.60)
+    bb_pct_rank=float(r["BB_WIDTH_PCTL120"]) if pd.notna(r["BB_WIDTH_PCTL120"]) else np.nan
+
+    # Robust squeeze definition: current band width is in the lowest
+    # 25% of its 120-day distribution. Extreme squeeze = lowest 15%.
+    bb_compressed=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.25)
+    bb_extreme=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.15)
+
+    bb_upper=float(r["BB_UPPER"])
+    bb_lower=float(r["BB_LOWER"])
+    bb_mid=float(r["BB_MID"])
+    prev_close=float(p["Close"])
+
+    # Volatility expansion from a compressed state.
+    bb_expanding=bool(
+        np.isfinite(bb_width) and np.isfinite(bb_avg) and
+        bb_width>bb_avg*1.05
+    )
+    bull_bb_break=bool(close>bb_upper and prev_close<=float(p["BB_UPPER"]))
+    bear_bb_break=bool(close<bb_lower and prev_close>=float(p["BB_LOWER"]))
     close=float(r["Close"]); atr=float(r["ATR14"])
     vol_ratio=float(r["Volume"]/r["VOL20"]) if pd.notna(r["VOL20"]) and r["VOL20"] else np.nan
 
@@ -16579,18 +16598,22 @@ def _options_v4_structure(df):
     consolidation=bool(np.isfinite(range20) and range20<=8 and
                         (recent_high-recent_low)<=max(4*atr,close*0.04))
 
-    if breakout and vol_ratio>=1.5:
+    if bull_bb_break and vol_ratio>=1.25:
+        structure="Bullish BB Breakout"
+    elif bear_bb_break and vol_ratio>=1.25:
+        structure="Bearish BB Breakdown"
+    elif breakout and vol_ratio>=1.5:
         structure="Bullish Breakout"
     elif breakdown and vol_ratio>=1.5:
         structure="Bearish Breakdown"
     elif bb_extreme and ema9>=ema21 and close>ema200:
-        structure="Bullish BB Compression"
+        structure="Bullish Extreme BB Compression"
     elif bb_extreme and ema9<=ema21 and close<ema200:
-        structure="Bearish BB Compression"
+        structure="Bearish Extreme BB Compression"
     elif bb_compressed and ema9>=ema21 and close>ema200:
-        structure="Bullish Consolidation / BB Compression"
+        structure="Bullish BB Compression"
     elif bb_compressed and ema9<=ema21 and close<ema200:
-        structure="Bearish Consolidation / BB Compression"
+        structure="Bearish BB Compression"
     elif bull_pullback:
         structure="Bullish Pullback"
     elif bear_pullback:
@@ -16615,8 +16638,12 @@ def _options_v4_structure(df):
         "EMA Stack":"9>21>50>200" if ema_bull else "9<21<50<200" if ema_bear else "Mixed",
         "BB Width %":bb_width,
         "BB Width / 20D Avg":(bb_width/bb_avg if np.isfinite(bb_avg) and bb_avg else np.nan),
+        "BB Width Percentile 120D":bb_pct_rank*100 if np.isfinite(bb_pct_rank) else np.nan,
         "BB Compression":bb_compressed,
         "BB Extreme Compression":bb_extreme,
+        "BB Expanding":bb_expanding,
+        "Bullish BB Breakout":bull_bb_break,
+        "Bearish BB Breakdown":bear_bb_break,
         "Price vs EMA200 %":(close-ema200)/ema200*100 if ema200 else np.nan,
         "20D Breakout":breakout,
         "20D Breakdown":breakdown,
@@ -17012,6 +17039,148 @@ def _sector_rotation_stock_adjustment(sector_name, sector_summary):
 
     return adj,regime
 
+
+# ============================================================
+# DAILY RSI DIVERGENCE ENGINE
+# Regular = potential reversal/exhaustion
+# Hidden  = potential trend continuation
+# ============================================================
+
+def _rsi_divergence_daily(df, rsi_period=9, pivot_window=3, recent_bars=15):
+    if df is None or df.empty:
+        return {}
+
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=x.columns.get_level_values(0)
+
+    for c in ["High","Low","Close"]:
+        if c not in x.columns:
+            return {}
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+
+    x=x.dropna(subset=["High","Low","Close"]).sort_index()
+    if len(x)<rsi_period+2*pivot_window+10:
+        return {}
+
+    rsi=_options_rsi(x["Close"],rsi_period)
+    n=int(max(1,pivot_window))
+
+    # Confirmed swing pivots. A pivot is only used after the right-hand
+    # bars have completed, so this avoids looking into the future.
+    lows=[]
+    highs=[]
+    for i in range(n,len(x)-n):
+        lo=float(x["Low"].iloc[i])
+        hi=float(x["High"].iloc[i])
+        if lo<=float(x["Low"].iloc[i-n:i+n+1].min()):
+            if np.isfinite(rsi.iloc[i]):
+                lows.append(i)
+        if hi>=float(x["High"].iloc[i-n:i+n+1].max()):
+            if np.isfinite(rsi.iloc[i]):
+                highs.append(i)
+
+    def pair_signal(points, kind):
+        if len(points)<2:
+            return {}
+        i1,i2=points[-2],points[-1]
+        if i2<=i1:
+            return {}
+        bars_ago=len(x)-1-i2
+        if bars_ago>int(recent_bars):
+            return {}
+
+        price1=float(x["Low"].iloc[i1] if kind=="low" else x["High"].iloc[i1])
+        price2=float(x["Low"].iloc[i2] if kind=="low" else x["High"].iloc[i2])
+        rsi1=float(rsi.iloc[i1]); rsi2=float(rsi.iloc[i2])
+
+        price_delta=(price2/price1-1)*100 if price1 else np.nan
+        rsi_delta=rsi2-rsi1
+
+        # Regular and hidden divergence patterns.
+        if kind=="low":
+            if price2<price1 and rsi2>rsi1:
+                dtype="Regular Bullish"
+            elif price2>price1 and rsi2<rsi1:
+                dtype="Hidden Bullish"
+            else:
+                dtype=""
+        else:
+            if price2>price1 and rsi2<rsi1:
+                dtype="Regular Bearish"
+            elif price2<price1 and rsi2>rsi1:
+                dtype="Hidden Bearish"
+            else:
+                dtype=""
+
+        if not dtype:
+            return {}
+
+        # Strength is based on RSI separation and price separation.
+        mag=max(abs(rsi_delta),abs(price_delta)*2)
+        if mag>=10:
+            strength="Strong"
+        elif mag>=5:
+            strength="Medium"
+        else:
+            strength="Weak"
+
+        return {
+            "Type":dtype,
+            "Strength":strength,
+            "Pivot 1 Date":x.index[i1],
+            "Pivot 2 Date":x.index[i2],
+            "Bars Since Pivot":bars_ago,
+            "Price Change %":price_delta,
+            "RSI Change":rsi_delta,
+            "RSI Pivot 1":rsi1,
+            "RSI Pivot 2":rsi2
+        }
+
+    low_sig=pair_signal(lows,"low")
+    high_sig=pair_signal(highs,"high")
+
+    # Pick the most recent confirmed divergence; if dates are identical
+    # prefer strong/medium over weak.
+    candidates=[z for z in [low_sig,high_sig] if z]
+    if not candidates:
+        return {
+            "RSI Divergence":"None",
+            "RSI Divergence Strength":"",
+            "RSI Divergence Type":"",
+            "RSI Divergence Bars Ago":np.nan,
+            "RSI Divergence Price Change %":np.nan,
+            "RSI Divergence RSI Change":np.nan,
+            "Daily RSI Period":int(rsi_period)
+        }
+
+    candidates.sort(key=lambda z:(-z["Bars Since Pivot"], {"Strong":3,"Medium":2,"Weak":1}.get(z["Strength"],0)))
+    sig=candidates[0]
+
+    # A simple alert score for later integration.
+    base={"Strong":15,"Medium":10,"Weak":5}.get(sig["Strength"],0)
+    if sig["Type"]=="Regular Bullish":
+        bias="Bullish Reversal Alert"
+    elif sig["Type"]=="Regular Bearish":
+        bias="Bearish Reversal Alert"
+    elif sig["Type"]=="Hidden Bullish":
+        bias="Bullish Continuation Alert"
+    else:
+        bias="Bearish Continuation Alert"
+
+    return {
+        "RSI Divergence":sig["Type"],
+        "RSI Divergence Strength":sig["Strength"],
+        "RSI Divergence Type":bias,
+        "RSI Divergence Bars Ago":sig["Bars Since Pivot"],
+        "RSI Divergence Price Change %":sig["Price Change %"],
+        "RSI Divergence RSI Change":sig["RSI Change"],
+        "RSI Pivot 1":sig["RSI Pivot 1"],
+        "RSI Pivot 2":sig["RSI Pivot 2"],
+        "Daily RSI Period":int(rsi_period),
+        "RSI Divergence Score":base
+    }
+
 if module == "📊 Options Next-Day Analyzer":
 
     st.header("📊 Next-Day Options Analyzer V6")
@@ -17061,6 +17230,42 @@ if module == "📊 Options Next-Day Analyzer":
 
     call_thr=st.sidebar.slider("Strong Call threshold",65,95,80,1,key="options_v6_call")
     put_thr=st.sidebar.slider("Strong Put threshold",65,95,80,1,key="options_v6_put")
+    bb_setup_filter=st.sidebar.selectbox(
+        "Bollinger setup filter",
+        [
+            "No BB filter — use as confirmation",
+            "Require BB compression",
+            "Require extreme BB compression",
+            "Require BB breakout / breakdown"
+        ],
+        index=0,key="options_v7_bb_filter",
+        help=(
+            "Compression uses the lowest 25% of the 120-day BB-width distribution; "
+            "extreme uses the lowest 15%. Breakout/breakdown requires price to cross "
+            "the outer band on the latest session."
+        )
+    )
+
+    st.sidebar.subheader("📐 Daily RSI Divergence")
+    rsi_div_period=st.sidebar.selectbox(
+        "RSI divergence period",[9,14],index=0,key="options_v8_rsi_period"
+    )
+    rsi_pivot=st.sidebar.slider(
+        "RSI pivot window (days)",2,5,3,1,key="options_v8_rsi_pivot"
+    )
+    rsi_recent=st.sidebar.slider(
+        "Divergence recency (days)",5,20,15,1,key="options_v8_rsi_recent"
+    )
+    rsi_div_filter=st.sidebar.selectbox(
+        "Divergence filter",
+        [
+            "Use as confirmation",
+            "Require bullish/hidden bullish",
+            "Require bearish/hidden bearish",
+            "Require any divergence"
+        ],
+        index=0,key="options_v8_rsi_filter"
+    )
 
     if deriv_files and sector_files:
         try:
@@ -17187,10 +17392,45 @@ if module == "📊 Options Next-Day Analyzer":
                                     "EMA Stack":structure["EMA Stack"],
                                     "BB Width %":structure["BB Width %"],
                                     "BB Width / 20D Avg":structure["BB Width / 20D Avg"],
+                                    "BB Width Percentile 120D":structure["BB Width Percentile 120D"],
                                     "BB Compression":structure["BB Compression"],
                                     "BB Extreme Compression":structure["BB Extreme Compression"],
+                                    "BB Expanding":structure["BB Expanding"],
+                                    "Bullish BB Breakout":structure["Bullish BB Breakout"],
+                                    "Bearish BB Breakdown":structure["Bearish BB Breakdown"],
                                     "Structure Direction":structure["Structure Direction"]
                                 })
+
+                            divergence=_rsi_divergence_daily(
+                                market.get(sym),
+                                rsi_period=rsi_div_period,
+                                pivot_window=rsi_pivot,
+                                recent_bars=rsi_recent
+                            )
+                            if divergence:
+                                row.update(divergence)
+
+                            if bb_setup_filter!="No BB filter — use as confirmation":
+                                if not structure:
+                                    continue
+                                if bb_setup_filter=="Require BB compression" and not structure.get("BB Compression",False):
+                                    continue
+                                if bb_setup_filter=="Require extreme BB compression" and not structure.get("BB Extreme Compression",False):
+                                    continue
+                                if bb_setup_filter=="Require BB breakout / breakdown" and not (
+                                    structure.get("Bullish BB Breakout",False) or
+                                    structure.get("Bearish BB Breakdown",False)
+                                ):
+                                    continue
+
+                            if rsi_div_filter!="Use as confirmation":
+                                dtype=str(row.get("RSI Divergence","None"))
+                                if rsi_div_filter=="Require bullish/hidden bullish" and dtype not in {"Regular Bullish","Hidden Bullish"}:
+                                    continue
+                                if rsi_div_filter=="Require bearish/hidden bearish" and dtype not in {"Regular Bearish","Hidden Bearish"}:
+                                    continue
+                                if rsi_div_filter=="Require any divergence" and dtype=="None":
+                                    continue
 
                             sec_name=row["Sector"]
                             sec_adj,sec_regime=_sector_rotation_stock_adjustment(sec_name,sector_summary)
@@ -17202,6 +17442,21 @@ if module == "📊 Options Next-Day Analyzer":
                             row["Sector-Adjusted Put Score"]=round(
                                 min(100,float(row["5D Put Score"])+(-sec_adj if sec_adj<0 else 0)),1
                             )
+
+                            div_type=str(row.get("RSI Divergence","None"))
+                            div_strength=str(row.get("RSI Divergence Strength",""))
+                            div_points={"Strong":8,"Medium":5,"Weak":3}.get(div_strength,0)
+
+                            # Regular divergence is treated as reversal/exhaustion;
+                            # hidden divergence is treated as continuation.
+                            if div_type in {"Regular Bullish","Hidden Bullish"}:
+                                row["Sector-Adjusted Call Score"]=round(
+                                    min(100,float(row["Sector-Adjusted Call Score"])+div_points),1
+                                )
+                            elif div_type in {"Regular Bearish","Hidden Bearish"}:
+                                row["Sector-Adjusted Put Score"]=round(
+                                    min(100,float(row["Sector-Adjusted Put Score"])+div_points),1
+                                )
 
                             # Final structure + sector-aware signal.
                             if sec_adj>=0:
@@ -17250,9 +17505,12 @@ if module == "📊 Options Next-Day Analyzer":
                                 "Sector Rotation Regime","Sector Rotation Adj",
                                 "Sector-Adjusted Call Score","Sector-Adjusted Put Score",
                                 "Current Structure","Structure Readiness",
-                                "BB Compression","BB Extreme Compression","BB Width %",
+                                "BB Compression","BB Extreme Compression","BB Expanding",
+                                "BB Width %","BB Width Percentile 120D",
                                 "Position","5D Price Change %","Latest PCR","PCR Trend",
                                 "EMA Stack","RSI9","RSI9 WMA21","CCI20","ADX14",
+                                "RSI Divergence","RSI Divergence Strength",
+                                "RSI Divergence Type","RSI Divergence Bars Ago",
                                 "Volume Ratio","Expected Move"
                             ]
                             dashboard_cols=[c for c in dashboard_cols if c in readable.columns]
@@ -17281,8 +17539,12 @@ if module == "📊 Options Next-Day Analyzer":
                                         f"**PCR:** {rr.get('Latest PCR',np.nan):.2f}"
                                     )
                                     st.write(
+                                        f"**BB:** {rr.get('Current Structure','N/A')} | "
+                                        f"Width percentile: {rr.get('BB Width Percentile 120D',np.nan):.1f}% | "
                                         f"**EMA:** {rr.get('EMA Stack','N/A')} | "
                                         f"**RSI9:** {rr.get('RSI9',np.nan):.1f} | "
+                                        f"**Divergence:** {rr.get('RSI Divergence','None')} "
+                                        f"({rr.get('RSI Divergence Strength','')}) | "
                                         f"**CCI20:** {rr.get('CCI20',np.nan):.1f} | "
                                         f"**ADX:** {rr.get('ADX14',np.nan):.1f} | "
                                         f"**Volume:** {rr.get('Volume Ratio',np.nan):.2f}x"
