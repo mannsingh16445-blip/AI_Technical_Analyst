@@ -14064,6 +14064,209 @@ def _ema_company_name(symbol):
     except Exception:
         return s
 
+
+# ============================================================
+# EMA9/21 CROSSOVER + RETEST + BREAKOUT RULE ENGINE
+# User-defined Rules 1–3
+# ============================================================
+
+def _ema921_rule_engine(df, direction="Buy", max_retest_bars=10, confirmation_bars=3):
+    """
+    Bullish rules:
+      1) EMA9 crosses above EMA21; crossover candle closes above EMA9.
+      2) Later retest candle: Low <= EMA9 and Close > EMA9.
+      3) Retest candle or next 1..N bars breaks the HIGH of the candle
+         immediately before the retest candle.
+
+    Bearish mirror:
+      1) EMA9 crosses below EMA21; crossover candle closes below EMA9.
+      2) Retest candle: High >= EMA9 and Close < EMA9.
+      3) Retest candle or next 1..N bars breaks the LOW of the candle
+         immediately before the retest candle.
+
+    The function evaluates the latest completed setup, avoiding future data
+    beyond the specified confirmation window.
+    """
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+
+    # Use a compact copy with clean numeric OHLC.
+    d=d.dropna(subset=["Open","High","Low","Close","EMA9","EMA21"]).copy()
+
+    cross_idx=None
+    bullish=direction=="Buy"
+    bearish=direction=="Sell"
+
+    # Find the most recent qualifying crossover candle.
+    for i in range(len(d)-1,0,-1):
+        r=d.iloc[i]; p=d.iloc[i-1]
+        if bullish:
+            cross=bool(r["EMA9"]>r["EMA21"] and p["EMA9"]<=p["EMA21"])
+            close_ok=bool(r["Close"]>r["EMA9"])
+        else:
+            cross=bool(r["EMA9"]<r["EMA21"] and p["EMA9"]>=p["EMA21"])
+            close_ok=bool(r["Close"]<r["EMA9"])
+        if cross and close_ok:
+            cross_idx=i
+            break
+
+    if cross_idx is None:
+        return None
+
+    # Search for the first valid retest after the crossover.
+    last_i=min(len(d)-2,cross_idx+max(1,int(max_retest_bars)))
+    retest_idx=None
+    for j in range(cross_idx+1,last_i+1):
+        r=d.iloc[j]
+        if bullish:
+            valid=bool(r["Low"]<=r["EMA9"] and r["Close"]>r["EMA9"])
+        else:
+            valid=bool(r["High"]>=r["EMA9"] and r["Close"]<r["EMA9"])
+        if valid:
+            retest_idx=j
+            break
+
+    if retest_idx is None:
+        return None
+
+    # Rule 3: reference candle is the candle immediately BEFORE the retest.
+    reference_idx=retest_idx-1
+    ref=d.iloc[reference_idx]
+    trigger_level=float(ref["High"] if bullish else ref["Low"])
+
+    # Retest candle itself + next N candles are eligible.
+    end_idx=min(len(d)-1,retest_idx+int(confirmation_bars))
+    trigger_idx=None
+    for k in range(retest_idx,end_idx+1):
+        bar=d.iloc[k]
+        if bullish and float(bar["High"])>trigger_level:
+            trigger_idx=k
+            break
+        if bearish and float(bar["Low"])<trigger_level:
+            trigger_idx=k
+            break
+
+    if trigger_idx is None:
+        return None
+
+    # Make sure the trigger has happened by the latest completed candle.
+    if trigger_idx!=len(d)-1:
+        # Historical completed setup remains valid only if the latest bar is
+        # still at/after the trigger; report the current state but tag timing.
+        pass
+
+    r=d.iloc[-1]
+    cross=d.iloc[cross_idx]
+    ret=d.iloc[retest_idx]
+    trig=d.iloc[trigger_idx]
+
+    # Simple quality details, not extra hard gates.
+    ema200_ok=bool(r["EMA200"]<r["Close"]) if bullish else bool(r["EMA200"]>r["Close"])
+    volume_ok=bool(np.isfinite(r["VOL_RATIO"]) and r["VOL_RATIO"]>=1.0)
+    rsi_ok=bool(r["RSI9"]>=50) if bullish else bool(r["RSI9"]<=50)
+    cci_ok=bool(r["CCI20"]>0) if bullish else bool(r["CCI20"]<0)
+
+    score=60
+    reasons=[
+        "Rule 1 passed: crossover candle closed beyond EMA9",
+        "Rule 2 passed: retest touched EMA9 and reclaimed it",
+        "Rule 3 passed: trigger candle broke pre-retest high" if bullish
+        else "Rule 3 passed: trigger candle broke pre-retest low"
+    ]
+    if ema200_ok: score+=10; reasons.append("EMA200 trend aligned")
+    if volume_ok: score+=10; reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
+    if rsi_ok: score+=10; reasons.append(f"RSI9 {r['RSI9']:.1f}")
+    if cci_ok: score+=10; reasons.append(f"CCI20 {r['CCI20']:.1f}")
+
+    return {
+        "Signal":"BUY" if bullish else "SELL",
+        "Setup Score":min(100,score),
+        "Crossover Date":d.index[cross_idx],
+        "Retest Date":d.index[retest_idx],
+        "Trigger Date":d.index[trigger_idx],
+        "Reference Candle High":float(ref["High"]),
+        "Reference Candle Low":float(ref["Low"]),
+        "Trigger Level":trigger_level,
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "RSI9":float(r["RSI9"]),
+        "CCI20":float(r["CCI20"]),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "EMA200 Aligned":ema200_ok,
+        "Volume Confirmed":volume_ok,
+        "RSI Confirmed":rsi_ok,
+        "CCI Confirmed":cci_ok,
+        "Bars Crossover→Retest":retest_idx-cross_idx,
+        "Bars Retest→Trigger":trigger_idx-retest_idx,
+        "Reasons":" | ".join(reasons)
+    }
+
+def _ema921_timeframe_params(timeframe):
+    # yfinance-compatible interval + history.
+    mapping={
+        "Daily":("1d","5y"),
+        "Weekly":("1wk","10y"),
+        "Monthly":("1mo","max"),
+        "5 Minutes":("5m","60d"),
+        "15 Minutes":("15m","60d"),
+        "30 Minutes":("30m","60d"),
+        "1 Hour":("60m","730d"),
+    }
+    return mapping.get(timeframe,("1d","5y"))
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _ema921_download_timeframe(tickers, timeframe):
+    interval,period=_ema921_timeframe_params(timeframe)
+    result={}
+    tickers=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
+
+    for start in range(0,len(tickers),40):
+        batch=tickers[start:start+40]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
+        try:
+            raw=yf.download(
+                tickers=yahoo,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="ticker"
+            )
+        except Exception:
+            continue
+        if raw is None or raw.empty:
+            continue
+
+        if len(batch)==1:
+            x=raw.copy()
+            if isinstance(x.columns,pd.MultiIndex):
+                x.columns=x.columns.get_level_values(0)
+            if "Close" in x.columns:
+                result[batch[0]]=x
+            continue
+
+        if isinstance(raw.columns,pd.MultiIndex):
+            for symbol,yahoo_symbol in zip(batch,yahoo):
+                x=None
+                try:
+                    if yahoo_symbol in raw.columns.get_level_values(0):
+                        x=raw[yahoo_symbol].copy()
+                    elif yahoo_symbol in raw.columns.get_level_values(1):
+                        x=raw.xs(yahoo_symbol,axis=1,level=1).copy()
+                    elif symbol in raw.columns.get_level_values(0):
+                        x=raw[symbol].copy()
+                    elif symbol in raw.columns.get_level_values(1):
+                        x=raw.xs(symbol,axis=1,level=1).copy()
+                except Exception:
+                    x=None
+                if x is not None and not x.empty and "Close" in x.columns:
+                    result[symbol]=x
+    return result
+
 # ============================================================
 # EMA 9/21 THREE-STAGE STRATEGY
 # ============================================================
@@ -14356,6 +14559,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "💎 Early Breakout V3.4 Risk/Reward",
             "⚡ EMA 9/21 Power Breakout",
             "🧩 EMA 9/21 Three-Stage Strategy",
+            "🎯 EMA9/21 Crossover + Retest Rules 1-3",
             "🔄 EMA9/21 Buy-Sell Crossover",
             "🎯 EMA9<EMA21 + RSI-WMA + CCI Setup",
             "🚀 Multibagger Intelligence V2.4",
@@ -14502,6 +14706,131 @@ if module == "🔥 Momentum Catalyst Scanner":
                     out.to_csv(index=False).encode("utf-8"),
                     f"ema921_rsi_wma_cci_{analysis_date.strftime('%Y%m%d')}.csv",
                     "text/csv",key="ema_rsi_cci_download"
+                )
+
+
+    if scan_mode=="🎯 EMA9/21 Crossover + Retest Rules 1-3":
+        st.markdown("---")
+        st.subheader("🎯 EMA9/EMA21 Crossover + Retest Strategy")
+        st.caption(
+            "User-defined rules: crossover candle closes beyond EMA9 → "
+            "retest touches EMA9 and closes back beyond it → retest candle or "
+            "next N candles breaks the high/low of the candle immediately before the retest."
+        )
+
+        c1,c2,c3,c4=st.columns(4)
+        tf=c1.selectbox(
+            "Time frame",
+            ["Daily","Weekly","Monthly","5 Minutes","15 Minutes","30 Minutes","1 Hour"],
+            index=0,key="ema921_rule_tf"
+        )
+        direction=c2.selectbox(
+            "Trade direction",["Buy","Sell","Both"],key="ema921_rule_dir"
+        )
+        max_retest=c3.slider(
+            "Max candles to find retest after crossover",2,15,10,1,
+            key="ema921_rule_retest"
+        )
+        confirm_bars=c4.slider(
+            "Retest + next N candles",0,5,3,1,
+            key="ema921_rule_confirm"
+        )
+
+        c5,c6,c7=st.columns(3)
+        min_score_rule=c5.slider(
+            "Minimum setup score",50,100,70,5,key="ema921_rule_score"
+        )
+        use_ema200=c6.checkbox(
+            "Require EMA200 trend alignment",value=True,key="ema921_rule_ema200"
+        )
+        use_volume=c7.checkbox(
+            "Require volume ≥ 1× SMA20",value=False,key="ema921_rule_vol"
+        )
+
+        st.info(
+            "Rule 3 is interpreted as: the retest candle itself OR any of the "
+            "next N candles must break the HIGH of the candle immediately before "
+            "the retest (BUY), with the exact mirror condition for SELL."
+        )
+
+        if st.button(
+            "🎯 RUN CROSSOVER + RETEST RULES 1-3",
+            key="ema921_rule_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner(f"Scanning {tf} setups..."):
+                data=_ema921_download_timeframe(stocks,tf)
+                for symbol in stocks:
+                    d=data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+
+                        dirs=["Buy","Sell"] if direction=="Both" else [direction]
+                        for dr in dirs:
+                            sig=_ema921_rule_engine(
+                                d,dr,max_retest_bars=max_retest,
+                                confirmation_bars=confirm_bars
+                            )
+                            if sig is None:
+                                continue
+                            if use_ema200 and not sig["EMA200 Aligned"]:
+                                continue
+                            if use_volume and not sig["Volume Confirmed"]:
+                                continue
+                            if sig["Setup Score"]<min_score_rule:
+                                continue
+
+                            sig["Symbol"]=symbol
+                            sig["Stock Name"]=(
+                                _ema_company_name(symbol)
+                                if "_ema_company_name" in globals()
+                                else symbol
+                            )
+                            sig["Time Frame"]=tf
+                            sig["As Of"]=d.index[-1].strftime("%Y-%m-%d %H:%M")
+                            rows.append(sig)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    "No completed Rule 1-3 setups matched the selected time frame/settings."
+                )
+            else:
+                out=out.sort_values(
+                    ["Setup Score","Trigger Date"],
+                    ascending=[False,False]
+                )
+                a,b,c,dcol,e=st.columns(5)
+                a.metric("Setups",len(out))
+                b.metric("BUY",int(out["Signal"].eq("BUY").sum()))
+                c.metric("SELL",int(out["Signal"].eq("SELL").sum()))
+                dcol.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
+                e.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
+
+                cols=[
+                    "As Of","Stock Name","Symbol","Time Frame","Signal","Setup Score",
+                    "Crossover Date","Retest Date","Trigger Date",
+                    "Bars Crossover→Retest","Bars Retest→Trigger",
+                    "Reference Candle High","Reference Candle Low","Trigger Level",
+                    "Close","EMA9","EMA21","EMA200","RSI9","CCI20","Volume Ratio",
+                    "EMA200 Aligned","Volume Confirmed","RSI Confirmed","CCI Confirmed","Reasons"
+                ]
+                cols=[c for c in cols if c in out.columns]
+                st.dataframe(out[cols],width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download EMA9/21 Rule 1-3 Results",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"ema921_rules13_{tf.replace(' ','_').lower()}.csv",
+                    "text/csv",key="ema921_rule_download"
                 )
 
     if scan_mode=="🔄 EMA9/21 Buy-Sell Crossover":
@@ -16115,1468 +16444,573 @@ if module == "🔥 Momentum Catalyst Scanner":
                     )
 
 
-# ============================================================
-# OPTIONS NEXT-DAY ANALYZER V2 — CONFLUENCE ENGINE
-# ============================================================
+elif module == "📊 Options Next-Day Analyzer":
 
-def _opt_wma(series, period=21):
-    s=pd.to_numeric(series, errors="coerce")
-    weights=np.arange(1, period+1, dtype=float)
-    return s.rolling(period,min_periods=period).apply(
-        lambda x: np.dot(x,weights)/weights.sum(), raw=True
-    )
+    st.header("📊 Options Next-Day Analyzer")
 
-def _opt_technical_v2(df):
-    if df is None or df.empty:
-        return {}
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=x.columns.get_level_values(0)
-    req=["Open","High","Low","Close","Volume"]
-    if any(c not in x.columns for c in req):
-        return {}
-    for c in req:
-        x[c]=pd.to_numeric(x[c],errors="coerce")
-    x=x.dropna(subset=req).sort_index()
-    if len(x)<220:
-        return {}
-
-    x["EMA9"]=x["Close"].ewm(span=9,adjust=False).mean()
-    x["EMA21"]=x["Close"].ewm(span=21,adjust=False).mean()
-    x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
-    x["RSI9"]=_options_rsi(x["Close"],9)
-    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
-    x["CCI20"]=_options_cci(x,20)
-    x["ATR14"]=_options_atr(x,14)
-    x["VOL_SMA20"]=x["Volume"].rolling(20,min_periods=20).mean()
-    x["VOL_RATIO"]=x["Volume"]/x["VOL_SMA20"].replace(0,np.nan)
-    x["BB_MID"]=x["Close"].rolling(20,min_periods=20).mean()
-    x["BB_STD"]=x["Close"].rolling(20,min_periods=20).std()
-    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
-    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
-    x["BB_WIDTH"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
-
-    high=x["High"]; low=x["Low"]; close=x["Close"]
-    tr=pd.concat([high-low,(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
-    up=high.diff()
-    down=-low.diff()
-    plus_dm=pd.Series(np.where((up>down)&(up>0),up,0),index=x.index)
-    minus_dm=pd.Series(np.where((down>up)&(down>0),down,0),index=x.index)
-    atr=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    pdi=100*plus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
-    mdi=100*minus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
-    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
-    x["ADX14"]=dx.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    x["PLUS_DI"]=pdi
-    x["MINUS_DI"]=mdi
-
-    r=x.iloc[-1]; p=x.iloc[-2]
-    atr_pct=float(r["ATR14"]/r["Close"]*100) if r["Close"] else np.nan
-    expected_move=1.0*float(r["ATR14"])
-
-    bullish=(
-        r["Close"]>r["EMA200"] and
-        r["EMA9"]>r["EMA21"] and
-        r["EMA21"]>r["EMA200"] and
-        r["RSI9"]>50 and r["RSI9"]>r["RSI9_WMA21"] and
-        r["CCI20"]>0
-    )
-    bearish=(
-        r["Close"]<r["EMA200"] and
-        r["EMA9"]<r["EMA21"] and
-        r["EMA21"]<r["EMA200"] and
-        r["RSI9"]<50 and r["RSI9"]<r["RSI9_WMA21"] and
-        r["CCI20"]<0
-    )
-
-    return {
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "RSI9":float(r["RSI9"]),
-        "RSI9 WMA21":float(r["RSI9_WMA21"]),
-        "CCI20":float(r["CCI20"]),
-        "ATR14":float(r["ATR14"]),
-        "ATR %":atr_pct,
-        "Volume Ratio":float(r["VOL_RATIO"]),
-        "BB Width %":float(r["BB_WIDTH"]),
-        "ADX14":float(r["ADX14"]),
-        "+DI":float(r["PLUS_DI"]),
-        "-DI":float(r["MINUS_DI"]),
-        "Expected Move (1 ATR)":expected_move,
-        "Bullish Technical":bool(bullish),
-        "Bearish Technical":bool(bearish),
-        "EMA9/21 State":(
-            "Bullish" if r["EMA9"]>r["EMA21"]
-            else "Bearish" if r["EMA9"]<r["EMA21"] else "Flat"
-        )
-    }
-
-def _options_next_day_v2_row(row, tech):
-    chg=float(row.get("Chg %",np.nan))
-    oi=float(row.get("OI Chg %",np.nan))
-    pcr=float(row.get("Put Call Ratio (PCR)",np.nan))
-    pcrchg=float(row.get("PCR Change 1D",np.nan))
-    vol=float(row.get("Volume (Times)",np.nan))
-    position=_options_position_classification(chg,oi)
-
-    bull=0.0; bear=0.0; sell=0.0
-    reasons_b=[]; reasons_s=[]
-
-    # Underlying technical: 40 points.
-    if tech:
-        if tech["Bullish Technical"]:
-            bull+=20; reasons_b.append("EMA9>EMA21>EMA200 + RSI/CCI bullish")
-        elif tech["Bearish Technical"]:
-            bear+=20; reasons_s.append("EMA9<EMA21<EMA200 + RSI/CCI bearish")
-
-        if tech["ADX14"]>=20:
-            if tech["+DI"]>tech["-DI"]: bull+=8; reasons_b.append("ADX trend supports bulls")
-            elif tech["-DI"]>tech["+DI"]: bear+=8; reasons_s.append("ADX trend supports bears")
-
-        if tech["Volume Ratio"]>=1.5:
-            if chg>0: bull+=7; reasons_b.append("High volume with positive price")
-            elif chg<0: bear+=7; reasons_s.append("High volume with negative price")
-
-        # Squeeze/expansion logic.
-        if tech["BB Width %"]<6:
-            if chg>0: bull+=3; reasons_b.append("BB compression")
-            elif chg<0: bear+=3; reasons_s.append("BB compression")
-        elif tech["BB Width %"]>10:
-            sell+=3
-
-    # Derivatives positioning: 35 points.
-    if position=="Long Buildup":
-        bull+=20; reasons_b.append("Futures long buildup")
-    elif position=="Short Covering":
-        bull+=12; reasons_b.append("Short covering")
-    elif position=="Short Buildup":
-        bear+=20; reasons_s.append("Futures short buildup")
-    elif position=="Long Unwinding":
-        bear+=12; reasons_s.append("Long unwinding")
-
-    if np.isfinite(pcr):
-        if pcr>=1.10: bull+=8; reasons_b.append("PCR ≥1.10")
-        elif pcr<=0.70: bear+=8; reasons_s.append("PCR ≤0.70")
-
-    if np.isfinite(pcrchg):
-        if pcrchg>0: bull+=min(5,abs(pcrchg)*100); reasons_b.append("PCR improving")
-        elif pcrchg<0: bear+=min(5,abs(pcrchg)*100); reasons_s.append("PCR falling")
-
-    # Participation: 15 points.
-    if np.isfinite(vol):
-        if vol>=2:
-            if chg>0: bull+=7
-            elif chg<0: bear+=7
-        elif vol>=1:
-            if chg>0: bull+=4
-            elif chg<0: bear+=4
-
-    # Selling is only preferred in a low-directional regime.
-    if tech:
-        trendless=(not tech["Bullish Technical"] and not tech["Bearish Technical"])
-        if trendless and 0.85<=pcr<=1.15 if np.isfinite(pcr) else False:
-            sell+=20
-        if tech["ADX14"]<18:
-            sell+=15
-
-    total=max(bull,bear,sell)
-    if total<60:
-        signal="⚪ Avoid / Wait"
-    elif bull>=80 and bull>bear and bull>sell:
-        signal="🟢 Strong Call Candidate"
-    elif bear>=80 and bear>bull and bear>sell:
-        signal="🔴 Strong Put Candidate"
-    elif sell>=65 and sell>bull and sell>bear:
-        signal="🟡 Option Selling Candidate"
-    elif bull>bear and bull>=60:
-        signal="🔵 Bullish Bias"
-    elif bear>bull and bear>=60:
-        signal="🔵 Bearish Bias"
-    else:
-        signal="⚠️ Conflicted"
-
-    return {
-        "Call Score V2":round(min(100,bull),1),
-        "Put Score V2":round(min(100,bear),1),
-        "Selling Score V2":round(min(100,sell),1),
-        "Signal V2":signal,
-        "Call Reasons":" | ".join(reasons_b),
-        "Put Reasons":" | ".join(reasons_s),
-        "Expected Move":tech.get("Expected Move (1 ATR)",np.nan) if tech else np.nan
-    }
-
-
-# ============================================================
-# OPTIONS NEXT-DAY ANALYZER V2 — CONFLUENCE ENGINE
-# ============================================================
-
-def _opt_wma(series, period=21):
-    s=pd.to_numeric(series, errors="coerce")
-    weights=np.arange(1, period+1, dtype=float)
-    return s.rolling(period,min_periods=period).apply(
-        lambda x: np.dot(x,weights)/weights.sum(), raw=True
-    )
-
-def _opt_technical_v2(df):
-    if df is None or df.empty:
-        return {}
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=x.columns.get_level_values(0)
-    req=["Open","High","Low","Close","Volume"]
-    if any(c not in x.columns for c in req):
-        return {}
-    for c in req:
-        x[c]=pd.to_numeric(x[c],errors="coerce")
-    x=x.dropna(subset=req).sort_index()
-    if len(x)<220:
-        return {}
-
-    x["EMA9"]=x["Close"].ewm(span=9,adjust=False).mean()
-    x["EMA21"]=x["Close"].ewm(span=21,adjust=False).mean()
-    x["EMA200"]=x["Close"].ewm(span=200,adjust=False).mean()
-    x["RSI9"]=_options_rsi(x["Close"],9)
-    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
-    x["CCI20"]=_options_cci(x,20)
-    x["ATR14"]=_options_atr(x,14)
-    x["VOL_SMA20"]=x["Volume"].rolling(20,min_periods=20).mean()
-    x["VOL_RATIO"]=x["Volume"]/x["VOL_SMA20"].replace(0,np.nan)
-    x["BB_MID"]=x["Close"].rolling(20,min_periods=20).mean()
-    x["BB_STD"]=x["Close"].rolling(20,min_periods=20).std()
-    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
-    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
-    x["BB_WIDTH"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
-
-    high=x["High"]; low=x["Low"]; close=x["Close"]
-    tr=pd.concat([high-low,(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
-    up=high.diff()
-    down=-low.diff()
-    plus_dm=pd.Series(np.where((up>down)&(up>0),up,0),index=x.index)
-    minus_dm=pd.Series(np.where((down>up)&(down>0),down,0),index=x.index)
-    atr=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    pdi=100*plus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
-    mdi=100*minus_dm.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr.replace(0,np.nan)
-    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
-    x["ADX14"]=dx.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    x["PLUS_DI"]=pdi
-    x["MINUS_DI"]=mdi
-
-    r=x.iloc[-1]; p=x.iloc[-2]
-    atr_pct=float(r["ATR14"]/r["Close"]*100) if r["Close"] else np.nan
-    expected_move=1.0*float(r["ATR14"])
-
-    bullish=(
-        r["Close"]>r["EMA200"] and
-        r["EMA9"]>r["EMA21"] and
-        r["EMA21"]>r["EMA200"] and
-        r["RSI9"]>50 and r["RSI9"]>r["RSI9_WMA21"] and
-        r["CCI20"]>0
-    )
-    bearish=(
-        r["Close"]<r["EMA200"] and
-        r["EMA9"]<r["EMA21"] and
-        r["EMA21"]<r["EMA200"] and
-        r["RSI9"]<50 and r["RSI9"]<r["RSI9_WMA21"] and
-        r["CCI20"]<0
-    )
-
-    return {
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "RSI9":float(r["RSI9"]),
-        "RSI9 WMA21":float(r["RSI9_WMA21"]),
-        "CCI20":float(r["CCI20"]),
-        "ATR14":float(r["ATR14"]),
-        "ATR %":atr_pct,
-        "Volume Ratio":float(r["VOL_RATIO"]),
-        "BB Width %":float(r["BB_WIDTH"]),
-        "ADX14":float(r["ADX14"]),
-        "+DI":float(r["PLUS_DI"]),
-        "-DI":float(r["MINUS_DI"]),
-        "Expected Move (1 ATR)":expected_move,
-        "Bullish Technical":bool(bullish),
-        "Bearish Technical":bool(bearish),
-        "EMA9/21 State":(
-            "Bullish" if r["EMA9"]>r["EMA21"]
-            else "Bearish" if r["EMA9"]<r["EMA21"] else "Flat"
-        )
-    }
-
-def _options_next_day_v2_row(row, tech):
-    chg=float(row.get("Chg %",np.nan))
-    oi=float(row.get("OI Chg %",np.nan))
-    pcr=float(row.get("Put Call Ratio (PCR)",np.nan))
-    pcrchg=float(row.get("PCR Change 1D",np.nan))
-    vol=float(row.get("Volume (Times)",np.nan))
-    position=_options_position_classification(chg,oi)
-
-    bull=0.0; bear=0.0; sell=0.0
-    reasons_b=[]; reasons_s=[]
-
-    # Underlying technical: 40 points.
-    if tech:
-        if tech["Bullish Technical"]:
-            bull+=20; reasons_b.append("EMA9>EMA21>EMA200 + RSI/CCI bullish")
-        elif tech["Bearish Technical"]:
-            bear+=20; reasons_s.append("EMA9<EMA21<EMA200 + RSI/CCI bearish")
-
-        if tech["ADX14"]>=20:
-            if tech["+DI"]>tech["-DI"]: bull+=8; reasons_b.append("ADX trend supports bulls")
-            elif tech["-DI"]>tech["+DI"]: bear+=8; reasons_s.append("ADX trend supports bears")
-
-        if tech["Volume Ratio"]>=1.5:
-            if chg>0: bull+=7; reasons_b.append("High volume with positive price")
-            elif chg<0: bear+=7; reasons_s.append("High volume with negative price")
-
-        # Squeeze/expansion logic.
-        if tech["BB Width %"]<6:
-            if chg>0: bull+=3; reasons_b.append("BB compression")
-            elif chg<0: bear+=3; reasons_s.append("BB compression")
-        elif tech["BB Width %"]>10:
-            sell+=3
-
-    # Derivatives positioning: 35 points.
-    if position=="Long Buildup":
-        bull+=20; reasons_b.append("Futures long buildup")
-    elif position=="Short Covering":
-        bull+=12; reasons_b.append("Short covering")
-    elif position=="Short Buildup":
-        bear+=20; reasons_s.append("Futures short buildup")
-    elif position=="Long Unwinding":
-        bear+=12; reasons_s.append("Long unwinding")
-
-    if np.isfinite(pcr):
-        if pcr>=1.10: bull+=8; reasons_b.append("PCR ≥1.10")
-        elif pcr<=0.70: bear+=8; reasons_s.append("PCR ≤0.70")
-
-    if np.isfinite(pcrchg):
-        if pcrchg>0: bull+=min(5,abs(pcrchg)*100); reasons_b.append("PCR improving")
-        elif pcrchg<0: bear+=min(5,abs(pcrchg)*100); reasons_s.append("PCR falling")
-
-    # Participation: 15 points.
-    if np.isfinite(vol):
-        if vol>=2:
-            if chg>0: bull+=7
-            elif chg<0: bear+=7
-        elif vol>=1:
-            if chg>0: bull+=4
-            elif chg<0: bear+=4
-
-    # Selling is only preferred in a low-directional regime.
-    if tech:
-        trendless=(not tech["Bullish Technical"] and not tech["Bearish Technical"])
-        if trendless and 0.85<=pcr<=1.15 if np.isfinite(pcr) else False:
-            sell+=20
-        if tech["ADX14"]<18:
-            sell+=15
-
-    total=max(bull,bear,sell)
-    if total<60:
-        signal="⚪ Avoid / Wait"
-    elif bull>=80 and bull>bear and bull>sell:
-        signal="🟢 Strong Call Candidate"
-    elif bear>=80 and bear>bull and bear>sell:
-        signal="🔴 Strong Put Candidate"
-    elif sell>=65 and sell>bull and sell>bear:
-        signal="🟡 Option Selling Candidate"
-    elif bull>bear and bull>=60:
-        signal="🔵 Bullish Bias"
-    elif bear>bull and bear>=60:
-        signal="🔵 Bearish Bias"
-    else:
-        signal="⚠️ Conflicted"
-
-    return {
-        "Call Score V2":round(min(100,bull),1),
-        "Put Score V2":round(min(100,bear),1),
-        "Selling Score V2":round(min(100,sell),1),
-        "Signal V2":signal,
-        "Call Reasons":" | ".join(reasons_b),
-        "Put Reasons":" | ".join(reasons_s),
-        "Expected Move":tech.get("Expected Move (1 ATR)",np.nan) if tech else np.nan
-    }
-
-
-# ============================================================
-# OPTIONS NEXT-DAY ANALYZER V3 — MULTI-DAY HISTORY HELPERS
-# ============================================================
-
-
-# ============================================================
-# OPTIONS NEXT-DAY ANALYZER V4 — CURRENT PRICE STRUCTURE
-# ============================================================
-
-def _options_v4_structure(df):
-    if df is None or df.empty:
-        return {}
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=x.columns.get_level_values(0)
-    req=["Open","High","Low","Close","Volume"]
-    if any(c not in x.columns for c in req):
-        return {}
-    for c in req:
-        x[c]=pd.to_numeric(x[c],errors="coerce")
-    x=x.dropna(subset=req).sort_index()
-    if len(x)<220:
-        return {}
-
-    c=x["Close"]; h=x["High"]; l=x["Low"]; v=x["Volume"]
-    x["EMA9"]=c.ewm(span=9,adjust=False).mean()
-    x["EMA21"]=c.ewm(span=21,adjust=False).mean()
-    x["EMA50"]=c.ewm(span=50,adjust=False).mean()
-    x["EMA200"]=c.ewm(span=200,adjust=False).mean()
-    x["SMA20"]=c.rolling(20,min_periods=20).mean()
-    x["VOL20"]=v.rolling(20,min_periods=20).mean()
-    x["ATR14"]=_options_atr(x,14)
-
-    x["BB_MID"]=x["SMA20"]
-    x["BB_STD"]=c.rolling(20,min_periods=20).std()
-    x["BB_UPPER"]=x["BB_MID"]+2*x["BB_STD"]
-    x["BB_LOWER"]=x["BB_MID"]-2*x["BB_STD"]
-    x["BB_WIDTH_PCT"]=(x["BB_UPPER"]-x["BB_LOWER"])/x["BB_MID"].replace(0,np.nan)*100
-    x["BB_WIDTH_AVG20"]=x["BB_WIDTH_PCT"].rolling(20,min_periods=10).mean()
-    x["BB_WIDTH_PCTL120"]=x["BB_WIDTH_PCT"].rolling(120,min_periods=60).rank(pct=True)
-    x["BB_MID_SLOPE5"]=x["BB_MID"].pct_change(5)*100
-    x["RSI9"]=_options_rsi(c,9)
-    x["RSI9_WMA21"]=_opt_wma(x["RSI9"],21)
-    x["CCI20"]=_options_cci(x,20)
-
-    r=x.iloc[-1]; p=x.iloc[-2]
-    ema9,ema21,ema50,ema200=[float(r[k]) for k in ["EMA9","EMA21","EMA50","EMA200"]]
-
-    bb_width=float(r["BB_WIDTH_PCT"]) if pd.notna(r["BB_WIDTH_PCT"]) else np.nan
-    bb_avg=float(r["BB_WIDTH_AVG20"]) if pd.notna(r["BB_WIDTH_AVG20"]) else np.nan
-    bb_pct_rank=float(r["BB_WIDTH_PCTL120"]) if pd.notna(r["BB_WIDTH_PCTL120"]) else np.nan
-
-    # Robust squeeze definition: current band width is in the lowest
-    # 25% of its 120-day distribution. Extreme squeeze = lowest 15%.
-    bb_compressed=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.25)
-    bb_extreme=bool(np.isfinite(bb_pct_rank) and bb_pct_rank<=0.15)
-
-    close=float(r["Close"])
-    atr=float(r["ATR14"])
-    bb_upper=float(r["BB_UPPER"])
-    bb_lower=float(r["BB_LOWER"])
-    bb_mid=float(r["BB_MID"])
-    prev_close=float(p["Close"])
-
-    # Volatility expansion from a compressed state.
-    bb_expanding=bool(
-        np.isfinite(bb_width) and np.isfinite(bb_avg) and
-        bb_width>bb_avg*1.05
-    )
-    bull_bb_break=bool(close>bb_upper and prev_close<=float(p["BB_UPPER"]))
-    bear_bb_break=bool(close<bb_lower and prev_close>=float(p["BB_LOWER"]))
-    vol_ratio=float(r["Volume"]/r["VOL20"]) if pd.notna(r["VOL20"]) and r["VOL20"] else np.nan
-
-    high20=float(h.iloc[-21:-1].max()); low20=float(l.iloc[-21:-1].min())
-    breakout=close>high20
-    breakdown=close<low20
-
-    # Structure: priority is breakout/breakdown, then pullback/consolidation,
-    # then established trend.
-    ema_bull=ema9>ema21>ema50>ema200
-    ema_bear=ema9<ema21<ema50<ema200
-    recent_high=float(h.tail(10).max()); recent_low=float(l.tail(10).min())
-
-    bull_pullback=(
-        ema9>ema21 and close>ema50 and
-        (recent_high-close)/recent_high*100>=1.0 and
-        close>=ema21*0.985
-    )
-    bear_pullback=(
-        ema9<ema21 and close<ema50 and
-        (close-recent_low)/recent_low*100>=1.0 and
-        close<=ema21*1.015
-    )
-
-    range20=(high20-low20)/close*100 if close else np.nan
-    consolidation=bool(np.isfinite(range20) and range20<=8 and
-                        (recent_high-recent_low)<=max(4*atr,close*0.04))
-
-    if bull_bb_break and vol_ratio>=1.25:
-        structure="Bullish BB Breakout"
-    elif bear_bb_break and vol_ratio>=1.25:
-        structure="Bearish BB Breakdown"
-    elif breakout and vol_ratio>=1.5:
-        structure="Bullish Breakout"
-    elif breakdown and vol_ratio>=1.5:
-        structure="Bearish Breakdown"
-    elif bb_extreme and ema9>=ema21 and close>ema200:
-        structure="Bullish Extreme BB Compression"
-    elif bb_extreme and ema9<=ema21 and close<ema200:
-        structure="Bearish Extreme BB Compression"
-    elif bb_compressed and ema9>=ema21 and close>ema200:
-        structure="Bullish BB Compression"
-    elif bb_compressed and ema9<=ema21 and close<ema200:
-        structure="Bearish BB Compression"
-    elif bull_pullback:
-        structure="Bullish Pullback"
-    elif bear_pullback:
-        structure="Bearish Pullback"
-    elif consolidation and ema9>=ema21 and close>ema200:
-        structure="Bullish Consolidation"
-    elif consolidation and ema9<=ema21 and close<ema200:
-        structure="Bearish Consolidation"
-    elif ema_bull:
-        structure="Established Uptrend"
-    elif ema_bear:
-        structure="Established Downtrend"
-    elif close>ema200:
-        structure="Above 200 EMA / Mixed"
-    elif close<ema200:
-        structure="Below 200 EMA / Mixed"
-    else:
-        structure="Range / Mixed"
-
-    return {
-        "Current Structure":structure,
-        "EMA Stack":"9>21>50>200" if ema_bull else "9<21<50<200" if ema_bear else "Mixed",
-        "BB Width %":bb_width,
-        "BB Width / 20D Avg":(bb_width/bb_avg if np.isfinite(bb_avg) and bb_avg else np.nan),
-        "BB Width Percentile 120D":bb_pct_rank*100 if np.isfinite(bb_pct_rank) else np.nan,
-        "BB Compression":bb_compressed,
-        "BB Extreme Compression":bb_extreme,
-        "BB Expanding":bb_expanding,
-        "Bullish BB Breakout":bull_bb_break,
-        "Bearish BB Breakdown":bear_bb_break,
-        "Price vs EMA200 %":(close-ema200)/ema200*100 if ema200 else np.nan,
-        "20D Breakout":breakout,
-        "20D Breakdown":breakdown,
-        "Consolidation":consolidation,
-        "Bullish Pullback":bull_pullback,
-        "Bearish Pullback":bear_pullback,
-        "Near 20D High":close>=high20*0.98,
-        "Near 20D Low":close<=low20*1.02,
-        "RSI9":float(r["RSI9"]),
-        "RSI9 WMA21":float(r["RSI9_WMA21"]),
-        "CCI20":float(r["CCI20"]),
-        "Volume Ratio":vol_ratio,
-        "ATR %":atr/close*100 if close else np.nan,
-        "EMA9":ema9,"EMA21":ema21,"EMA50":ema50,"EMA200":ema200,
-        "Structure Direction":"Bullish" if structure.startswith("Bullish") or "Uptrend" in structure else
-                              "Bearish" if structure.startswith("Bearish") or "Downtrend" in structure else
-                              "Neutral"
-    }
-
-def _options_v3_prepare_history(uploaded_files):
-    frames=[]
-    errors=[]
-    for uf in uploaded_files or []:
-        try:
-            df,meta=_read_options_eod_csv(uf)
-            if df.empty:
-                continue
-            fallback_date=meta.get("Date","")
-            if "Date" not in df.columns:
-                df["Date"]=fallback_date
-            df["Date"]=pd.to_datetime(df["Date"],errors="coerce")
-            if df["Date"].isna().all() and fallback_date:
-                df["Date"]=pd.to_datetime(fallback_date,errors="coerce")
-            df["_File"]=uf.name
-            frames.append(df)
-        except Exception as exc:
-            errors.append(f"{uf.name}: {exc}")
-    if not frames:
-        return pd.DataFrame(),errors
-    hist=pd.concat(frames,ignore_index=True)
-    hist["Symbol"]=hist["Symbol"].astype(str).str.upper().str.strip()
-    hist=hist.dropna(subset=["Symbol"])
-    hist=hist.sort_values(["Symbol","Date","_File"])
-    hist=hist.drop_duplicates(["Symbol","Date"],keep="last")
-    return hist,errors
-
-def _options_v3_symbol_features(g):
-    g=g.sort_values("Date").tail(5).copy()
-    if g.empty:
-        return {}
-    def num(c):
-        return pd.to_numeric(g[c],errors="coerce") if c in g.columns else pd.Series(np.nan,index=g.index)
-    def last(c):
-        s=num(c)
-        return float(s.iloc[-1]) if len(s) and pd.notna(s.iloc[-1]) else np.nan
-    def mean(c):
-        s=num(c).dropna()
-        return float(s.mean()) if len(s) else np.nan
-    def delta(c):
-        s=num(c).dropna()
-        return float(s.iloc[-1]-s.iloc[0]) if len(s)>=2 else np.nan
-
-    daily=num("Chg %"); oi=num("OI Chg %")
-    pcr=num("Put Call Ratio (PCR)")
-    bullish_days=int((daily>0).sum()); bearish_days=int((daily<0).sum())
-
-    lbs=sbs=scs=lus=0
-    for pc,oc in zip(daily,oi):
-        cls=_options_position_classification(pc,oc)
-        lbs+=int(cls=="Long Buildup"); sbs+=int(cls=="Short Buildup")
-        scs+=int(cls=="Short Covering"); lus+=int(cls=="Long Unwinding")
-
-    return {
-        "History Days":len(g),
-        "Latest EOD":g["Date"].iloc[-1],
-        "5D Price Change %":delta("Close"),
-        "Bullish Days":bullish_days,"Bearish Days":bearish_days,
-        "5D OI Chg Change %":delta("OI Chg %"),
-        "Avg OI Chg %":mean("OI Chg %"),
-        "Latest PCR":last("Put Call Ratio (PCR)"),
-        "Avg PCR":mean("Put Call Ratio (PCR)"),
-        "PCR Trend":delta("Put Call Ratio (PCR)"),
-        "Latest PCR Change 1D":last("PCR Change 1D"),
-        "Avg Volume x":mean("Volume (Times)"),
-        "Latest Volume x":last("Volume (Times)"),
-        "Avg Delivery x":mean("Delivery (Times)"),
-        "Long Buildup Days":lbs,
-        "Short Buildup Days":sbs,
-        "Short Covering Days":scs,
-        "Long Unwinding Days":lus,
-    }
-
-def _options_v3_multi_day_score(g,tech):
-    f=_options_v3_symbol_features(g)
-    if not f:
-        return {}
-    call=put=0.0
-    cb=[]; pb=[]
-
-    if f["Bullish Days"]>=3: call+=12; cb.append("3+ bullish days")
-    elif f["Bullish Days"]>=2: call+=8; cb.append("2 bullish days")
-    if f["Bearish Days"]>=3: put+=12; pb.append("3+ bearish days")
-    elif f["Bearish Days"]>=2: put+=8; pb.append("2 bearish days")
-
-    if pd.notna(f["5D Price Change %"]):
-        if f["5D Price Change %"]>=2: call+=8; cb.append(f"5D price +{f['5D Price Change %']:.1f}%")
-        elif f["5D Price Change %"]<=-2: put+=8; pb.append(f"5D price {f['5D Price Change %']:.1f}%")
-
-    if f["Long Buildup Days"]>=2: call+=12; cb.append(f"{f['Long Buildup Days']} long-buildup days")
-    if f["Short Covering Days"]>=2: call+=8; cb.append(f"{f['Short Covering Days']} short-covering days")
-    if f["Short Buildup Days"]>=2: put+=12; pb.append(f"{f['Short Buildup Days']} short-buildup days")
-    if f["Long Unwinding Days"]>=2: put+=8; pb.append(f"{f['Long Unwinding Days']} long-unwinding days")
-
-    if pd.notna(f["Latest PCR"]):
-        if f["Latest PCR"]>=1.10: call+=8; cb.append("PCR ≥1.10")
-        elif f["Latest PCR"]<=0.70: put+=8; pb.append("PCR ≤0.70")
-    if pd.notna(f["PCR Trend"]):
-        if f["PCR Trend"]>0.05: call+=7; cb.append("PCR improving")
-        elif f["PCR Trend"]<-0.05: put+=7; pb.append("PCR declining")
-    if pd.notna(f["Avg PCR"]):
-        if f["Avg PCR"]>=1.05: call+=5
-        elif f["Avg PCR"]<=0.75: put+=5
-
-    if f["Avg Volume x"]>=1.25:
-        if f["5D Price Change %"]>0: call+=7; cb.append("5D participation bullish")
-        elif f["5D Price Change %"]<0: put+=7; pb.append("5D participation bearish")
-    if f["Latest Volume x"]>=1.5:
-        if f["5D Price Change %"]>0: call+=5
-        elif f["5D Price Change %"]<0: put+=5
-    if f["Avg Delivery x"]>=1.25:
-        if f["5D Price Change %"]>0: call+=3
-        elif f["5D Price Change %"]<0: put+=3
-
-    if tech:
-        if tech.get("Bullish Technical"): call+=12; cb.append("Bullish technical regime")
-        if tech.get("Bearish Technical"): put+=12; pb.append("Bearish technical regime")
-        if tech.get("ADX14",0)>=18:
-            if tech.get("+DI",0)>tech.get("-DI",0): call+=5
-            elif tech.get("-DI",0)>tech.get("+DI",0): put+=5
-
-    conflict=abs(call-put)<15
-    if conflict: signal="⚠️ Conflicted"
-    elif call>=80 and call>put: signal="🟢 Strong Call Candidate"
-    elif put>=80 and put>call: signal="🔴 Strong Put Candidate"
-    elif call>=65 and call>put: signal="🔵 Bullish Bias"
-    elif put>=65 and put>call: signal="🔵 Bearish Bias"
-    else: signal="⚪ Avoid / Wait"
-
-    return {
-        **f,
-        "5D Call Score":round(min(100,call),1),
-        "5D Put Score":round(min(100,put),1),
-        "5D Signal":signal,
-        "5D Call Reasons":" | ".join(cb),
-        "5D Put Reasons":" | ".join(pb),
-    }
-
-
-# ============================================================
-# SECTOR ROTATION — 5-DAY HISTORY LAYER
-# ============================================================
-
-def _sector_rotation_read_file(uploaded_file):
-    raw=uploaded_file.getvalue()
-    lines=raw.decode("utf-8-sig",errors="replace").splitlines()
-
-    meta={}
-    for line in lines[:6]:
-        if ":" in line:
-            k,v=line.split(":",1)
-            meta[k.strip()]=v.strip().rstrip(",")
-
-    header_idx=None
-    for i,line in enumerate(lines[:20]):
-        if "Sector Name" in line and "1M Score" in line:
-            header_idx=i
-            break
-    if header_idx is None:
-        raise ValueError(
-            "Sector rotation header not found. Expected columns such as "
-            "'Sector Name', '1M Score', '3M Score', '6M Score'."
-        )
-
-    df=pd.read_csv(StringIO("\n".join(lines[header_idx:])),engine="python")
-    df.columns=[str(c).replace("\xa0"," ").strip() for c in df.columns]
-
-    numeric=[
-        "Stocks","Mcap (Cr.)","ChangeinMcap (Cr.)",
-        "Percentage Change In Mcap","TradeValue (Cr.)",
-        "Avg5DaysTradeValue (Cr.)","Percentage Change in Trade Value",
-        "DeliveryValue (Cr.)","Avg5DaysDeliveryValue (Cr.)",
-        "Percentage Change In Delivery Value","Vwap Up","Vwap Down",
-        "% VwapUp","% VwapDown","1M Score","3M Score","6M Score",
-        "MCap % of Stock's Above RS 0 (55 Days) ",
-        "MCap % of Stock's Above RSI 50","MCap % of Stock's Above SMA20",
-        "MCap % of Stock's Above SMA50","MCap % of Stock's Above SMA100",
-        "Stocks Above RS 0 (55 Days) ","Stocks Above RSI50",
-        "Stocks Above SMA20","Stocks Above SMA50","Stocks Above SMA100"
-    ]
-    for c in numeric:
-        if c in df.columns:
-            df[c]=pd.to_numeric(
-                df[c].astype(str).str.replace(",","",regex=False)
-                .str.replace("%","",regex=False),
-                errors="coerce"
-            )
-
-    if "Date" not in df.columns:
-        df["Date"]=meta.get("Date","")
-    df["Date"]=pd.to_datetime(df["Date"],errors="coerce")
-    if df["Date"].isna().all() and meta.get("Date"):
-        df["Date"]=pd.to_datetime(meta["Date"],errors="coerce")
-
-    if "Sector Name" not in df.columns:
-        raise ValueError("Sector Name column is missing.")
-
-    df["Sector Name"]=df["Sector Name"].astype(str).str.strip()
-    return df.dropna(subset=["Sector Name"]).copy(),meta
-
-def _sector_rotation_prepare_5day(files):
-    frames=[]
-    errors=[]
-    for f in files or []:
-        try:
-            df,meta=_sector_rotation_read_file(f)
-            df["_File"]=f.name
-            frames.append(df)
-        except Exception as exc:
-            errors.append(f"{f.name}: {exc}")
-
-    if not frames:
-        return pd.DataFrame(),errors
-
-    hist=pd.concat(frames,ignore_index=True)
-    hist=hist.dropna(subset=["Date"])
-    hist=hist.sort_values(["Sector Name","Date","_File"])
-    hist=hist.drop_duplicates(["Sector Name","Date"],keep="last")
-    return hist,errors
-
-def _sector_rotation_daily_score(row):
-    vals=[]
-
-    # Breadth / trend.
-    for col in [
-        "MCap % of Stock's Above RSI 50",
-        "MCap % of Stock's Above SMA20",
-        "MCap % of Stock's Above SMA50",
-        "MCap % of Stock's Above SMA100"
-    ]:
-        v=row.get(col,np.nan)
-        if pd.notna(v):
-            vals.append(np.clip(float(v),0,100))
-
-    # Rotation score from 1M/3M/6M sector scores.
-    scores=[]
-    for col in ["1M Score","3M Score","6M Score"]:
-        v=row.get(col,np.nan)
-        if pd.notna(v):
-            scores.append(np.clip(float(v),0,100))
-    if scores:
-        vals.append(float(np.mean(scores)))
-
-    # VWAP breadth.
-    vu=row.get("% VwapUp",np.nan)
-    vd=row.get("% VwapDown",np.nan)
-    if pd.notna(vu) and pd.notna(vd) and (vu+vd)>0:
-        vals.append(float(vu/(vu+vd)*100))
-
-    # Participation relative to 5-day average.
-    tv=row.get("Percentage Change in Trade Value",np.nan)
-    dv=row.get("Percentage Change In Delivery Value",np.nan)
-    if pd.notna(tv):
-        vals.append(float(np.clip(50+tv*0.5,0,100)))
-    if pd.notna(dv):
-        vals.append(float(np.clip(50+dv*0.5,0,100)))
-
-    return float(np.mean(vals)) if vals else np.nan
-
-def _sector_rotation_5day_summary(hist):
-    if hist is None or hist.empty:
-        return pd.DataFrame()
-
-    rows=[]
-    for sec,g in hist.groupby("Sector Name"):
-        g=g.sort_values("Date").tail(5)
-        if g.empty:
-            continue
-
-        daily_scores=g.apply(_sector_rotation_daily_score,axis=1).dropna()
-        latest=g.iloc[-1]
-
-        score=float(daily_scores.iloc[-1]) if len(daily_scores) else np.nan
-        score5=float(daily_scores.iloc[-1]-daily_scores.iloc[0]) if len(daily_scores)>=2 else np.nan
-        avg=float(daily_scores.mean()) if len(daily_scores) else np.nan
-
-        one_m=float(pd.to_numeric(g.get("1M Score",pd.Series(dtype=float)),errors="coerce").iloc[-1]) if "1M Score" in g else np.nan
-        three_m=float(pd.to_numeric(g.get("3M Score",pd.Series(dtype=float)),errors="coerce").iloc[-1]) if "3M Score" in g else np.nan
-        six_m=float(pd.to_numeric(g.get("6M Score",pd.Series(dtype=float)),errors="coerce").iloc[-1]) if "6M Score" in g else np.nan
-
-        breadth=float(pd.to_numeric(
-            g.get("MCap % of Stock's Above RSI 50",pd.Series(dtype=float)),
-            errors="coerce"
-        ).iloc[-1]) if "MCap % of Stock's Above RSI 50" in g else np.nan
-
-        trade=float(pd.to_numeric(
-            g.get("Percentage Change in Trade Value",pd.Series(dtype=float)),
-            errors="coerce"
-        ).iloc[-1]) if "Percentage Change in Trade Value" in g else np.nan
-
-        delivery=float(pd.to_numeric(
-            g.get("Percentage Change In Delivery Value",pd.Series(dtype=float)),
-            errors="coerce"
-        ).iloc[-1]) if "Percentage Change In Delivery Value" in g else np.nan
-
-        vwap_up=float(pd.to_numeric(
-            g.get("% VwapUp",pd.Series(dtype=float)),
-            errors="coerce"
-        ).iloc[-1]) if "% VwapUp" in g else np.nan
-
-        if np.isfinite(score5) and score5>=5 and np.isfinite(score) and score>=65:
-            regime="🚀 Strong Rotation In"
-        elif np.isfinite(score5) and score5>=2:
-            regime="🟢 Improving"
-        elif np.isfinite(score5) and score5<=-5:
-            regime="🔴 Rotation Out"
-        elif np.isfinite(score5) and score5<=-2:
-            regime="🟠 Weakening"
-        else:
-            regime="🟡 Neutral"
-
-        rows.append({
-            "Sector":sec,
-            "Sector Score":round(score,1),
-            "5D Score Change":round(score5,1),
-            "5D Avg Score":round(avg,1),
-            "1M Score":one_m,
-            "3M Score":three_m,
-            "6M Score":six_m,
-            "RSI50 Breadth %":breadth,
-            "Trade Value Change %":trade,
-            "Delivery Value Change %":delivery,
-            "VWAP Up %":vwap_up,
-            "Rotation Regime":regime,
-            "Days":len(g)
-        })
-
-    out=pd.DataFrame(rows)
-    if not out.empty:
-        out=out.sort_values(
-            ["Sector Score","5D Score Change"],
-            ascending=[False,False]
-        )
-    return out
-
-def _sector_rotation_mapping_from_upload(uploaded_file):
-    """Optional mapping CSV: Symbol/Ticker + Sector/Sub-Sector."""
-    if uploaded_file is None:
-        return {}
-    try:
-        df=pd.read_csv(uploaded_file)
-        df.columns=[str(c).strip() for c in df.columns]
-        sym_col=next((c for c in ["Symbol","Ticker","symbol","ticker"] if c in df.columns),None)
-        sec_col=next((c for c in ["Sector","Sub-Sector","Sector Name"] if c in df.columns),None)
-        if not sym_col or not sec_col:
-            return {}
-        return {
-            str(r[sym_col]).upper().strip():str(r[sec_col]).strip()
-            for _,r in df.iterrows()
-            if pd.notna(r[sym_col]) and pd.notna(r[sec_col])
-        }
-    except Exception:
-        return {}
-
-def _sector_rotation_stock_adjustment(sector_name, sector_summary):
-    if not sector_name or sector_summary is None or sector_summary.empty:
-        return 0.0,"⚪ Sector Not Mapped"
-    s=sector_summary[
-        sector_summary["Sector"].astype(str).str.upper()==str(sector_name).upper()
-    ]
-    if s.empty:
-        return 0.0,"⚪ Sector Not Mapped"
-    r=s.iloc[0]
-    score=float(r["Sector Score"])
-    change=float(r["5D Score Change"])
-    regime=str(r["Rotation Regime"])
-
-    adj=0.0
-    if regime=="🚀 Strong Rotation In": adj=10
-    elif regime=="🟢 Improving": adj=6
-    elif regime=="🟡 Neutral": adj=0
-    elif regime=="🟠 Weakening": adj=-5
-    elif regime=="🔴 Rotation Out": adj=-10
-
-    return adj,regime
-
-
-# ============================================================
-# DAILY RSI DIVERGENCE ENGINE
-# Regular = potential reversal/exhaustion
-# Hidden  = potential trend continuation
-# ============================================================
-
-def _rsi_divergence_daily(df, rsi_period=9, pivot_window=3, recent_bars=15):
-    if df is None or df.empty:
-        return {}
-
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=x.columns.get_level_values(0)
-
-    for c in ["High","Low","Close"]:
-        if c not in x.columns:
-            return {}
-        x[c]=pd.to_numeric(x[c],errors="coerce")
-
-    x=x.dropna(subset=["High","Low","Close"]).sort_index()
-    if len(x)<rsi_period+2*pivot_window+10:
-        return {}
-
-    rsi=_options_rsi(x["Close"],rsi_period)
-    n=int(max(1,pivot_window))
-
-    # Confirmed swing pivots. A pivot is only used after the right-hand
-    # bars have completed, so this avoids looking into the future.
-    lows=[]
-    highs=[]
-    for i in range(n,len(x)-n):
-        lo=float(x["Low"].iloc[i])
-        hi=float(x["High"].iloc[i])
-        if lo<=float(x["Low"].iloc[i-n:i+n+1].min()):
-            if np.isfinite(rsi.iloc[i]):
-                lows.append(i)
-        if hi>=float(x["High"].iloc[i-n:i+n+1].max()):
-            if np.isfinite(rsi.iloc[i]):
-                highs.append(i)
-
-    def pair_signal(points, kind):
-        if len(points)<2:
-            return {}
-        i1,i2=points[-2],points[-1]
-        if i2<=i1:
-            return {}
-        bars_ago=len(x)-1-i2
-        if bars_ago>int(recent_bars):
-            return {}
-
-        price1=float(x["Low"].iloc[i1] if kind=="low" else x["High"].iloc[i1])
-        price2=float(x["Low"].iloc[i2] if kind=="low" else x["High"].iloc[i2])
-        rsi1=float(rsi.iloc[i1]); rsi2=float(rsi.iloc[i2])
-
-        price_delta=(price2/price1-1)*100 if price1 else np.nan
-        rsi_delta=rsi2-rsi1
-
-        # Regular and hidden divergence patterns.
-        if kind=="low":
-            if price2<price1 and rsi2>rsi1:
-                dtype="Regular Bullish"
-            elif price2>price1 and rsi2<rsi1:
-                dtype="Hidden Bullish"
-            else:
-                dtype=""
-        else:
-            if price2>price1 and rsi2<rsi1:
-                dtype="Regular Bearish"
-            elif price2<price1 and rsi2>rsi1:
-                dtype="Hidden Bearish"
-            else:
-                dtype=""
-
-        if not dtype:
-            return {}
-
-        # Strength is based on RSI separation and price separation.
-        mag=max(abs(rsi_delta),abs(price_delta)*2)
-        if mag>=10:
-            strength="Strong"
-        elif mag>=5:
-            strength="Medium"
-        else:
-            strength="Weak"
-
-        return {
-            "Type":dtype,
-            "Strength":strength,
-            "Pivot 1 Date":x.index[i1],
-            "Pivot 2 Date":x.index[i2],
-            "Bars Since Pivot":bars_ago,
-            "Price Change %":price_delta,
-            "RSI Change":rsi_delta,
-            "RSI Pivot 1":rsi1,
-            "RSI Pivot 2":rsi2
-        }
-
-    low_sig=pair_signal(lows,"low")
-    high_sig=pair_signal(highs,"high")
-
-    # Pick the most recent confirmed divergence; if dates are identical
-    # prefer strong/medium over weak.
-    candidates=[z for z in [low_sig,high_sig] if z]
-    if not candidates:
-        return {
-            "RSI Divergence":"None",
-            "RSI Divergence Strength":"",
-            "RSI Divergence Type":"",
-            "RSI Divergence Bars Ago":np.nan,
-            "RSI Divergence Price Change %":np.nan,
-            "RSI Divergence RSI Change":np.nan,
-            "Daily RSI Period":int(rsi_period)
-        }
-
-    candidates.sort(key=lambda z:(-z["Bars Since Pivot"], {"Strong":3,"Medium":2,"Weak":1}.get(z["Strength"],0)))
-    sig=candidates[0]
-
-    # A simple alert score for later integration.
-    base={"Strong":15,"Medium":10,"Weak":5}.get(sig["Strength"],0)
-    if sig["Type"]=="Regular Bullish":
-        bias="Bullish Reversal Alert"
-    elif sig["Type"]=="Regular Bearish":
-        bias="Bearish Reversal Alert"
-    elif sig["Type"]=="Hidden Bullish":
-        bias="Bullish Continuation Alert"
-    else:
-        bias="Bearish Continuation Alert"
-
-    return {
-        "RSI Divergence":sig["Type"],
-        "RSI Divergence Strength":sig["Strength"],
-        "RSI Divergence Type":bias,
-        "RSI Divergence Bars Ago":sig["Bars Since Pivot"],
-        "RSI Divergence Price Change %":sig["Price Change %"],
-        "RSI Divergence RSI Change":sig["RSI Change"],
-        "RSI Pivot 1":sig["RSI Pivot 1"],
-        "RSI Pivot 2":sig["RSI Pivot 2"],
-        "Daily RSI Period":int(rsi_period),
-        "RSI Divergence Score":base
-    }
-
-if module == "📊 Options Next-Day Analyzer":
-
-    st.header("📊 Next-Day Options Analyzer V6")
     st.markdown(
         """
-        **Multi-day derivatives + price structure + sector rotation.**
-        Upload 5 consecutive EOD derivatives files and **at least 5 sector-rotation
-        files**. The analyzer uses persistence across days, then checks the latest
-        stock structure and sector regime before ranking Call/Put candidates.
+        Upload your **end-of-day derivatives CSV** after market close.
+        The analyzer combines futures/OI positioning with the latest
+        underlying price/volume data and Fibonacci support/resistance
+        to generate a plan for the **next trading session**.
+
+        **This module is independent of the Minervini SEPA/VCP scanner.**
         """
     )
 
-    st.sidebar.subheader("📊 Next-Day Analyzer V6")
+    st.sidebar.subheader("📊 Options Analyzer Settings")
 
     options_universe=st.sidebar.selectbox(
         "Underlying Universe",
-        ["Nifty 50","Nifty 500","Nifty Midcap 100",
-         "Nifty Smallcap 250","NSE F&O Stocks","Full NSE"],
-        key="options_v6_universe"
+        [
+            "Nifty 50",
+            "Nifty 500",
+            "Nifty Midcap 100",
+            "Nifty Smallcap 250",
+            "NSE F&O Stocks",
+            "Full NSE"
+        ],
+        key="options_universe"
     )
+
     options_period=st.sidebar.selectbox(
-        "Underlying history",["1y","2y","3y","5y"],index=1,key="options_v6_period"
-    )
-    min_history=st.sidebar.slider(
-        "Minimum derivatives history (days)",2,5,5,key="options_v6_min_days"
-    )
-    min_sector_history=st.sidebar.slider(
-        "Minimum sector-rotation history (days)",5,10,5,key="options_v6_sector_days"
+        "Underlying Market Data Period",
+        ["1y","2y","3y","5y"],
+        index=1,
+        key="options_period"
     )
 
-    deriv_files=st.file_uploader(
-        "📤 Upload EOD derivatives files (5 recommended)",
-        type=["csv"],accept_multiple_files=True,key="options_v6_deriv"
+    options_fib_lookback=st.sidebar.select_slider(
+        "Fibonacci lookback (days)",
+        options=[40,50,60,80,100],
+        value=60,
+        key="options_fib_lookback"
     )
 
-    sector_files=st.file_uploader(
-        "🌐 Upload Sector Rotation files (minimum 5)",
-        type=["csv"],accept_multiple_files=True,key="options_v6_sector",
-        help="Upload at least 5 consecutive sector-rotation CSV files. The analyzer will use the latest 5 unique trading dates."
+    min_call_score=st.sidebar.slider(
+        "Strong Call threshold",
+        70,95,80,1,
+        key="options_call_threshold_independent"
     )
 
-    mapping_file=st.file_uploader(
-        "🗂️ Optional Stock → Sector Mapping CSV",
-        type=["csv"],key="options_v6_mapping",
-        help="Columns: Symbol/Ticker and Sector. Use this when your derivatives file does not already contain a Sector column."
+    min_put_score=st.sidebar.slider(
+        "Strong Put threshold",
+        70,95,80,1,
+        key="options_put_threshold_independent"
     )
 
-    call_thr=st.sidebar.slider("Strong Call threshold",65,95,80,1,key="options_v6_call")
-    put_thr=st.sidebar.slider("Strong Put threshold",65,95,80,1,key="options_v6_put")
-    bb_setup_filter=st.sidebar.selectbox(
-        "Bollinger setup filter",
-        [
-            "No BB filter — use as confirmation",
-            "Require BB compression",
-            "Require extreme BB compression",
-            "Require BB breakout / breakdown"
-        ],
-        index=0,key="options_v7_bb_filter",
-        help=(
-            "Compression uses the lowest 25% of the 120-day BB-width distribution; "
-            "extreme uses the lowest 15%. Breakout/breakdown requires price to cross "
-            "the outer band on the latest session."
-        )
+    options_file=st.file_uploader(
+        "📤 Upload EOD derivatives CSV",
+        type=["csv"],
+        key="options_eod_csv_independent"
     )
 
-    st.sidebar.subheader("📐 Daily RSI Divergence")
-    rsi_div_period=st.sidebar.selectbox(
-        "RSI divergence period",[9,14],index=0,key="options_v8_rsi_period"
-    )
-    rsi_pivot=st.sidebar.slider(
-        "RSI pivot window (days)",2,5,3,1,key="options_v8_rsi_pivot"
-    )
-    rsi_recent=st.sidebar.slider(
-        "Divergence recency (days)",5,20,15,1,key="options_v8_rsi_recent"
-    )
-    rsi_div_filter=st.sidebar.selectbox(
-        "Divergence filter",
-        [
-            "Use as confirmation",
-            "Require bullish/hidden bullish",
-            "Require bearish/hidden bearish",
-            "Require any divergence"
-        ],
-        index=0,key="options_v8_rsi_filter"
-    )
-
-    if deriv_files and sector_files:
+    if options_file is not None:
         try:
-            hist,deriv_errors=_options_v3_prepare_history(deriv_files)
-            sector_hist,sector_errors=_sector_rotation_prepare_5day(sector_files)
+            option_df,option_meta=_read_options_eod_csv(options_file)
 
-            for err in deriv_errors+sector_errors:
-                st.warning(err)
+            if option_df.empty:
+                st.warning("The uploaded CSV contains no stock rows.")
+            else:
+                c1,c2,c3,c4=st.columns(4)
 
-            sector_dates=sorted(sector_hist["Date"].dropna().unique()) if not sector_hist.empty else []
-            deriv_dates=sorted(hist["Date"].dropna().unique()) if not hist.empty else []
+                c1.metric("Stocks in CSV",len(option_df))
+                c2.metric(
+                    "EOD Date",
+                    str(option_meta.get(
+                        "Date",
+                        option_df["Date"].iloc[0]
+                        if "Date" in option_df.columns else ""
+                    ))
+                )
+                c3.metric(
+                    "OI Trend",
+                    "Available"
+                    if "OI Trend" in option_df.columns
+                    else "Missing"
+                )
+                c4.metric(
+                    "PCR",
+                    "Available"
+                    if "Put Call Ratio (PCR)" in option_df.columns
+                    else "Missing"
+                )
 
-            if not hist.empty and not sector_hist.empty:
-                latest_deriv=max(deriv_dates)
-                latest_sector=max(sector_dates)
+                st.info(
+                    "The uploaded EOD file is treated as information "
+                    "available after the market close. Signals are "
+                    "intended for the next trading session."
+                )
 
-                c1,c2,c3,c4,c5=st.columns(5)
-                c1.metric("Derivative files",len(deriv_files))
-                c2.metric("Derivative days",len(deriv_dates))
-                c3.metric("Sector files",len(sector_files))
-                c4.metric("Sector days",len(sector_dates))
-                c5.metric("Latest Sector EOD",str(latest_sector)[:10])
-
-                if len(deriv_dates)<min_history:
-                    st.warning(f"Only {len(deriv_dates)} derivative dates found; minimum is {min_history}.")
-                if len(sector_dates)<min_sector_history:
-                    st.warning(f"Only {len(sector_dates)} sector dates found; minimum is {min_sector_history}.")
-
-                sector_summary=_sector_rotation_5day_summary(sector_hist)
-
-                if not sector_summary.empty:
-                    st.subheader("🌐 Sector Rotation — 5-Day View")
-                    sec_cols=[
-                        "Sector","Rotation Regime","Sector Score","5D Score Change",
-                        "1M Score","3M Score","6M Score","RSI50 Breadth %",
-                        "Trade Value Change %","Delivery Value Change %","VWAP Up %"
+                if st.button(
+                    "🔍 ANALYZE FOR NEXT TRADING DAY",
+                    type="primary",
+                    key="options_analyze_independent"
+                ):
+                    # Load only stocks present in the uploaded CSV.
+                    symbols=[
+                        str(s).strip().upper()
+                        for s in option_df["Symbol"].dropna().unique()
                     ]
-                    sec_cols=[c for c in sec_cols if c in sector_summary.columns]
-                    st.dataframe(
-                        sector_summary[sec_cols].head(20),
-                        width="stretch",hide_index=True
-                    )
 
-                # Require at least 5 unique sector dates before enabling the analysis.
-                if len(sector_dates)>=min_sector_history and len(deriv_dates)>=min_history:
-                    if st.button(
-                        "🔍 RUN 5-DAY NEXT-DAY ANALYZER + SECTOR ROTATION",
-                        type="primary",key="options_v6_run"
+                    with st.spinner(
+                        "Analyzing underlying trend, Fibonacci levels "
+                        "and derivatives positioning..."
                     ):
-                        symbols=hist[hist["Date"]==latest_deriv]["Symbol"].dropna().astype(str).str.upper().str.strip().unique().tolist()
+                        options_market=download_batches(
+                            symbols,
+                            options_period,
+                            50
+                        )
 
-                        with st.spinner("Building derivatives persistence, technical structure and sector rotation..."):
-                            market=download_batches(symbols,options_period,50)
+                        option_result=run_options_next_day_analysis(
+                            option_df,
+                            options_market,
+                            options_fib_lookback
+                        )
 
-                        sector_map={}
-                        if "Sector" in hist.columns:
-                            sector_map.update({
-                                str(r["Symbol"]).upper().strip():str(r["Sector"]).strip()
-                                for _,r in hist[["Symbol","Sector"]].dropna().iterrows()
-                            })
-                        sector_map.update(_sector_rotation_mapping_from_upload(mapping_file))
-
-                        rows=[]
-                        for sym in symbols:
-                            g=hist[hist["Symbol"]==sym].sort_values("Date").tail(5)
-                            latest_row=g.iloc[-1]
-                            tech=_opt_technical_v2(market.get(sym))
-                            multi=_options_v3_multi_day_score(g,tech)
-                            if not multi:
-                                continue
-
-                            row={
-                                "Stock":latest_row.get("Stock Name",sym),
-                                "Symbol":sym,
-                                "Sector":sector_map.get(sym,latest_row.get("Sector","")),
-                                "Latest EOD":str(latest_row.get("Date",""))[:10],
-                                "Close":latest_row.get("Close",np.nan),
-                                "Signal":multi["5D Signal"],
-                                "5D Call Score":multi["5D Call Score"],
-                                "5D Put Score":multi["5D Put Score"],
-                                "5D Price Change %":multi["5D Price Change %"],
-                                "Bullish Days":multi["Bullish Days"],
-                                "Bearish Days":multi["Bearish Days"],
-                                "Long Buildup Days":multi["Long Buildup Days"],
-                                "Short Buildup Days":multi["Short Buildup Days"],
-                                "Short Covering Days":multi["Short Covering Days"],
-                                "Long Unwinding Days":multi["Long Unwinding Days"],
-                                "Avg PCR":multi["Avg PCR"],
-                                "Latest PCR":multi["Latest PCR"],
-                                "PCR Trend":multi["PCR Trend"],
-                                "Avg Volume x":multi["Avg Volume x"],
-                                "Latest Volume x":multi["Latest Volume x"],
-                                "Position":_options_position_classification(
-                                    latest_row.get("Chg %",np.nan),
-                                    latest_row.get("OI Chg %",np.nan)
-                                ),
-                                "Latest Future OI Chg %":latest_row.get("OI Chg %",np.nan),
-                                "Latest OI Trend":latest_row.get("OI Trend",""),
-                                "Call OI":latest_row.get("Cumulative Call OI",np.nan),
-                                "Put OI":latest_row.get("Cumulative Put OI",np.nan),
-                                "Call Reasons":multi["5D Call Reasons"],
-                                "Put Reasons":multi["5D Put Reasons"]
-                            }
-
-                            if tech:
-                                row.update({
-                                    "Trend":(
-                                        "Bullish" if tech["Bullish Technical"]
-                                        else "Bearish" if tech["Bearish Technical"]
-                                        else "Neutral"
-                                    ),
-                                    "EMA9":tech["EMA9"],"EMA21":tech["EMA21"],"EMA200":tech["EMA200"],
-                                    "RSI9":tech["RSI9"],"RSI9 WMA21":tech["RSI9 WMA21"],
-                                    "CCI20":tech["CCI20"],"ADX14":tech["ADX14"],
-                                    "+DI":tech["+DI"],"-DI":tech["-DI"],
-                                    "Volume Ratio":tech["Volume Ratio"],"ATR %":tech["ATR %"],
-                                    "Expected Move":tech["Expected Move (1 ATR)"]
-                                })
-
-                            structure=_options_v4_structure(market.get(sym))
-                            if structure:
-                                row.update({
-                                    "Current Structure":structure["Current Structure"],
-                                    "EMA Stack":structure["EMA Stack"],
-                                    "BB Width %":structure["BB Width %"],
-                                    "BB Width / 20D Avg":structure["BB Width / 20D Avg"],
-                                    "BB Width Percentile 120D":structure["BB Width Percentile 120D"],
-                                    "BB Compression":structure["BB Compression"],
-                                    "BB Extreme Compression":structure["BB Extreme Compression"],
-                                    "BB Expanding":structure["BB Expanding"],
-                                    "Bullish BB Breakout":structure["Bullish BB Breakout"],
-                                    "Bearish BB Breakdown":structure["Bearish BB Breakdown"],
-                                    "Structure Direction":structure["Structure Direction"]
-                                })
-
-                            divergence=_rsi_divergence_daily(
-                                market.get(sym),
-                                rsi_period=rsi_div_period,
-                                pivot_window=rsi_pivot,
-                                recent_bars=rsi_recent
+                        # Phase 2: Bollinger Bands + ADX + ATR.
+                        phase2_rows=[]
+                        for _, _orow in option_result.iterrows():
+                            _sym=str(_orow["Symbol"]).strip().upper()
+                            _snap=_options_phase2_snapshot(
+                                options_market.get(_sym)
                             )
-                            if divergence:
-                                row.update(divergence)
+                            phase2_rows.append(_snap)
 
-                            if bb_setup_filter!="No BB filter — use as confirmation":
-                                if not structure:
-                                    continue
-                                if bb_setup_filter=="Require BB compression" and not structure.get("BB Compression",False):
-                                    continue
-                                if bb_setup_filter=="Require extreme BB compression" and not structure.get("BB Extreme Compression",False):
-                                    continue
-                                if bb_setup_filter=="Require BB breakout / breakdown" and not (
-                                    structure.get("Bullish BB Breakout",False) or
-                                    structure.get("Bearish BB Breakdown",False)
-                                ):
-                                    continue
+                        phase2_df=pd.DataFrame(phase2_rows)
 
-                            if rsi_div_filter!="Use as confirmation":
-                                dtype=str(row.get("RSI Divergence","None"))
-                                if rsi_div_filter=="Require bullish/hidden bullish" and dtype not in {"Regular Bullish","Hidden Bullish"}:
-                                    continue
-                                if rsi_div_filter=="Require bearish/hidden bearish" and dtype not in {"Regular Bearish","Hidden Bearish"}:
-                                    continue
-                                if rsi_div_filter=="Require any divergence" and dtype=="None":
-                                    continue
+                        if not phase2_df.empty:
+                            for _col in phase2_df.columns:
+                                option_result[_col]=phase2_df[_col].values
 
-                            sec_name=row["Sector"]
-                            sec_adj,sec_regime=_sector_rotation_stock_adjustment(sec_name,sector_summary)
-                            row["Sector Rotation Regime"]=sec_regime
-                            row["Sector Rotation Adj"]=sec_adj
-                            row["Sector-Adjusted Call Score"]=round(
-                                min(100,float(row["5D Call Score"])+(sec_adj if sec_adj>0 else 0)),1
-                            )
-                            row["Sector-Adjusted Put Score"]=round(
-                                min(100,float(row["5D Put Score"])+(-sec_adj if sec_adj<0 else 0)),1
+                            # Keep the original score intact and create
+                            # a separate Phase-2 technical confluence score.
+                            option_result["Technical Confluence Score"]=(
+                                option_result["BB Bullish Points"].fillna(0)
+                                +option_result["BB Bearish Points"].fillna(0)
+                                +option_result["BB/ADX Selling Points"].fillna(0)
                             )
 
-                            div_type=str(row.get("RSI Divergence","None"))
-                            div_strength=str(row.get("RSI Divergence Strength",""))
-                            div_points={"Strong":8,"Medium":5,"Weak":3}.get(div_strength,0)
-
-                            # Regular divergence is treated as reversal/exhaustion;
-                            # hidden divergence is treated as continuation.
-                            if div_type in {"Regular Bullish","Hidden Bullish"}:
-                                row["Sector-Adjusted Call Score"]=round(
-                                    min(100,float(row["Sector-Adjusted Call Score"])+div_points),1
-                                )
-                            elif div_type in {"Regular Bearish","Hidden Bearish"}:
-                                row["Sector-Adjusted Put Score"]=round(
-                                    min(100,float(row["Sector-Adjusted Put Score"])+div_points),1
-                                )
-
-                            # Final structure + sector-aware signal.
-                            if sec_adj>=0:
-                                call=row["Sector-Adjusted Call Score"]
-                                put=row["Sector-Adjusted Put Score"]
-                            else:
-                                call=row["Sector-Adjusted Call Score"]
-                                put=row["Sector-Adjusted Put Score"]
-
-                            if call>=call_thr and call>put:
-                                final_sig="🟢 Call — Sector Confirmed"
-                            elif put>=put_thr and put>call:
-                                final_sig="🔴 Put — Sector Confirmed"
-                            elif call>=65 and call>put:
-                                final_sig="🔵 Bullish — Wait for Trigger"
-                            elif put>=65 and put>call:
-                                final_sig="🔵 Bearish — Wait for Trigger"
-                            else:
-                                final_sig="⚠️ Conflict / Wait"
-
-                            row["Final Signal"]=final_sig
-                            rows.append(row)
-
-                        result=pd.DataFrame(rows)
-
-                        if result.empty:
-                            st.warning("No candidates could be calculated.")
-                        else:
-                            # Readable dashboard — compact, decision-first.
-                            result["_rank"]=result["Final Signal"].map({
-                                "🟢 Call — Sector Confirmed":6,
-                                "🔴 Put — Sector Confirmed":6,
-                                "🔵 Bullish — Wait for Trigger":4,
-                                "🔵 Bearish — Wait for Trigger":4,
-                                "⚠️ Conflict / Wait":1
-                            }).fillna(0)
-
-                            readable=result.sort_values(
-                                ["_rank","Sector-Adjusted Call Score","Sector-Adjusted Put Score"],
-                                ascending=[False,False,False]
-                            ).drop(columns="_rank")
-
-                            st.subheader("🎯 Next-Day Decision Dashboard")
-                            dashboard_cols=[
-                                "Stock","Symbol","Sector","Final Signal",
-                                "Sector Rotation Regime","Sector Rotation Adj",
-                                "Sector-Adjusted Call Score","Sector-Adjusted Put Score",
-                                "Current Structure","Structure Readiness",
-                                "BB Compression","BB Extreme Compression","BB Expanding",
-                                "BB Width %","BB Width Percentile 120D",
-                                "Position","5D Price Change %","Latest PCR","PCR Trend",
-                                "EMA Stack","RSI9","RSI9 WMA21","CCI20","ADX14",
-                                "RSI Divergence","RSI Divergence Strength",
-                                "RSI Divergence Type","RSI Divergence Bars Ago",
-                                "Volume Ratio","Expected Move"
-                            ]
-                            dashboard_cols=[c for c in dashboard_cols if c in readable.columns]
-                            st.dataframe(
-                                readable[dashboard_cols].head(30),
-                                width="stretch",hide_index=True
+                            # Directional confirmation: only reward BB/ADX
+                            # points that agree with the existing signal.
+                            option_result["Phase 2 Bullish Confirm"]=(
+                                option_result["BB Bullish Points"].fillna(0)
+                            )
+                            option_result["Phase 2 Bearish Confirm"]=(
+                                option_result["BB Bearish Points"].fillna(0)
+                            )
+                            option_result["Phase 2 Selling Confirm"]=(
+                                option_result["BB/ADX Selling Points"].fillna(0)
                             )
 
-                            st.subheader("⭐ Top Candidates")
-                            top=readable.head(10)
-                            for _,rr in top.iterrows():
-                                with st.container(border=True):
-                                    q1,q2,q3,q4=st.columns(4)
-                                    q1.metric("Stock",str(rr.get("Stock","")))
-                                    q2.metric("Signal",str(rr.get("Final Signal","")))
-                                    q3.metric("Structure",str(rr.get("Current Structure","N/A")))
-                                    q4.metric(
-                                        "Call / Put",
-                                        f'{float(rr.get("Sector-Adjusted Call Score",0)):.0f} / '
-                                        f'{float(rr.get("Sector-Adjusted Put Score",0)):.0f}'
-                                    )
-                                    st.write(
-                                        f"**Sector:** {rr.get('Sector','Not mapped')} — "
-                                        f"**Rotation:** {rr.get('Sector Rotation Regime','Not mapped')} | "
-                                        f"**5D price:** {rr.get('5D Price Change %',np.nan):.2f}% | "
-                                        f"**PCR:** {rr.get('Latest PCR',np.nan):.2f}"
-                                    )
-                                    st.write(
-                                        f"**BB:** {rr.get('Current Structure','N/A')} | "
-                                        f"Width percentile: {rr.get('BB Width Percentile 120D',np.nan):.1f}% | "
-                                        f"**EMA:** {rr.get('EMA Stack','N/A')} | "
-                                        f"**RSI9:** {rr.get('RSI9',np.nan):.1f} | "
-                                        f"**Divergence:** {rr.get('RSI Divergence','None')} "
-                                        f"({rr.get('RSI Divergence Strength','')}) | "
-                                        f"**CCI20:** {rr.get('CCI20',np.nan):.1f} | "
-                                        f"**ADX:** {rr.get('ADX14',np.nan):.1f} | "
-                                        f"**Volume:** {rr.get('Volume Ratio',np.nan):.2f}x"
-                                    )
-                                    evidence=(
-                                        rr.get("Call Reasons","")
-                                        if str(rr.get("Final Signal","")).startswith(("🟢","🔵 Bullish"))
-                                        else rr.get("Put Reasons","")
-                                    )
-                                    st.write(f"**Evidence:** {evidence}")
+                            # Add Phase-2 points to the relevant score with
+                            # a conservative cap. This avoids letting one
+                            # indicator dominate the original OI/Fib model.
+                            option_result["Call Score"]=np.minimum(
+                                100,
+                                option_result["Call Score"].astype(float)
+                                +option_result["Phase 2 Bullish Confirm"].astype(float)
+                            ).round(1)
 
-                            st.subheader("🔎 Detailed Analysis")
-                            detail_cols=[
-                                c for c in result.columns if c!="_rank"
-                            ]
-                            st.dataframe(
-                                result[detail_cols],
-                                width="stretch",hide_index=True
+                            option_result["Put Score"]=np.minimum(
+                                100,
+                                option_result["Put Score"].astype(float)
+                                +option_result["Phase 2 Bearish Confirm"].astype(float)
+                            ).round(1)
+
+                            option_result["Selling Score"]=np.minimum(
+                                100,
+                                option_result["Selling Score"].astype(float)
+                                +option_result["Phase 2 Selling Confirm"].astype(float)
+                            ).round(1)
+
+                        # Phase 3: confluence, conflict detection and regime.
+                        phase3_df=pd.DataFrame([
+                            _options_phase3_confluence(r)
+                            for _,r in option_result.iterrows()
+                        ])
+                        if not phase3_df.empty:
+                            for col in phase3_df.columns:
+                                option_result[col]=phase3_df[col].values
+                            option_result["Phase 3 Signal"]=option_result.apply(
+                                _options_phase3_final_signal,axis=1
+                            )
+                            option_result["Final Confluence Score"]=option_result[
+                                ["Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score"]
+                            ].max(axis=1).round(1)
+
+                        # Phase 1: explain the signal and build
+                        # underlying-based entry/SL/target levels.
+                        plan_df=pd.DataFrame(
+                            option_result.apply(
+                                _options_phase1_plan, axis=1
+                            ).tolist()
+                        )
+                        for col in plan_df.columns:
+                            option_result[col]=plan_df[col].values
+
+                        rr=option_result.apply(
+                            lambda r: _options_phase1_rr(
+                                r["Direction"],
+                                r["Underlying Trigger"],
+                                r["Underlying Invalidation"],
+                                r["Underlying Target 1"],
+                                r["Underlying Target 2"]
+                            ),
+                            axis=1
+                        )
+                        option_result["RR Target 1"]=[x[0] for x in rr]
+                        option_result["RR Target 2"]=[x[1] for x in rr]
+                        option_result["Contract Guidance"]=option_result[
+                            "Direction"
+                        ].map(_options_phase1_contract_note)
+
+                    if option_result.empty:
+                        st.warning(
+                            "No candidates could be calculated. "
+                            "Check the CSV symbols and market-data availability."
+                        )
+                    else:
+                        def _options_final_signal(r):
+                            call=float(r["Call Score"])
+                            put=float(r["Put Score"])
+                            sell=float(r["Selling Score"])
+
+                            if (
+                                call>=min_call_score
+                                and call>put
+                                and call>sell
+                            ):
+                                return "🟢 Strong Call Candidate"
+
+                            if (
+                                put>=min_put_score
+                                and put>call
+                                and put>sell
+                            ):
+                                return "🔴 Strong Put Candidate"
+
+                            if sell>=75 and sell>call and sell>put:
+                                return "🟡 Option Selling Candidate"
+
+                            if max(call,put)>=65:
+                                return "🔵 Option Buying Candidate"
+
+                            return "⚪ Avoid / Wait"
+
+                        option_result["Signal"]=option_result.apply(
+                            _options_final_signal,
+                            axis=1
+                        )
+
+                        calls=option_result[
+                            option_result["Signal"]==
+                            "🟢 Strong Call Candidate"
+                        ]
+                        puts=option_result[
+                            option_result["Signal"]==
+                            "🔴 Strong Put Candidate"
+                        ]
+                        sellers=option_result[
+                            option_result["Signal"]==
+                            "🟡 Option Selling Candidate"
+                        ]
+                        buyers=option_result[
+                            option_result["Signal"]==
+                            "🔵 Option Buying Candidate"
+                        ]
+
+                        a,b,c,d=st.columns(4)
+                        a.metric("🟢 Strong Calls",len(calls))
+                        b.metric("🔴 Strong Puts",len(puts))
+                        c.metric("🟡 Selling",len(sellers))
+                        d.metric("🔵 Buying",len(buyers))
+
+                        st.subheader("📈 Next-Day Options Analysis")
+
+                        display_cols=[
+                            "Stock","Symbol","Close","Trend",
+                            "Call Score","Put Score","Selling Score",
+                            "Signal","Position","OI Trend","PCR",
+                            "Future OI Chg %","Fib Support Price",
+                            "Fib Resistance Price"
+                        ]
+                        display_cols=[
+                            c for c in display_cols
+                            if c in option_result.columns
+                        ]
+
+                        st.dataframe(
+                            option_result[display_cols],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        explanation_pool=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(20)
+
+                        st.subheader("📈 Phase 4 — Backtesting & Validation")
+
+                        st.caption(
+                            "Phase 4 validates the technical/regime component using "
+                            "the next trading session. It does not invent option "
+                            "premium or IV data. Full derivatives validation requires "
+                            "historical OI/PCR fields for each past date."
+                        )
+
+                        with st.expander("Run historical validation",expanded=False):
+                            st.info(
+                                "Upload one or more historical OHLC CSV files. "
+                                "Each file should contain Date, Open, High, Low and Close. "
+                                "The filename is used as the stock symbol."
                             )
 
-                            st.download_button(
-                                "⬇️ Download Readable Next-Day Options Report",
-                                readable.to_csv(index=False).encode("utf-8"),
-                                "Options_Next_Day_Analysis_Readable_V6.csv",
-                                "text/csv",
-                                key="options_v6_download"
+                            bt_files=st.file_uploader(
+                                "Historical OHLC CSV files",
+                                type=["csv"],
+                                accept_multiple_files=True,
+                                key="options_phase4_files"
                             )
+
+                            if bt_files:
+                                bt_history={}
+                                for bf in bt_files:
+                                    try:
+                                        bdf=pd.read_csv(bf)
+                                        date_col=next(
+                                            (c for c in bdf.columns
+                                             if str(c).strip().lower() in
+                                             ["date","datetime","timestamp"]),
+                                            None
+                                        )
+                                        if date_col:
+                                            bdf[date_col]=pd.to_datetime(
+                                                bdf[date_col],errors="coerce"
+                                            )
+                                            bdf=bdf.dropna(subset=[date_col]).set_index(date_col).sort_index()
+
+                                        bdf=_options_normalize_columns(bdf)
+
+                                        symbol=Path(bf.name).stem.upper()
+                                        bt_history[symbol]=bdf
+                                    except Exception as exc:
+                                        st.error(
+                                            f"Could not read {bf.name}: {exc}"
+                                        )
+
+                                if bt_history:
+                                    bt_result=_options_phase4_build_backtest(bt_history)
+
+                                    if bt_result.empty:
+                                        st.warning(
+                                            "No historical signals were generated. "
+                                            "Provide sufficiently long daily OHLC "
+                                            "history (preferably 1+ year)."
+                                        )
+                                    else:
+                                        metrics=_options_phase4_metrics(bt_result)
+
+                                        m1,m2,m3,m4,m5=st.columns(5)
+                                        m1.metric("Signals",int(metrics.get("Signals",0)))
+                                        m2.metric("Triggered",int(metrics.get("Triggered",0)))
+                                        m3.metric("Win Rate",f'{metrics.get("Win Rate %",0):.1f}%')
+                                        m4.metric("Avg Return",f'{metrics.get("Average Return %",0):.2f}%')
+                                        m5.metric("Max DD",f'{metrics.get("Max Drawdown %",0):.2f}%')
+
+                                        st.dataframe(
+                                            bt_result,
+                                            width="stretch",
+                                            hide_index=True
+                                        )
+
+                                        csv_data=bt_result.to_csv(index=False).encode("utf-8")
+                                        st.download_button(
+                                            "⬇️ Download Backtest Results",
+                                            csv_data,
+                                            "options_phase4_backtest.csv",
+                                            "text/csv",
+                                            key="options_phase4_download"
+                                        )
+
+                                        st.markdown("**Validation metrics**")
+                                        st.write({
+                                            k:round(v,3) if isinstance(v,(float,np.floating)) and np.isfinite(v) else v
+                                            for k,v in metrics.items()
+                                        })
+
+                        st.subheader("🧠 Phase 3 — Confluence & Market Regime")
+
+                        regime_counts=option_result["Market Regime"].value_counts()
+                        d1,d2,d3,d4=st.columns(4)
+                        d1.metric("🚀 Trending Bull",int(regime_counts.get("🚀 Trending Bull",0)))
+                        d2.metric("🔻 Trending Bear",int(regime_counts.get("🔻 Trending Bear",0)))
+                        d3.metric("🟡 Range / Compression",int(regime_counts.get("🟡 Range / Compression",0)+regime_counts.get("🟡 Weak / Range",0)))
+                        d4.metric("⚠️ Conflicted",int((option_result["Conflict Count"]>=1).sum()))
+                        st.caption("Phase 3 combines derivatives, trend, Bollinger, ADX/DI, Fibonacci and participation. Conflicts reduce directional confidence.")
+
+                        phase3_cols=[
+                            "Stock","Symbol","Market Regime",
+                            "Phase 3 Call Score","Phase 3 Put Score","Phase 3 Selling Score",
+                            "Conflict Status","Phase 3 Signal",
+                            "Bullish Factors","Bearish Factors","Conflict Details"
+                        ]
+                        phase3_cols=[c for c in phase3_cols if c in option_result.columns]
+                        st.dataframe(option_result[phase3_cols].head(50),width="stretch",hide_index=True)
+
+                        st.subheader("📐 Bollinger + ADX + ATR Analysis")
+
+                        if not explanation_pool.empty:
+                            _bb_row=explanation_pool.iloc[0]
+
+                            bc1,bc2,bc3,bc4,bc5=st.columns(5)
+                            bc1.metric(
+                                "BB State",
+                                str(_bb_row.get("BB State","N/A"))
+                            )
+                            bc2.metric(
+                                "BB Width",
+                                f'{float(_bb_row.get("BB Width",np.nan)):.4f}'
+                                if np.isfinite(float(_bb_row.get("BB Width",np.nan)))
+                                else "N/A"
+                            )
+                            bc3.metric(
+                                "ADX(14)",
+                                f'{float(_bb_row.get("ADX14",np.nan)):.1f}'
+                                if np.isfinite(float(_bb_row.get("ADX14",np.nan)))
+                                else "N/A"
+                            )
+                            bc4.metric(
+                                "ATR(14)",
+                                f'{float(_bb_row.get("ATR14",np.nan)):.2f}'
+                                if np.isfinite(float(_bb_row.get("ATR14",np.nan)))
+                                else "N/A"
+                            )
+                            bc5.metric(
+                                "ATR %",
+                                f'{float(_bb_row.get("ATR %",np.nan)):.2f}%'
+                                if np.isfinite(float(_bb_row.get("ATR %",np.nan)))
+                                else "N/A"
+                            )
+
+                            st.caption(
+                                "Phase 2 adds Bollinger Band state, ADX trend "
+                                "strength and ATR volatility confirmation to "
+                                "the existing derivatives + Fibonacci model."
+                            )
+
+                        st.subheader("🔎 Why This Signal?")
+
+                        if not explanation_pool.empty:
+                            selected_symbol=st.selectbox(
+                                "Select candidate",
+                                explanation_pool["Symbol"].tolist(),
+                                key="options_phase1_candidate"
+                            )
+                            selected=explanation_pool[
+                                explanation_pool["Symbol"]==selected_symbol
+                            ].iloc[0]
+
+                            e1,e2,e3,e4=st.columns(4)
+                            e1.metric("Signal",selected["Signal"])
+                            e2.metric("Call Score",f'{selected["Call Score"]:.1f}')
+                            e3.metric("Put Score",f'{selected["Put Score"]:.1f}')
+                            e4.metric("Selling Score",f'{selected["Selling Score"]:.1f}')
+
+                            st.markdown("**Phase 3 confluence**")
+                            st.write(f'**Market regime:** {selected.get("Market Regime","N/A")}')
+                            st.write(f'**Phase 3 signal:** {selected.get("Phase 3 Signal","N/A")}')
+                            st.write(f'**Conflict:** {selected.get("Conflict Status","N/A")}')
+                            if str(selected.get("Conflict Details","None"))!="None":
+                                st.warning(selected.get("Conflict Details",""))
+
+                            st.markdown("**Contributing factors**")
+                            for reason in str(selected["Why Signal"]).split(" | "):
+                                if reason:
+                                    st.write("• "+reason)
+
+                            p1,p2=st.columns(2)
+                            with p1:
+                                st.markdown("**Next-day plan**")
+                                st.write(f'**Direction:** {selected[ "Market Regime","Phase 3 Call Score","Phase 3 Put Score",
+                            "Phase 3 Selling Score","Conflict Status","Phase 3 Signal",
+                            "Direction"]}')
+                                st.write(f'**Preferred:** {selected["Preferred Contract"]}')
+                                if np.isfinite(selected["Underlying Trigger"]):
+                                    st.write(f'**Trigger:** {selected["Underlying Trigger"]:.2f}')
+                                    st.write(f'**Invalidation / SL:** {selected["Underlying Invalidation"]:.2f}')
+                            with p2:
+                                st.markdown("**Targets**")
+                                if np.isfinite(selected["Underlying Target 1"]):
+                                    st.write(f'**Target 1:** {selected["Underlying Target 1"]:.2f}')
+                                if np.isfinite(selected["Underlying Target 2"]):
+                                    st.write(f'**Target 2:** {selected["Underlying Target 2"]:.2f}')
+                                if np.isfinite(selected["RR Target 1"]):
+                                    st.write(f'**R:R to T1:** {selected["RR Target 1"]:.2f}')
+                                if np.isfinite(selected["RR Target 2"]):
+                                    st.write(f'**R:R to T2:** {selected["RR Target 2"]:.2f}')
+
+                            st.caption(selected["Contract Guidance"])
+                            st.warning(
+                                "Phase 1 uses underlying-stock levels. "
+                                "It does not invent option premiums or IV. "
+                                "Use the underlying trigger/invalidation to manage "
+                                "the selected ATM/near-ITM option."
+                            )
+
+                        st.download_button(
+                            "⬇️ Download Next-Day Options Report",
+                            option_result.to_csv(index=False),
+                            "Options_Next_Day_Analysis.csv",
+                            "text/csv",
+                            key="options_download_independent"
+                        )
+
+                        st.subheader("⭐ Strong Candidates")
+
+                        top=option_result[
+                            option_result["Signal"].isin([
+                                "🟢 Strong Call Candidate",
+                                "🔴 Strong Put Candidate",
+                                "🟡 Option Selling Candidate",
+                                "🔵 Option Buying Candidate"
+                            ])
+                        ].head(30)
+
+                        top_cols=[
+                            "Stock","Symbol","Close","Call Score",
+                            "Put Score","Selling Score","Signal",
+                            "Trend","Position","OI Trend","PCR",
+                            "Fib Support Price","Fib Resistance Price"
+                        ]
+                        top_cols=[
+                            c for c in top_cols
+                            if c in top.columns
+                        ]
+
+                        st.dataframe(
+                            top[top_cols],
+                            width="stretch",
+                            hide_index=True
+                        )
+
+                        st.info(
+                            "IV, option premium, bid/ask spread and "
+                            "strike-specific analysis are not included "
+                            "unless those fields are present in your CSV."
+                        )
 
         except Exception as exc:
-            st.error(f"Could not analyze the EOD/sector files: {exc}")
-
+            st.error(
+                f"Could not analyze the uploaded derivatives CSV: {exc}"
+            )
 
 
 elif module == "🏆 Minervini SEPA + VCP Scanner":
