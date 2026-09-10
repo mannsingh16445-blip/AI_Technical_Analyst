@@ -7659,8 +7659,17 @@ def _mcs_get_reliable_benchmark(stocks=None, loaded_data=None, period="2y"):
 
 def _mtf_clean_symbol(symbol):
     s=str(symbol).strip().upper()
-    s=s.replace('NSE:','').replace('.NS','')
-    return ''.join(ch for ch in s if ch.isalnum() or ch in ('_','-'))
+    s=s.replace('NSE:','').replace('BSE:','')
+    # Preserve Yahoo exchange suffixes when supplied explicitly.
+    suffix=''
+    if s.endswith('.NS'):
+        suffix='.NS'
+        s=s[:-3]
+    elif s.endswith('.BO'):
+        suffix='.BO'
+        s=s[:-3]
+    s=''.join(ch for ch in s if ch.isalnum() or ch in ('_','-','&'))
+    return s+suffix
 
 def _mtf_rsi9(close):
     d=close.diff()
@@ -11571,47 +11580,116 @@ def _mcs_trade_plan_v2(symbol, df, benchmark=None, fundamentals=None,
 if module == "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)":
 
     st.header("📈 Multi-Timeframe EMA 9/21/200 + RSI(9) + CCI(20)")
-    st.caption("Monthly → Weekly → Daily trend alignment, using EMA 200 (red), EMA 9 (yellow), EMA 21 (green) and RSI(9).")
+    st.caption("Monthly → Weekly → Daily alignment using EMA 200 (red), EMA 9 (yellow), EMA 21 (green), RSI(9), CCI(20) and volume.")
 
-    c1,c2,c3=st.columns(3)
-    with c1:
-        mtf_universe=st.text_area("NSE symbols", "RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK\nSBIN\nBEL\nHAL\nLT\nBHARTIARTL", height=180)
-    with c2:
-        mtf_min_score=st.slider("Minimum MTF score",0,100,60,5)
-        mtf_stage=st.selectbox("Stage filter",["All","A — Early Setup","B — Confirmed Momentum","C — Strong Momentum","Watch — 3TF Trend Aligned"])
-    with c3:
-        mtf_max=st.number_input("Maximum stocks",1,500,50,10)
-        st.info("Run after market close so the completed Monthly/Weekly/Daily bars are used.")
+    # --------------------------------------------------------
+    # UNIVERSE SELECTION
+    # --------------------------------------------------------
+    st.subheader("📊 Stock Universe")
+    u1,u2,u3=st.columns(3)
+    with u1:
+        mtf_universe_type=st.selectbox(
+            "Select stock universe",
+            [
+                "Manual Symbols",
+                "Nifty 50",
+                "Nifty 500",
+                "NSE F&O Stocks",
+                "Full NSE Equity",
+                "Full BSE Equity",
+                "NSE + BSE Equity"
+            ],
+            key="mtf_universe_type"
+        )
+    with u2:
+        mtf_min_score=st.slider("Minimum MTF score",0,100,60,5,key="mtf_min_score")
+        mtf_stage=st.selectbox("Stage filter",["All","A — Early Setup","B — Confirmed Momentum","C — Strong Momentum","Watch — 3TF Trend Aligned"],key="mtf_stage")
+    with u3:
+        mtf_max=st.number_input("Maximum stocks (0 = entire selected universe)",0,10000,100,25,key="mtf_max")
+        st.info("For Full NSE/BSE, scanning every stock can take a long time because each stock uses Monthly + Weekly + Daily Yahoo data.")
+
+    if mtf_universe_type=="Manual Symbols":
+        mtf_universe=st.text_area(
+            "Enter symbols (one per line or comma separated)",
+            "RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK\nSBIN\nBEL\nHAL\nLT\nBHARTIARTL",
+            height=180,
+            key="mtf_manual_symbols"
+        )
+        syms=_mtf_universe_from_text(mtf_universe)
+        st.caption(f"Manual symbols loaded: **{len(syms)}**")
+    else:
+        syms=[]
+        with st.spinner("Loading selected stock universe..."):
+            try:
+                if mtf_universe_type=="Nifty 50":
+                    syms=list(load_nifty50())
+                elif mtf_universe_type=="Nifty 500":
+                    syms=list(load_nifty500())
+                elif mtf_universe_type=="NSE F&O Stocks":
+                    syms=list(load_fno_stocks())
+                elif mtf_universe_type=="Full NSE Equity":
+                    syms=list(load_nse_equity_universe())
+                    syms=[_mtf_clean_symbol(x) for x in syms]
+                elif mtf_universe_type=="Full BSE Equity":
+                    syms=list(load_bse_equity_universe())
+                elif mtf_universe_type=="NSE + BSE Equity":
+                    nse=list(load_nse_equity_universe())
+                    bse=list(load_bse_equity_universe())
+                    syms=[_mtf_clean_symbol(x) for x in nse]+list(bse)
+            except Exception as exc:
+                st.error(f"Could not load the selected universe: {type(exc).__name__}: {exc}")
+                syms=[]
+
+        # De-duplicate while preserving exchange suffixes.
+        seen=set(); cleaned=[]
+        for x in syms:
+            z=_mtf_clean_symbol(x)
+            if z and z not in seen:
+                seen.add(z); cleaned.append(z)
+        syms=cleaned
+        st.caption(f"**{mtf_universe_type}**: {len(syms):,} symbols loaded")
+
+        if mtf_universe_type=="Full NSE Equity" and not syms:
+            st.warning("Full NSE Equity could not be loaded. NSE's public securities list may be temporarily unavailable.")
+        if mtf_universe_type=="Full BSE Equity" and not syms:
+            st.warning("Full BSE Equity could not be loaded. BSE's public bhavcopy may be temporarily unavailable.")
+
+    if int(mtf_max)>0:
+        syms=syms[:int(mtf_max)]
+
+    st.caption(f"Stocks to scan this run: **{len(syms):,}**")
 
     run_mtf=st.button("🚀 Run Multi-Timeframe Scanner",type="primary",key="run_mtf_scanner")
 
     if run_mtf:
-        syms=_mtf_universe_from_text(mtf_universe)[:int(mtf_max)]
-        rows=[]; failures=[]; pb=st.progress(0); status=st.empty()
-        for i,sym in enumerate(syms,1):
-            status.write(f"Scanning {i}/{len(syms)} — {sym}")
-            try:
-                r=_mtf_analyze_stock(sym)
-                if r is not None:
-                    rows.append(r)
-                else:
-                    failures.append(f"{sym}: insufficient/empty data")
-            except Exception as exc:
-                failures.append(f"{sym}: {type(exc).__name__}: {exc}")
-            pb.progress(i/max(1,len(syms)))
-        pb.empty(); status.empty()
-        if rows:
-            res=pd.DataFrame(rows).sort_values(['MTF Score','RSI9 Daily'],ascending=[False,False])
-            st.session_state['mtf_power_results']=res
-            if failures:
-                with st.expander(f"⚠️ {len(failures)} stocks could not be analysed"):
-                    st.code("\n".join(failures[:50]))
+        if not syms:
+            st.error("No stocks are available in the selected universe.")
         else:
-            st.error("No stocks could be analysed.")
-            st.info("The scanner now uses full available Monthly history because a 200-EMA on Monthly data needs roughly 17+ years of observations. Try liquid, long-listed NSE stocks first and confirm Yahoo Finance access.")
-            if failures:
-                with st.expander("Show scan diagnostics"):
-                    st.code("\n".join(failures[:50]))
+            rows=[]; failures=[]; pb=st.progress(0); status=st.empty()
+            for i,sym in enumerate(syms,1):
+                status.write(f"Scanning {i}/{len(syms)} — {sym}")
+                try:
+                    r=_mtf_analyze_stock(sym)
+                    if r is not None:
+                        rows.append(r)
+                    else:
+                        failures.append(f"{sym}: insufficient/empty Monthly, Weekly or Daily data")
+                except Exception as exc:
+                    failures.append(f"{sym}: {type(exc).__name__}: {exc}")
+                pb.progress(i/max(1,len(syms)))
+            pb.empty(); status.empty()
+            if rows:
+                res=pd.DataFrame(rows).sort_values(['MTF Score','RSI9 Daily'],ascending=[False,False])
+                st.session_state['mtf_power_results']=res
+                st.success(f"Analysed {len(rows):,} stocks successfully; {len(failures):,} could not be analysed.")
+                if failures:
+                    with st.expander(f"⚠️ {len(failures):,} stocks could not be analysed"):
+                        st.code("\n".join(failures[:100]))
+            else:
+                st.error("No stocks could be analysed.")
+                if failures:
+                    with st.expander("Show scan diagnostics"):
+                        st.code("\n".join(failures[:100]))
 
     if 'mtf_power_results' in st.session_state:
         res=st.session_state['mtf_power_results'].copy()
