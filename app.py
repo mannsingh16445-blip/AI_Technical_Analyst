@@ -7684,7 +7684,7 @@ def _mtf_latest(df):
     }
 
 def _mtf_analyze_stock(symbol):
-    specs=[('Monthly','1mo','10y'),('Weekly','1wk','5y'),('Daily','1d','2y')]
+    specs=[('Monthly','1mo','max'),('Weekly','1wk','10y'),('Daily','1d','3y')]
     f={}
     for tf,interval,period in specs:
         x=_mtf_latest(_mtf_download(symbol,interval,period))
@@ -11515,21 +11515,31 @@ if module == "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)":
 
     if run_mtf:
         syms=_mtf_universe_from_text(mtf_universe)[:int(mtf_max)]
-        rows=[]; pb=st.progress(0); status=st.empty()
+        rows=[]; failures=[]; pb=st.progress(0); status=st.empty()
         for i,sym in enumerate(syms,1):
             status.write(f"Scanning {i}/{len(syms)} — {sym}")
             try:
                 r=_mtf_analyze_stock(sym)
-                if r is not None: rows.append(r)
-            except Exception:
-                pass
+                if r is not None:
+                    rows.append(r)
+                else:
+                    failures.append(f"{sym}: insufficient/empty data")
+            except Exception as exc:
+                failures.append(f"{sym}: {type(exc).__name__}: {exc}")
             pb.progress(i/max(1,len(syms)))
         pb.empty(); status.empty()
         if rows:
             res=pd.DataFrame(rows).sort_values(['MTF Score','RSI9 Daily'],ascending=[False,False])
             st.session_state['mtf_power_results']=res
+            if failures:
+                with st.expander(f"⚠️ {len(failures)} stocks could not be analysed"):
+                    st.code("\n".join(failures[:50]))
         else:
-            st.error("No stocks could be analysed. Check symbols/network.")
+            st.error("No stocks could be analysed.")
+            st.info("The scanner now uses full available Monthly history because a 200-EMA on Monthly data needs roughly 17+ years of observations. Try liquid, long-listed NSE stocks first and confirm Yahoo Finance access.")
+            if failures:
+                with st.expander("Show scan diagnostics"):
+                    st.code("\n".join(failures[:50]))
 
     if 'mtf_power_results' in st.session_state:
         res=st.session_state['mtf_power_results'].copy()
