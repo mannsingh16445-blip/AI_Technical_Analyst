@@ -516,71 +516,6 @@ def load_nse_equity_universe():
 
 
 
-def _mcs_normalize_bse_symbol(s):
-    s=str(s).strip().upper().replace(".BO","").replace(".NS","")
-    return s
-
-def _mcs_load_bse_universe(kind="bse"):
-    """Load BSE symbols with a deterministic fallback.
-
-    BSE Equity: use the broadest stock universe already available in the
-    app and convert to .BO. This avoids an empty universe when the generic
-    NSE-equity endpoint is temporarily unavailable.
-
-    BSE 100/200/500: use bundled constituent lists only; never pretend a
-    generic list is an official index constituent list.
-    """
-    names={
-        "bse100":["BSE100","BSE_100","BSE100_LIST"],
-        "bse200":["BSE200","BSE_200","BSE200_LIST"],
-        "bse500":["BSE500","BSE_500","BSE500_LIST"],
-        "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
-    }
-
-    for name in names.get(kind,[]):
-        obj=globals().get(name)
-        if obj:
-            try:
-                vals=[_mcs_normalize_bse_symbol(x) for x in obj]
-                vals=list(dict.fromkeys(x for x in vals if x))
-                if vals:
-                    return vals
-            except Exception:
-                pass
-
-    if kind!="bse":
-        return []
-
-    # Broad fallback: combine every stock universe that is already
-    # supported by the app. Duplicates are removed.
-    pools=[]
-    loaders=[
-        "load_nse_equity_universe",
-        "load_nifty500",
-        "load_nifty_midcap100",
-        "load_nifty_smallcap250",
-        "load_fno_stocks"
-    ]
-    for fname in loaders:
-        fn=globals().get(fname)
-        if callable(fn):
-            try:
-                vals=fn()
-                if vals:
-                    pools.extend(list(vals))
-            except Exception:
-                continue
-
-    vals=[_mcs_normalize_bse_symbol(x) for x in pools]
-    vals=list(dict.fromkeys(x for x in vals if x))
-    return vals
-
-def _mcs_to_bse_tickers(symbols):
-    return [f"{_mcs_normalize_bse_symbol(s)}.BO"
-            for s in symbols if _mcs_normalize_bse_symbol(s)]
-
-
-
 # ============================================================
 # NSE INDEX LOADING HELPERS
 # ============================================================
@@ -1123,6 +1058,39 @@ def resolve_stock_universe(
     return []
 
 
+
+# ============================================================
+# CURRENT NSE F&O MEMBERSHIP NORMALIZATION
+# ============================================================
+
+# Safety layer for fallback/third-party symbol masters. NSE's recent
+# inclusion/exclusion notices are applied here so stale names such as
+# IPCALAB cannot reappear when a primary live contract source is unavailable.
+CURRENT_FNO_EXCLUSIONS = {
+    "ABBOTINDIA","ATUL","BATAINDIA","CANFINHOME","COROMANDEL","CUB",
+    "GNFC","GUJGASLTD","INDIAMART","IPCALAB","LALPATHLAB","METROPOLIS",
+    "NAVINFLUOR","PVRINOX","SUNTV","UBL",
+    "BERGEPAINT","DEEPAKNTR","ESCORTS","MRF","RAMCOCEM","APOLLOTYRE",
+    "JKCEMENT","LTTS","CYIENT","HFCL","NCC","TITAGARH","IGL","IIFL",
+    "IRCTC","HUDCO","PPLPHARMA","TATATECH","TORNTPOWER",
+    "SAMMAANCAP","EXIDEIND","NUVAMA"
+}
+
+CURRENT_FNO_ADDITIONS = {
+    "ADANIPOWER","COCHINSHIP","FORCEMOT","GODFRYPHLP",
+    "HYUNDAI","MOTILALOFS","NAM-INDIA","VMM"
+}
+
+def _normalize_current_fno_symbols(symbols):
+    clean=set()
+    for s in symbols:
+        s=str(s).strip().upper()
+        if s and s not in {"NAN","NONE","NULL"}:
+            clean.add(s)
+    clean -= CURRENT_FNO_EXCLUSIONS
+    clean |= CURRENT_FNO_ADDITIONS
+    return sorted(clean)
+
 # ============================================================
 # LOAD NSE F&O STOCK UNIVERSE
 # ============================================================
@@ -1248,7 +1216,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return symbols
+                    return _normalize_current_fno_symbols(symbols)
 
         except Exception:
             continue
@@ -1341,7 +1309,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return symbols
+                    return _normalize_current_fno_symbols(symbols)
 
         except Exception:
             continue
@@ -1423,7 +1391,7 @@ def load_fno_stocks():
             )
 
             if len(symbols) >= 100:
-                return symbols
+                return _normalize_current_fno_symbols(symbols)
 
     except Exception:
         pass
@@ -1463,13 +1431,7 @@ MCDOWELL-N UPL VEDL IDEA VOLTAS WHIRLPOOL WIPRO ZEEL ZYDUSLIFE
 ADANIPOWER COCHINSHIP HYUNDAI MOTILALOFS NAM-INDIA VMM
 """
 
-    return sorted(
-        set(
-            x.strip().upper()
-            for x in fallback.split()
-            if x.strip()
-        )
-    )
+    return _normalize_current_fno_symbols(fallback.split())
 
 
 # ============================================================
@@ -9517,7 +9479,7 @@ def _mcs_large_universe_download(tickers):
         if s.startswith("^") or " " in s or "DERIVATIVES" in s:
             continue
         # NSE equity symbols can contain &, -, and periods; retain them.
-        if not (s.endswith(".NS") or s.endswith(".BO")):
+        if not s.endswith(".NS"):
             s=s+".NS"
         cleaned.append(s)
 
@@ -9565,8 +9527,7 @@ def _mcs_large_universe_download(tickers):
                     if z is not None and not z.empty and "Close" in z.columns:
                         z=z.dropna(subset=["Close"])
                         if len(z)>=60:
-                            key=(yahoo_symbol[:-3] if yahoo_symbol.endswith(".NS") else yahoo_symbol)
-                        result[key]=z
+                            result[yahoo_symbol.removesuffix(".NS")]=z
                 except Exception:
                     continue
 
@@ -9580,7 +9541,7 @@ def _kratter_download_batches(tickers, batch_size=40):
 
     for start in range(0,len(ticker_list),batch_size):
         batch=ticker_list[start:start+batch_size]
-        yahoo=[s if s.endswith(".NS") or s.endswith(".BO") or s.startswith("^") else s+".NS" for s in batch]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
         try:
             d=yf.download(
                 tickers=yahoo,
@@ -10772,6 +10733,95 @@ def _mcs_early_breakout_v34(symbol, df, benchmark=None, fundamentals=None):
         "Trade Quality Reasons V3.4":" | ".join(quality_reasons)
     })
     return result
+
+
+# ============================================================
+# MULTIBAGGER INTELLIGENCE V2.4 — SECTOR ROTATION + CATALYST
+# ============================================================
+
+def _mbv24_norm_cols(df):
+    x=df.copy()
+    x.columns=[str(c).replace("\xa0"," ").strip() for c in x.columns]
+    return x
+
+def _mbv24_score_linear(s,lo,hi):
+    s=pd.to_numeric(s,errors="coerce")
+    return ((s-lo)/(hi-lo)*100).clip(0,100)
+
+def _mbv24_sector_rotation(stock_data,sector_map,benchmark):
+    if not sector_map or benchmark is None or benchmark.empty:
+        return {}
+    b=_mcs_prepare(benchmark)
+    if b.empty:
+        return {}
+    periods={"3M":63,"6M":126,"12M":252}
+    bench={}
+    for lab,n in periods.items():
+        bench[lab]=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-1-n])-1)*100 if len(b)>n else np.nan
+    groups={}
+    for symbol,d in stock_data.items():
+        sector=sector_map.get(str(symbol).upper().strip())
+        if not sector or d is None or d.empty:
+            continue
+        try:
+            z=_mcs_prepare(d)
+            for lab,n in periods.items():
+                if len(z)>n:
+                    ret=(float(z["Close"].iloc[-1])/float(z["Close"].iloc[-1-n])-1)*100
+                    groups.setdefault(sector,{}).setdefault(lab,[]).append(ret)
+        except Exception:
+            continue
+    out={}
+    for sector,vals in groups.items():
+        item={"Sector":sector}
+        rs=[]
+        for lab in periods:
+            arr=vals.get(lab,[])
+            sr=float(np.nanmean(arr)) if arr else np.nan
+            rel=sr-bench[lab] if np.isfinite(sr) and np.isfinite(bench[lab]) else np.nan
+            item[f"Sector {lab} Return %"]=sr
+            item[f"Sector {lab} RS %"]=rel
+            if np.isfinite(rel): rs.append(rel)
+        item["Sector Rotation Score"]=round(max(0,min(100,50+2*np.nanmean(rs))),1) if rs else np.nan
+        out[sector]=item
+    return out
+
+def _mbv24_catalyst_score(row):
+    def n(k):
+        try: return float(row.get(k,np.nan))
+        except Exception: return np.nan
+    vals=[]
+    for k in ["Catalyst Score","Technology Exposure"]:
+        v=n(k)
+        if np.isfinite(v): vals.append(max(0,min(100,v)))
+    for k,lo,hi in [("Order Book Growth %",5,40),("Capex Growth %",5,40),("Earnings Acceleration %",5,30)]:
+        v=n(k)
+        if np.isfinite(v): vals.append(float(_mbv24_score_linear(pd.Series([v]),lo,hi).iloc[0]))
+    f=n("Catalyst Freshness Days")
+    if np.isfinite(f): vals.append(100 if f<=30 else (75 if f<=90 else (50 if f<=180 else 25)))
+    return round(float(np.nanmean(vals)),1) if vals else np.nan
+
+def _mbv24_final_score(discovery,sustain,rotation,catalyst,timing):
+    parts=[]; weights=[]
+    for v,w in [(discovery,.40),(sustain,.25),(rotation,.15),(catalyst,.10),(timing,.10)]:
+        if np.isfinite(v):
+            parts.append(v); weights.append(w)
+    return round(float(np.average(parts,weights=weights)),1) if parts else np.nan
+
+def _mbv24_classify(discovery,sustain,rotation,catalyst,timing,risk,rr):
+    why_now=np.isfinite(rotation) and rotation>=65 and np.isfinite(catalyst) and catalyst>=65
+    strong=discovery>=78 and sustain>=70
+    if strong and why_now and np.isfinite(timing) and timing>=75 and (not np.isfinite(risk) or risk<=5) and (not np.isfinite(rr) or rr>=2):
+        return "💎 High Conviction"
+    if strong and why_now and np.isfinite(timing) and timing>=55:
+        return "🚀 Emerging Multibagger"
+    if strong and why_now:
+        return "🔥 Catalyst + Sector Discovery"
+    if strong:
+        return "🟡 Fundamental Discovery"
+    if np.isfinite(timing) and timing>=75:
+        return "🟢 Technical Candidate"
+    return "🔵 Watch"
 
 def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
     """V3.2 separates breakout probability from trade quality.
@@ -13289,12 +13339,7 @@ elif module == "📚 Kratter Momentum Scanner":
         "Nifty Midcap 100":"midcap100",
         "Nifty Smallcap 250":"smallcap250",
         "F&O Stocks":"fno",
-        "NSE Equity":"nse",
-        "BSE 100":"bse100",
-        "BSE 200":"bse200",
-        "BSE 500":"bse500",
-        "BSE Equity":"bse",
-        "NSE + BSE Combined":"nse_bse"
+        "NSE Equity":"nse"
     }
 
     selected_universe=st.selectbox(
@@ -13317,12 +13362,6 @@ elif module == "📚 Kratter Momentum Scanner":
             stocks=load_nifty_smallcap250()
         elif universe_key=="fno":
             stocks=load_fno_stocks()
-        elif universe_key in ("bse100","bse200","bse500","bse"):
-            stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(universe_key))
-        elif universe_key=="nse_bse":
-            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(
-                _mcs_load_bse_universe("bse")
-            )
         else:
             stocks=load_nse_equity_universe()
     except Exception:
@@ -13512,15 +13551,295 @@ elif module == "📚 Kratter Momentum Scanner":
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
-el
+# ============================================================
+# EMA 9/21/200 POWER BREAKOUT SCANNER
+# ============================================================
+
+
+# ============================================================
+# EMA9 / EMA21 BUY-SELL CROSSOVER SIGNAL
+# ============================================================
+
+
+# ============================================================
+# EMA9 < EMA21 > EMA200 + RSI9/WMA21 + CCI(20) RECOVERY SETUP
+# ============================================================
 
 def _wma(series, period):
-    """Linear weighted moving average."""
-    p=int(period)
-    weights=np.arange(1,p+1,dtype=float)
-    return series.rolling(p,min_periods=p).apply(
-        lambda x: float(np.dot(x,weights)/weights.sum()), raw=True
+    weights=np.arange(1,period+1,dtype=float)
+    return series.rolling(period,min_periods=period).apply(
+        lambda x: np.dot(x,weights)/weights.sum(), raw=True
     )
+
+def _ema921_rsi_cci_setup(symbol, df,
+                          rsi_min=50.0,
+                          cci_target=100.0,
+                          cci_lookback=3,
+                          ema_gap_max_pct=2.0,
+                          require_gap_tightening=True,
+                          require_wma_rising=True,
+                          cci_mode="Toward +100",
+                          volume_threshold=1.0,
+                          require_volume=True):
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+
+    # RSI(9) on price, then WMA(21) of RSI(9), matching the chart concept.
+    d["RSI9_WMA21"]=_wma(d["RSI9"],21)
+    d["RSI9_WMA21_SLOPE5"]=(d["RSI9_WMA21"]/d["RSI9_WMA21"].shift(5)-1)*100
+    d["EMA_GAP_PCT"]=(d["EMA21"]-d["EMA9"])/d["EMA21"]*100
+    d["EMA_GAP_CHANGE"] = d["EMA_GAP_PCT"].diff()
+    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
+
+    r=d.iloc[-1]
+    p=d.iloc[-2]
+
+    req=[
+        r["EMA9"],r["EMA21"],r["EMA200"],
+        r["RSI9"],r["RSI9_WMA21"],r["CCI20"]
+    ]
+    if not all(np.isfinite(v) for v in req):
+        return None
+
+    # Core price structure requested by the user:
+    # EMA9 is still below EMA21 (pullback/early-turn structure)
+    # while both remain above the long-term EMA200 regime.
+    trend_structure=bool(
+        r["EMA9"]<r["EMA21"] and
+        r["EMA9"]>r["EMA200"] and
+        r["EMA21"]>r["EMA200"]
+    )
+    if not trend_structure:
+        return None
+
+    # EMA9 must be close to EMA21, indicating an early-turn setup rather than
+    # a deep pullback. Measure the gap as a percentage of EMA21.
+    ema_gap_pct=(r["EMA21"]-r["EMA9"])/r["EMA21"]*100
+    if not np.isfinite(ema_gap_pct) or ema_gap_pct>ema_gap_max_pct:
+        return None
+
+    # RSI9 crosses above WMA21 today and RSI is already above 50.
+    rsi_cross=bool(
+        r["RSI9"]>r["RSI9_WMA21"] and
+        p["RSI9"]<=p["RSI9_WMA21"] and
+        r["RSI9"]>rsi_min
+    )
+    if not rsi_cross:
+        return None
+
+    # CCI momentum: rising for several sessions. We support two chart-useful
+    # modes: (1) early recovery toward +100, or (2) fresh bullish break of +100.
+    lb=max(1,int(cci_lookback))
+    cci_vals=d["CCI20"].iloc[-(lb+1):]
+    cci_rising=bool(
+        len(cci_vals)==lb+1 and
+        (cci_vals.diff().iloc[1:]>0).all()
+    )
+    cci_current=float(r["CCI20"])
+    cci_prev=float(p["CCI20"])
+
+    if cci_mode=="Toward +100":
+        cci_condition=bool(cci_rising and 0 < cci_current < cci_target)
+    else:
+        cci_condition=bool(
+            cci_rising and
+            cci_current >= cci_target and
+            cci_prev < cci_target
+        )
+    if not cci_condition:
+        return None
+
+    # The chart suggests the signal is strongest when EMA9 is compressed
+    # beneath EMA21 and that gap is narrowing toward a bullish turn.
+    gap_tightening=bool(r["EMA_GAP_CHANGE"]<=0)
+    if require_gap_tightening and not gap_tightening:
+        return None
+
+    # RSI-WMA recovery is stronger when the WMA itself is no longer falling.
+    wma_rising=bool(
+        not require_wma_rising or
+        (np.isfinite(r["RSI9_WMA21_SLOPE5"]) and r["RSI9_WMA21_SLOPE5"]>=0)
+    )
+    if not wma_rising:
+        return None
+
+    volume_ok=(
+        np.isfinite(r["VOL_RATIO"]) and
+        r["VOL_RATIO"]>=volume_threshold
+    )
+
+    # Directional volume support: recent positive closes should carry at least
+    # as much volume as recent negative closes. This matches the visual pattern
+    # of green volume expanding as price begins to turn upward.
+    recent_up_volume=False
+    if len(d)>=4 and "Volume" in d.columns:
+        recent=d.iloc[-3:]
+        price_change=recent["Close"].diff()
+        up_days=recent[price_change>0]
+        recent_up_volume=(
+            len(up_days)>0 and
+            float(up_days["Volume"].mean())>=float(recent["Volume"].mean())
+        )
+
+    volume_support=bool(volume_ok and (recent_up_volume or r["Volume"]>=d["Volume"].iloc[-5:].mean()))
+    if require_volume and not volume_support:
+        return None
+
+    # Score is a quality measure; core conditions above are mandatory.
+    score=60
+    reasons=[
+        "EMA9 < EMA21 and both above EMA200",
+        f"EMA9 is {ema_gap_pct:.2f}% below EMA21",
+        f"RSI9 {r['RSI9']:.1f} crossed above RSI WMA21 {r['RSI9_WMA21']:.1f}",
+        f"CCI20 rising ({r['CCI20']:.1f})"
+    ]
+    if gap_tightening:
+        score+=10
+        reasons.append("EMA9-EMA21 gap tightening")
+    if wma_rising:
+        score+=5
+        reasons.append("RSI WMA21 rising")
+    if r["EMA200_SLOPE10"]>0:
+        score+=5
+        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%")
+    if volume_support:
+        score+=20
+        reasons.append(f"Volume support {r['VOL_RATIO']:.2f}x SMA20")
+    elif volume_ok:
+        score+=10
+        reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
+
+    if r["EMA9_ANGLE5"]>0:
+        score+=10
+        reasons.append(f"EMA9 angle {r['EMA9_ANGLE5']:.1f}°")
+    if r["EMA21_ANGLE10"]>0:
+        score+=10
+        reasons.append(f"EMA21 angle {r['EMA21_ANGLE10']:.1f}°")
+
+    return {
+        "Symbol":symbol,
+        "Signal":"BUY",
+        "Setup Score":int(min(score,100)),
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
+        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
+        "RSI9":float(r["RSI9"]),
+        "RSI9 WMA21":float(r["RSI9_WMA21"]),
+        "RSI9 Cross Above WMA21":True,
+        "CCI20":cci_current,
+        "CCI Rising":cci_rising,
+        "CCI Distance to +100":float(cci_target-cci_current),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "Volume Support":bool(volume_support),
+        "EMA9-EMA21 Gap %":float(ema_gap_pct),
+        "EMA Gap Tightening":bool(gap_tightening),
+        "RSI WMA21 Rising":bool(wma_rising),
+        "RSI WMA21 Slope 5D %":float(r["RSI9_WMA21_SLOPE5"]),
+        "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
+        "Below EMA21 %":float(ema21_distance),
+        "Reasons":" | ".join(reasons)
+    }
+
+def _ema921_cross_signal(symbol, df, direction="Both",
+                         angle_threshold=40.0,
+                         rsi_buy=55.0, rsi_sell=45.0,
+                         cci_threshold=100.0,
+                         volume_threshold=1.5):
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+
+    r=d.iloc[-1]
+    p=d.iloc[-2]
+
+    bull_cross=bool(r["EMA9"]>r["EMA21"] and p["EMA9"]<=p["EMA21"])
+    bear_cross=bool(r["EMA9"]<r["EMA21"] and p["EMA9"]>=p["EMA21"])
+
+    if direction=="Buy" and not bull_cross:
+        return None
+    if direction=="Sell" and not bear_cross:
+        return None
+    if direction=="Both" and not (bull_cross or bear_cross):
+        return None
+
+    is_buy=bull_cross
+    is_sell=bear_cross
+
+    # Long-term trend context remains visible, but the trade trigger is
+    # specifically the EMA9/EMA21 crossover requested by the user.
+    ema200_ok=(r["Close"]>=r["EMA200"]) if is_buy else (
+        r["Close"]<=r["EMA200"] if is_sell else True
+    )
+
+    angle_ok=(
+        r["EMA9_ANGLE5"]>=angle_threshold and
+        r["EMA21_ANGLE10"]>=angle_threshold
+    ) if is_buy else (
+        r["EMA9_ANGLE5"]<=-angle_threshold and
+        r["EMA21_ANGLE10"]<=-angle_threshold
+    )
+
+    rsi_ok=(r["RSI9"]>=rsi_buy and r["RSI9"]>p["RSI9"]) if is_buy else (
+        r["RSI9"]<=rsi_sell and r["RSI9"]<p["RSI9"]
+    )
+
+    cci_ok=(r["CCI20"]>=cci_threshold) if is_buy else (
+        r["CCI20"]<=-cci_threshold
+    )
+
+    volume_ok=(
+        np.isfinite(r["VOL_RATIO"]) and
+        r["VOL_RATIO"]>=volume_threshold
+    )
+
+    # A confirmation score, while keeping the raw crossover as the trigger.
+    score=40  # crossover itself
+    reasons=[("BUY" if is_buy else "SELL") + " EMA9/EMA21 crossover"]
+
+    if ema200_ok:
+        score+=15
+        reasons.append("EMA200 trend context confirmed")
+    if angle_ok:
+        score+=15
+        reasons.append(
+            f"EMA9 {r['EMA9_ANGLE5']:.1f}° / EMA21 {r['EMA21_ANGLE10']:.1f}°"
+        )
+    if rsi_ok:
+        score+=10
+        reasons.append(f"RSI9 {r['RSI9']:.1f}")
+    if cci_ok:
+        score+=10
+        reasons.append(f"CCI20 {r['CCI20']:.0f}")
+    if volume_ok:
+        score+=10
+        reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
+
+    score=min(100,score)
+
+    return {
+        "Symbol":symbol,
+        "Signal":"BUY" if is_buy else "SELL",
+        "Power Score":score,
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
+        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
+        "RSI9":float(r["RSI9"]),
+        "CCI20":float(r["CCI20"]),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "EMA200 Context":bool(ema200_ok),
+        "Angle Confirmation":bool(angle_ok),
+        "RSI Confirmation":bool(rsi_ok),
+        "CCI Confirmation":bool(cci_ok),
+        "Volume Confirmation":bool(volume_ok),
+        "Reasons":" | ".join(reasons)
+    }
 
 def _ema_power_rsi(close, period=9):
     delta=close.diff()
@@ -13711,7 +14030,6 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
 
     return {
         "Symbol":symbol,
-        "Stock Name":_ema_company_name(symbol),
         "Power Score":score,
         "Rating":rating,
         "Close":float(r["Close"]),
@@ -13738,14 +14056,216 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _ema_company_name(symbol):
-    """Best-effort company name lookup for NSE/BSE signal output."""
+    """Best-effort company name lookup for signal output."""
     s=str(symbol).strip().upper()
-    yahoo = s if s.endswith(".NS") or s.endswith(".BO") else f"{s}.NS"
     try:
-        info=yf.Ticker(yahoo).info
+        info=yf.Ticker(f"{s}.NS").info
         return info.get("shortName") or info.get("longName") or s
     except Exception:
         return s
+
+
+# ============================================================
+# EMA9/21 CROSSOVER + RETEST + BREAKOUT RULE ENGINE
+# User-defined Rules 1–3
+# ============================================================
+
+def _ema921_rule_engine(df, direction="Buy", max_retest_bars=10, confirmation_bars=3):
+    """
+    Bullish rules:
+      1) EMA9 crosses above EMA21; crossover candle closes above EMA9.
+      2) Later retest candle: Low <= EMA9 and Close > EMA9.
+      3) Retest candle or next 1..N bars breaks the HIGH of the candle
+         immediately before the retest candle.
+
+    Bearish mirror:
+      1) EMA9 crosses below EMA21; crossover candle closes below EMA9.
+      2) Retest candle: High >= EMA9 and Close < EMA9.
+      3) Retest candle or next 1..N bars breaks the LOW of the candle
+         immediately before the retest candle.
+
+    The function evaluates the latest completed setup, avoiding future data
+    beyond the specified confirmation window.
+    """
+    d=_ema_power_prepare(df)
+    if len(d)<220:
+        return None
+
+    # Use a compact copy with clean numeric OHLC.
+    d=d.dropna(subset=["Open","High","Low","Close","EMA9","EMA21"]).copy()
+
+    cross_idx=None
+    bullish=direction=="Buy"
+    bearish=direction=="Sell"
+
+    # Find the most recent qualifying crossover candle.
+    for i in range(len(d)-1,0,-1):
+        r=d.iloc[i]; p=d.iloc[i-1]
+        if bullish:
+            cross=bool(r["EMA9"]>r["EMA21"] and p["EMA9"]<=p["EMA21"])
+            close_ok=bool(r["Close"]>r["EMA9"])
+        else:
+            cross=bool(r["EMA9"]<r["EMA21"] and p["EMA9"]>=p["EMA21"])
+            close_ok=bool(r["Close"]<r["EMA9"])
+        if cross and close_ok:
+            cross_idx=i
+            break
+
+    if cross_idx is None:
+        return None
+
+    # Search for the first valid retest after the crossover.
+    last_i=min(len(d)-2,cross_idx+max(1,int(max_retest_bars)))
+    retest_idx=None
+    for j in range(cross_idx+1,last_i+1):
+        r=d.iloc[j]
+        if bullish:
+            valid=bool(r["Low"]<=r["EMA9"] and r["Close"]>r["EMA9"])
+        else:
+            valid=bool(r["High"]>=r["EMA9"] and r["Close"]<r["EMA9"])
+        if valid:
+            retest_idx=j
+            break
+
+    if retest_idx is None:
+        return None
+
+    # Rule 3: reference candle is the candle immediately BEFORE the retest.
+    reference_idx=retest_idx-1
+    ref=d.iloc[reference_idx]
+    trigger_level=float(ref["High"] if bullish else ref["Low"])
+
+    # Retest candle itself + next N candles are eligible.
+    end_idx=min(len(d)-1,retest_idx+int(confirmation_bars))
+    trigger_idx=None
+    for k in range(retest_idx,end_idx+1):
+        bar=d.iloc[k]
+        if bullish and float(bar["High"])>trigger_level:
+            trigger_idx=k
+            break
+        if bearish and float(bar["Low"])<trigger_level:
+            trigger_idx=k
+            break
+
+    if trigger_idx is None:
+        return None
+
+    # Make sure the trigger has happened by the latest completed candle.
+    if trigger_idx!=len(d)-1:
+        # Historical completed setup remains valid only if the latest bar is
+        # still at/after the trigger; report the current state but tag timing.
+        pass
+
+    r=d.iloc[-1]
+    cross=d.iloc[cross_idx]
+    ret=d.iloc[retest_idx]
+    trig=d.iloc[trigger_idx]
+
+    # Simple quality details, not extra hard gates.
+    ema200_ok=bool(r["EMA200"]<r["Close"]) if bullish else bool(r["EMA200"]>r["Close"])
+    volume_ok=bool(np.isfinite(r["VOL_RATIO"]) and r["VOL_RATIO"]>=1.0)
+    rsi_ok=bool(r["RSI9"]>=50) if bullish else bool(r["RSI9"]<=50)
+    cci_ok=bool(r["CCI20"]>0) if bullish else bool(r["CCI20"]<0)
+
+    score=60
+    reasons=[
+        "Rule 1 passed: crossover candle closed beyond EMA9",
+        "Rule 2 passed: retest touched EMA9 and reclaimed it",
+        "Rule 3 passed: trigger candle broke pre-retest high" if bullish
+        else "Rule 3 passed: trigger candle broke pre-retest low"
+    ]
+    if ema200_ok: score+=10; reasons.append("EMA200 trend aligned")
+    if volume_ok: score+=10; reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
+    if rsi_ok: score+=10; reasons.append(f"RSI9 {r['RSI9']:.1f}")
+    if cci_ok: score+=10; reasons.append(f"CCI20 {r['CCI20']:.1f}")
+
+    return {
+        "Signal":"BUY" if bullish else "SELL",
+        "Setup Score":min(100,score),
+        "Crossover Date":d.index[cross_idx],
+        "Retest Date":d.index[retest_idx],
+        "Trigger Date":d.index[trigger_idx],
+        "Reference Candle High":float(ref["High"]),
+        "Reference Candle Low":float(ref["Low"]),
+        "Trigger Level":trigger_level,
+        "Close":float(r["Close"]),
+        "EMA9":float(r["EMA9"]),
+        "EMA21":float(r["EMA21"]),
+        "EMA200":float(r["EMA200"]),
+        "RSI9":float(r["RSI9"]),
+        "CCI20":float(r["CCI20"]),
+        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
+        "EMA200 Aligned":ema200_ok,
+        "Volume Confirmed":volume_ok,
+        "RSI Confirmed":rsi_ok,
+        "CCI Confirmed":cci_ok,
+        "Bars Crossover→Retest":retest_idx-cross_idx,
+        "Bars Retest→Trigger":trigger_idx-retest_idx,
+        "Reasons":" | ".join(reasons)
+    }
+
+def _ema921_timeframe_params(timeframe):
+    # yfinance-compatible interval + history.
+    mapping={
+        "Daily":("1d","5y"),
+        "Weekly":("1wk","10y"),
+        "Monthly":("1mo","max"),
+        "5 Minutes":("5m","60d"),
+        "15 Minutes":("15m","60d"),
+        "30 Minutes":("30m","60d"),
+        "1 Hour":("60m","730d"),
+    }
+    return mapping.get(timeframe,("1d","5y"))
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _ema921_download_timeframe(tickers, timeframe):
+    interval,period=_ema921_timeframe_params(timeframe)
+    result={}
+    tickers=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
+
+    for start in range(0,len(tickers),40):
+        batch=tickers[start:start+40]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
+        try:
+            raw=yf.download(
+                tickers=yahoo,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="ticker"
+            )
+        except Exception:
+            continue
+        if raw is None or raw.empty:
+            continue
+
+        if len(batch)==1:
+            x=raw.copy()
+            if isinstance(x.columns,pd.MultiIndex):
+                x.columns=x.columns.get_level_values(0)
+            if "Close" in x.columns:
+                result[batch[0]]=x
+            continue
+
+        if isinstance(raw.columns,pd.MultiIndex):
+            for symbol,yahoo_symbol in zip(batch,yahoo):
+                x=None
+                try:
+                    if yahoo_symbol in raw.columns.get_level_values(0):
+                        x=raw[yahoo_symbol].copy()
+                    elif yahoo_symbol in raw.columns.get_level_values(1):
+                        x=raw.xs(yahoo_symbol,axis=1,level=1).copy()
+                    elif symbol in raw.columns.get_level_values(0):
+                        x=raw[symbol].copy()
+                    elif symbol in raw.columns.get_level_values(1):
+                        x=raw.xs(symbol,axis=1,level=1).copy()
+                except Exception:
+                    x=None
+                if x is not None and not x.empty and "Close" in x.columns:
+                    result[symbol]=x
+    return result
 
 # ============================================================
 # EMA 9/21 THREE-STAGE STRATEGY
@@ -13880,36 +14400,95 @@ def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
                 "Reasons":" | ".join(reasons)}
     return None
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _ema_three_stage_download(tickers, period="3y"):
+    """Download enough history for EMA200 + historical signal backtesting."""
+    result={}
+    ticker_list=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
+    for start in range(0,len(ticker_list),40):
+        batch=ticker_list[start:start+40]
+        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
+        try:
+            d=yf.download(
+                tickers=yahoo,period=period,interval="1d",
+                auto_adjust=False,progress=False,threads=False,group_by="ticker"
+            )
+        except Exception:
+            continue
+        if d is None or d.empty:
+            continue
+        if len(batch)==1:
+            stock=d.copy()
+            if isinstance(stock.columns,pd.MultiIndex):
+                lv0=stock.columns.get_level_values(0)
+                lv1=stock.columns.get_level_values(1)
+                if "Close" in lv0: stock.columns=lv0
+                elif "Close" in lv1: stock.columns=lv1
+            if "Close" in stock.columns:
+                result[batch[0]]=stock.dropna(subset=["Close"])
+            continue
+        if isinstance(d.columns,pd.MultiIndex):
+            for symbol,yahoo_symbol in zip(batch,yahoo):
+                stock=None
+                for key in (yahoo_symbol,symbol):
+                    try:
+                        if key in d.columns.get_level_values(0):
+                            stock=d[key].copy(); break
+                        if key in d.columns.get_level_values(1):
+                            stock=d.xs(key,axis=1,level=1).copy(); break
+                    except Exception:
+                        pass
+                if stock is not None and not stock.empty and "Close" in stock.columns:
+                    result[symbol]=stock.dropna(subset=["Close"])
+    return result
+
 def _ema_three_stage_backtest(df, setup, forward_days, min_score,
                               angle_threshold, gap_max, rsi_min, volume_ratio):
     d=_ema_three_stage_features(df)
     results=[]
     if len(d)<260:
         return results
-    last=-999
+
+    # Precompute indicators once. Test each historical bar without repeatedly
+    # downloading/rebuilding data.
+    last_signal=-999
     for i in range(220,len(d)-forward_days):
-        if i-last<5:
+        if i-last_signal<5:
             continue
-        sig=_ema_three_stage_current(
-            "HIST",d.iloc[:i+1],setup,angle_threshold,gap_max,rsi_min,volume_ratio
-        )
+        past=d.iloc[:i+1].copy()
+
+        try:
+            sig=_ema_three_stage_current(
+                "HIST",past,setup,angle_threshold,gap_max,rsi_min,volume_ratio
+            )
+        except Exception:
+            continue
+
         if sig is None or sig["Setup Score"]<min_score:
             continue
+
         entry=float(d["Close"].iloc[i])
         fut=d.iloc[i+1:i+1+forward_days]
+        if len(fut)<forward_days:
+            continue
+
         ret=(float(fut["Close"].iloc[-1])/entry-1)*100
         max_gain=(float(fut["High"].max())/entry-1)*100
         max_dd=(float(fut["Low"].min())/entry-1)*100
+
         results.append({
-            "Symbol": "HIST",
-            "Signal Date": d.index[i].strftime("%Y-%m-%d"),
-            "Power Score":sig["Setup Score"],
-            f"Forward {forward_days}D Return %":ret,
-            "Max Gain %":max_gain,
-            "Max Drawdown %":max_dd
+            "Signal Date":d.index[i].strftime("%Y-%m-%d"),
+            "Power Score":int(sig["Setup Score"]),
+            f"Forward {forward_days}D Return %":round(ret,3),
+            "Max Gain %":round(max_gain,3),
+            "Max Drawdown %":round(max_dd,3)
         })
-        last=i
+        last_signal=i
+
     return results
+
+
 
 if module == "🔥 Momentum Catalyst Scanner":
 
@@ -13920,81 +14499,20 @@ if module == "🔥 Momentum Catalyst Scanner":
 
 
 
-    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse","BSE 100":"bse100","BSE 200":"bse200","BSE 500":"bse500","BSE Equity":"bse","NSE + BSE Combined":"nse_bse","Manual Symbols":"manual"}
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
     uk=universe_options[selected_universe]
-
-    # Optional direct symbol entry. For BSE, enter either a BSE scrip code
-    # such as 500325 or a Yahoo/BSE ticker such as RELIANCE.BO.
-    manual_symbols=[]
-    if uk=="manual":
-        manual_exchange=st.radio(
-            "Manual symbol exchange",
-            ["NSE", "BSE", "Mixed NSE + BSE"],
-            horizontal=True,
-            key="mcs_manual_exchange"
-        )
-        manual_text=st.text_area(
-            "Enter symbols / BSE scrip codes",
-            placeholder="NSE: RELIANCE, TCS, INFY\nBSE: 500325, 532540, RELIANCE.BO",
-            height=90,
-            key="mcs_manual_symbols"
-        )
-        raw_parts=[x.strip().upper() for x in manual_text.replace("\n",",").split(",") if x.strip()]
-        if manual_exchange=="BSE":
-            manual_symbols=[
-                x if x.endswith(".BO") else f"{x}.BO"
-                for x in raw_parts
-            ]
-        elif manual_exchange=="NSE":
-            manual_symbols=[
-                x if x.endswith(".NS") else f"{x}.NS"
-                for x in raw_parts
-            ]
-        else:
-            for x in raw_parts:
-                if x.endswith(".BO") or x.endswith(".NS"):
-                    manual_symbols.append(x)
-                else:
-                    # Mixed mode defaults unqualified symbols to NSE;
-                    # BSE symbols should be entered with .BO or scrip code + .BO.
-                    manual_symbols.append(f"{x}.NS")
-        stocks=list(dict.fromkeys(manual_symbols))
-    else:
-        try:
-            if uk=="nifty50": stocks=load_nifty50()
-            elif uk=="nifty500": stocks=load_nifty500()
-            elif uk=="midcap100": stocks=load_nifty_midcap100()
-            elif uk=="smallcap250": stocks=load_nifty_smallcap250()
-            elif uk=="fno": stocks=load_fno_stocks()
-            elif uk in ("bse100","bse200","bse500","bse"):
-                stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(uk))
-            elif uk=="nse_bse":
-                stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(_mcs_load_bse_universe("bse"))
-            else: stocks=load_nse_equity_universe()
-        except Exception: stocks=[]
-        stocks=list(stocks or [])
-    if selected_universe=="BSE Equity" and stocks:
-        st.info(
-            f"BSE Equity loaded {len(stocks):,} symbols. The scanner will "
-            "request their BSE (.BO) market-data listings. BSE 100/200/500 "
-            "remain separate official constituent universes."
-        )
-    elif selected_universe in ("BSE 100","BSE 200","BSE 500") and not stocks:
-        st.warning(
-            f"{selected_universe} needs an official constituent list. "
-            "Use BSE Equity for the automatic broad BSE universe, or upload "
-            "the corresponding constituent CSV when we add that option."
-        )
+    try:
+        if uk=="nifty50": stocks=load_nifty50()
+        elif uk=="nifty500": stocks=load_nifty500()
+        elif uk=="midcap100": stocks=load_nifty_midcap100()
+        elif uk=="smallcap250": stocks=load_nifty_smallcap250()
+        elif uk=="fno": stocks=load_fno_stocks()
+        else: stocks=load_nse_equity_universe()
+    except Exception: stocks=[]
+    stocks=list(stocks or [])
     if selected_universe=="Nifty 50" and not stocks:
         stocks=list(NIFTY50)
-    if uk=="manual" and stocks:
-        bse_count=sum(1 for x in stocks if str(x).endswith(".BO"))
-        nse_count=sum(1 for x in stocks if str(x).endswith(".NS"))
-        st.info(
-            f"Manual symbols loaded: {len(stocks):,} ({nse_count:,} NSE, {bse_count:,} BSE). "
-            "BSE entries are sent to Yahoo Finance using the .BO suffix."
-        )
     st.sidebar.markdown("### Momentum thresholds")
     min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
     min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
@@ -14041,6 +14559,10 @@ if module == "🔥 Momentum Catalyst Scanner":
             "💎 Early Breakout V3.4 Risk/Reward",
             "⚡ EMA 9/21 Power Breakout",
             "🧩 EMA 9/21 Three-Stage Strategy",
+            "🎯 EMA9/21 Crossover + Retest Rules 1-3",
+            "🔄 EMA9/21 Buy-Sell Crossover",
+            "🎯 EMA9<EMA21 + RSI-WMA + CCI Setup",
+            "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -14049,6 +14571,379 @@ if module == "🔥 Momentum Catalyst Scanner":
         key="mcs_scan_mode",
         help="Confirmed Breakout finds stocks already breaking resistance. Early Breakout finds stocks still below resistance but preparing to break out."
     )
+
+
+    # ========================================================
+    # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
+    # ========================================================
+
+
+
+    if scan_mode=="🎯 EMA9<EMA21 + RSI-WMA + CCI Setup":
+        st.markdown("---")
+        st.subheader("🎯 EMA9 < EMA21 Pullback + RSI9/WMA21 + CCI20 Recovery")
+        st.caption(
+            "Looks for the specific early-turn structure: EMA9 remains below EMA21 "
+            "but both are above EMA200, while RSI9 crosses above its WMA21 above 50 "
+            "and CCI20 is rising toward +100."
+        )
+
+        c1,c2,c3=st.columns(3)
+        cci_lb=c1.slider(
+            "CCI rising lookback (days)",2,5,3,1,key="ema_rsi_cci_lb"
+        )
+        rsi_min=c2.slider(
+            "RSI9 minimum",45,70,50,1,key="ema_rsi_cci_rsi"
+        )
+        cci_target=c3.slider(
+            "CCI target ceiling",70,120,100,5,key="ema_rsi_cci_target"
+        )
+
+        c4,c5,c6=st.columns(3)
+        ema_gap_max=c4.slider(
+            "Maximum EMA9-EMA21 gap (%)",0.25,5.0,2.0,0.25,
+            key="ema_rsi_cci_gap",
+            help="EMA9 must remain below EMA21 but within this percentage gap."
+        )
+        gap_tighten=c5.checkbox(
+            "Require EMA gap tightening",value=True,key="ema_rsi_cci_gap_tighten",
+            help="Requires today's EMA9-EMA21 gap to be no wider than yesterday's gap."
+        )
+        cci_mode=c6.selectbox(
+            "CCI mode",
+            ["Toward +100","Fresh Cross +100"],
+            key="ema_rsi_cci_mode",
+            help="Toward +100 finds early recovery below +100; Fresh Cross +100 finds the first bullish move through +100."
+        )
+
+        c7,c8,c9=st.columns(3)
+        vol_thr=c7.slider(
+            "Minimum Volume / SMA20",0.75,3.0,1.0,0.25,key="ema_rsi_cci_vol"
+        )
+        require_vol=c8.checkbox(
+            "Require volume support",value=True,key="ema_rsi_cci_req_vol"
+        )
+        wma_rise=c9.checkbox(
+            "Require RSI-WMA21 rising",value=True,key="ema_rsi_cci_wma_rise"
+        )
+
+        if st.button(
+            "🎯 RUN EMA9/21 RSI-WMA CCI SETUP",
+            key="ema_rsi_cci_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner(
+                "Scanning EMA9/21 structure + RSI9/WMA21 cross + CCI recovery..."
+            ):
+                setup_data=(
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks)>500 else _kratter_download_batches(stocks)
+                )
+
+                for symbol in stocks:
+                    d=setup_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                        if len(d)<220:
+                            continue
+
+                        result=_ema921_rsi_cci_setup(
+                            symbol,d,
+                            rsi_min=rsi_min,
+                            cci_target=cci_target,
+                            cci_lookback=cci_lb,
+                            ema_gap_max_pct=ema_gap_max,
+                            require_gap_tightening=gap_tighten,
+                            require_wma_rising=wma_rise,
+                            cci_mode=cci_mode,
+                            volume_threshold=vol_thr,
+                            require_volume=require_vol
+                        )
+                        if result is not None:
+                            result["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
+                            rows.append(result)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    "No setups matched the requested EMA9/21 + RSI-WMA + CCI conditions."
+                )
+            else:
+                out=out.sort_values(
+                    ["Setup Score","CCI20","Volume Ratio"],
+                    ascending=[False,False,False]
+                )
+                a,b,c,dcol=st.columns(4)
+                a.metric("Setups",len(out))
+                b.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
+                c.metric("RSI9 >50",int((out["RSI9"]>50).sum()))
+                dcol.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
+
+                display_cols=[
+                    "Signal Date","Symbol","Signal","Setup Score","Close",
+                    "EMA9","EMA21","EMA200","Below EMA21 %",
+                    "EMA9 Angle 5D °","EMA21 Angle 10D °",
+                    "RSI9","RSI9 WMA21","RSI9 Cross Above WMA21",
+                    "CCI20","CCI Rising","CCI Distance to +100",
+                    "Volume Ratio","Volume Support","EMA9-EMA21 Gap %",
+                    "EMA Gap Tightening","RSI WMA21 Rising","RSI WMA21 Slope 5D %",
+                    "EMA200 Slope 10D %","Reasons"
+                ]
+                display_cols=[c for c in display_cols if c in out.columns]
+                st.dataframe(out[display_cols],width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download EMA9/21 RSI-WMA CCI Setup",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"ema921_rsi_wma_cci_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="ema_rsi_cci_download"
+                )
+
+
+    if scan_mode=="🎯 EMA9/21 Crossover + Retest Rules 1-3":
+        st.markdown("---")
+        st.subheader("🎯 EMA9/EMA21 Crossover + Retest Strategy")
+        st.caption(
+            "User-defined rules: crossover candle closes beyond EMA9 → "
+            "retest touches EMA9 and closes back beyond it → retest candle or "
+            "next N candles breaks the high/low of the candle immediately before the retest."
+        )
+
+        c1,c2,c3,c4=st.columns(4)
+        tf=c1.selectbox(
+            "Time frame",
+            ["Daily","Weekly","Monthly","5 Minutes","15 Minutes","30 Minutes","1 Hour"],
+            index=0,key="ema921_rule_tf"
+        )
+        direction=c2.selectbox(
+            "Trade direction",["Buy","Sell","Both"],key="ema921_rule_dir"
+        )
+        max_retest=c3.slider(
+            "Max candles to find retest after crossover",2,15,10,1,
+            key="ema921_rule_retest"
+        )
+        confirm_bars=c4.slider(
+            "Retest + next N candles",0,5,3,1,
+            key="ema921_rule_confirm"
+        )
+
+        c5,c6,c7=st.columns(3)
+        min_score_rule=c5.slider(
+            "Minimum setup score",50,100,70,5,key="ema921_rule_score"
+        )
+        use_ema200=c6.checkbox(
+            "Require EMA200 trend alignment",value=True,key="ema921_rule_ema200"
+        )
+        use_volume=c7.checkbox(
+            "Require volume ≥ 1× SMA20",value=False,key="ema921_rule_vol"
+        )
+
+        st.info(
+            "Rule 3 is interpreted as: the retest candle itself OR any of the "
+            "next N candles must break the HIGH of the candle immediately before "
+            "the retest (BUY), with the exact mirror condition for SELL."
+        )
+
+        if st.button(
+            "🎯 RUN CROSSOVER + RETEST RULES 1-3",
+            key="ema921_rule_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner(f"Scanning {tf} setups..."):
+                data=_ema921_download_timeframe(stocks,tf)
+                for symbol in stocks:
+                    d=data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+
+                        dirs=["Buy","Sell"] if direction=="Both" else [direction]
+                        for dr in dirs:
+                            sig=_ema921_rule_engine(
+                                d,dr,max_retest_bars=max_retest,
+                                confirmation_bars=confirm_bars
+                            )
+                            if sig is None:
+                                continue
+                            if use_ema200 and not sig["EMA200 Aligned"]:
+                                continue
+                            if use_volume and not sig["Volume Confirmed"]:
+                                continue
+                            if sig["Setup Score"]<min_score_rule:
+                                continue
+
+                            sig["Symbol"]=symbol
+                            sig["Stock Name"]=(
+                                _ema_company_name(symbol)
+                                if "_ema_company_name" in globals()
+                                else symbol
+                            )
+                            sig["Time Frame"]=tf
+                            sig["As Of"]=d.index[-1].strftime("%Y-%m-%d %H:%M")
+                            rows.append(sig)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    "No completed Rule 1-3 setups matched the selected time frame/settings."
+                )
+            else:
+                out=out.sort_values(
+                    ["Setup Score","Trigger Date"],
+                    ascending=[False,False]
+                )
+                a,b,c,dcol,e=st.columns(5)
+                a.metric("Setups",len(out))
+                b.metric("BUY",int(out["Signal"].eq("BUY").sum()))
+                c.metric("SELL",int(out["Signal"].eq("SELL").sum()))
+                dcol.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
+                e.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
+
+                cols=[
+                    "As Of","Stock Name","Symbol","Time Frame","Signal","Setup Score",
+                    "Crossover Date","Retest Date","Trigger Date",
+                    "Bars Crossover→Retest","Bars Retest→Trigger",
+                    "Reference Candle High","Reference Candle Low","Trigger Level",
+                    "Close","EMA9","EMA21","EMA200","RSI9","CCI20","Volume Ratio",
+                    "EMA200 Aligned","Volume Confirmed","RSI Confirmed","CCI Confirmed","Reasons"
+                ]
+                cols=[c for c in cols if c in out.columns]
+                st.dataframe(out[cols],width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download EMA9/21 Rule 1-3 Results",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"ema921_rules13_{tf.replace(' ','_').lower()}.csv",
+                    "text/csv",key="ema921_rule_download"
+                )
+
+    if scan_mode=="🔄 EMA9/21 Buy-Sell Crossover":
+        st.markdown("---")
+        st.subheader("🔄 EMA9 / EMA21 Buy-Sell Crossover")
+        st.caption(
+            "BUY = EMA9 crosses EMA21 upward on the latest completed session. "
+            "SELL = EMA9 crosses EMA21 downward."
+        )
+
+        c1,c2,c3=st.columns(3)
+        crossover_direction=c1.selectbox(
+            "Signal Direction",
+            ["Buy","Sell","Both"],
+            key="ema921_direction"
+        )
+        cross_angle=c2.slider(
+            "Angle confirmation (°)",
+            10,60,40,1,
+            key="ema921_angle",
+            help="Applied to both EMA9 and EMA21. Set to 0 conceptually to ignore, but the UI minimum is 10°."
+        )
+        cross_score=c3.slider(
+            "Minimum Power Score",
+            40,100,65,5,
+            key="ema921_min_score"
+        )
+
+        c4,c5,c6=st.columns(3)
+        cross_vol=c4.slider(
+            "Volume / SMA20 ≥",
+            1.0,3.0,1.5,0.25,key="ema921_vol"
+        )
+        cross_rsi_buy=c5.slider(
+            "BUY RSI9 ≥",
+            50,70,55,1,key="ema921_rsi_buy"
+        )
+        cross_cci=c6.slider(
+            "CCI confirmation magnitude ≥",
+            50,200,100,10,key="ema921_cci"
+        )
+
+        if st.button(
+            "🔄 RUN EMA9/21 BUY-SELL CROSSOVER",
+            key="ema921_run",type="primary"
+        ):
+            rows=[]
+            with st.spinner("Scanning for EMA9/EMA21 crossover signals..."):
+                cross_data=(
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks)>500 else _kratter_download_batches(stocks)
+                )
+
+                for symbol in stocks:
+                    d=cross_data.get(symbol)
+                    if d is None or d.empty:
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+
+                        result=_ema921_cross_signal(
+                            symbol,d,crossover_direction,
+                            angle_threshold=cross_angle,
+                            rsi_buy=cross_rsi_buy,
+                            rsi_sell=100-cross_rsi_buy,
+                            cci_threshold=cross_cci,
+                            volume_threshold=cross_vol
+                        )
+                        if result is not None and result["Power Score"]>=cross_score:
+                            result["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
+                            rows.append(result)
+                    except Exception:
+                        continue
+
+            out=pd.DataFrame(rows)
+            if out.empty:
+                st.warning(
+                    "No EMA9/EMA21 crossover signals met the selected "
+                    "confirmation threshold."
+                )
+            else:
+                out=out.sort_values(
+                    ["Power Score","Signal"],
+                    ascending=[False,True]
+                )
+
+                a,b,c,dcol=st.columns(4)
+                a.metric("Signals",len(out))
+                b.metric("🟢 BUY",int(out["Signal"].eq("BUY").sum()))
+                c.metric("🔴 SELL",int(out["Signal"].eq("SELL").sum()))
+                dcol.metric("Avg Score",f'{out["Power Score"].mean():.1f}')
+
+                display_cols=[
+                    "Signal Date","Symbol","Signal","Power Score","Close",
+                    "EMA9","EMA21","EMA200","EMA9 Angle 5D °",
+                    "EMA21 Angle 10D °","RSI9","CCI20","Volume Ratio",
+                    "EMA200 Context","Angle Confirmation","RSI Confirmation",
+                    "CCI Confirmation","Volume Confirmation","Reasons"
+                ]
+                display_cols=[c for c in display_cols if c in out.columns]
+                st.dataframe(out[display_cols],width="stretch",hide_index=True)
+
+                st.download_button(
+                    "⬇️ Download EMA9/21 Buy-Sell Signals",
+                    out.to_csv(index=False).encode("utf-8"),
+                    f"ema921_buy_sell_{analysis_date.strftime('%Y%m%d')}.csv",
+                    "text/csv",key="ema921_download"
+                )
 
 
     if scan_mode=="🧩 EMA 9/21 Three-Stage Strategy":
@@ -14122,11 +15017,20 @@ if module == "🔥 Momentum Catalyst Scanner":
         else:
             fwd=st.selectbox("Forward return window",[5,10,20],key="ema3_fwd")
             years=st.selectbox("History",["2y","3y","5y"],index=1,key="ema3_hist")
-            if st.button("📊 BACKTEST SELECTED STAGE",key="ema3_bt",type="primary"):
+            bt_scope=st.radio(
+                "Backtest scope",
+                ["Selected Setup","Compare All 3 Setups"],
+                horizontal=True,key="ema3_bt_scope"
+            )
+            if st.button("📊 RUN EMA THREE-STAGE BACKTEST",key="ema3_bt",type="primary"):
                 all_rows=[]
-                with st.spinner("Backtesting selected EMA stage..."):
-                    data=(_mcs_large_universe_download(stocks)
-                          if len(stocks)>500 else _kratter_download_batches(stocks))
+                setups_to_test=(
+                    [setup] if bt_scope=="Selected Setup"
+                    else ["Early Reversal","Fresh Momentum","Retest Continuation"]
+                )
+                with st.spinner(f"Backtesting {bt_scope.lower()} over {years} history..."):
+                    # Use the selected period here; the old version always used 2y.
+                    data=_ema_three_stage_download(stocks,years)
                     for symbol in stocks:
                         d=data.get(symbol)
                         if d is None or d.empty: continue
@@ -14137,12 +15041,13 @@ if module == "🔥 Momentum Catalyst Scanner":
                                 d.index=d.index.tz_localize(None)
                             d=d[~d.index.isna()].sort_index()
                             d=d.loc[d.index<=analysis_ts]
-                            for rec in _ema_three_stage_backtest(
-                                d,setup,fwd,min_score,angle,gap,rsi,vol
-                            ):
-                                rec["Symbol"]=symbol
-                                rec["Stock Name"]=_ema_company_name(symbol)
-                                all_rows.append(rec)
+                            for current_setup in setups_to_test:
+                                for rec in _ema_three_stage_backtest(
+                                    d,current_setup,fwd,min_score,angle,gap,rsi,vol
+                                ):
+                                    rec["Symbol"]=symbol
+                                    rec["Stock Name"]=_ema_company_name(symbol)
+                                    all_rows.append(rec)
                         except Exception:
                             continue
                 out=pd.DataFrame(all_rows)
@@ -14150,22 +15055,28 @@ if module == "🔥 Momentum Catalyst Scanner":
                     st.warning("No historical signals matched the selected setup.")
                 else:
                     retcol=f"Forward {fwd}D Return %"
-                    summary=pd.DataFrame([{
-                        "Setup":setup,
-                        "Signals":len(out),
-                        "Positive Return %":(out[retcol]>0).mean()*100,
-                        "Average Return %":out[retcol].mean(),
-                        "Median Return %":out[retcol].median(),
-                        "Average Max Gain %":out["Max Gain %"].mean(),
-                        "Average Max Drawdown %":out["Max Drawdown %"].mean(),
-                        "Worst Max Drawdown %":out["Max Drawdown %"].min()
-                    }]).round(2)
+                    summary_rows=[]
+                    for sname,g in out.groupby("Setup"):
+                        summary_rows.append({
+                            "Setup":sname,
+                            "Signals":len(g),
+                            "Positive Return %":(g[retcol]>0).mean()*100,
+                            "Average Return %":g[retcol].mean(),
+                            "Median Return %":g[retcol].median(),
+                            "Average Max Gain %":g["Max Gain %"].mean(),
+                            "Average Max Drawdown %":g["Max Drawdown %"].mean(),
+                            "Worst Max Drawdown %":g["Max Drawdown %"].min()
+                        })
+                    summary=pd.DataFrame(summary_rows).round(2)
                     st.dataframe(summary,width="stretch",hide_index=True)
-                    st.dataframe(out.round(2),width="stretch",hide_index=True)
+                    st.dataframe(
+                        out.sort_values(["Setup","Signal Date"]),
+                        width="stretch",hide_index=True
+                    )
                     st.download_button(
                         "⬇️ Download Three-Stage Backtest",
                         out.to_csv(index=False).encode("utf-8"),
-                        f"ema_three_stage_backtest_{setup.lower().replace(' ','_')}_{fwd}d.csv",
+                        f"ema_three_stage_backtest_{fwd}d.csv",
                         "text/csv",key="ema3_bt_download"
                     )
 
@@ -14199,7 +15110,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "Minimum Power Score",
             50,90,65,5,key="ema_power_min"
         )
-        vol_thr=e5.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
+        vol_thr=e4.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
         rsi_thr=e5.slider("Minimum RSI(9)",50,70,55,1,key="ema_power_rsi")
         cci_thr=e6.slider("Minimum CCI(20)",0,150,100,10,key="ema_power_cci")
 
@@ -14261,7 +15172,7 @@ if module == "🔥 Momentum Catalyst Scanner":
                 dcol.metric("Avg Score",f'{ema_df["Power Score"].mean():.1f}')
 
                 display_cols=[
-                    "Scan Date","Symbol","Stock Name","Power Score","Rating","Close",
+                    "Scan Date","Symbol","Power Score","Rating","Close",
                     "EMA9","EMA21","EMA200","EMA200 Slope 10D %",
                     "EMA21 Slope 10D %","EMA21 Angle 10D °",
                     "EMA9 Slope 5D %","EMA9 Angle 5D °",
@@ -14631,6 +15542,129 @@ if module == "🔥 Momentum Catalyst Scanner":
                     "text/csv",
                     key="mcs_v31_download"
                 )
+
+    if scan_mode=="🚀 Multibagger Intelligence V2.4":
+        st.markdown("---")
+        st.subheader("🚀 Multibagger Intelligence V2.4 — Sector Rotation + Catalyst")
+        st.caption(
+            "Adds a 'why now?' layer. Sector rotation is calculated from the same "
+            "price data; technology/business catalyst evidence is optional and never invented."
+        )
+
+        fund_file=st.file_uploader("Upload Multibagger fundamental CSV",type=["csv"],key="mbv24_fund_csv")
+        catalyst_file=st.file_uploader("Optional Sector / Technology Catalyst CSV",type=["csv"],key="mbv24_cat_csv")
+        c1,c2,c3=st.columns(3)
+        fund_min=c1.slider("Minimum Fundamental Score",50,90,65,5,key="mbv24_fund_min")
+        sustain_min=c2.slider("Minimum Sustainability Score",40,90,60,5,key="mbv24_sustain_min")
+        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv24_risk")
+
+        if fund_file is None:
+            st.info("Upload the V2.3/V2.2 fundamental CSV to begin.")
+        elif st.button("🚀 RUN MULTIBAGGER V2.4",key="mbv24_run",type="primary"):
+            try:
+                fund_df=_mbv24_norm_cols(pd.read_csv(fund_file))
+                if "Ticker" not in fund_df.columns and "Symbol" in fund_df.columns: fund_df["Ticker"]=fund_df["Symbol"]
+                if "Name" not in fund_df.columns and "Company" in fund_df.columns: fund_df["Name"]=fund_df["Company"]
+                if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
+                    st.error("Use Name/Ticker or Company/Symbol columns.")
+                else:
+                    lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
+                    cat_lookup={}
+                    if catalyst_file is not None:
+                        cdf=_mbv24_norm_cols(pd.read_csv(catalyst_file))
+                        if "Ticker" not in cdf.columns and "Symbol" in cdf.columns: cdf["Ticker"]=cdf["Symbol"]
+                        for _,r in cdf.iterrows(): cat_lookup[str(r.get("Ticker","")).upper().strip()]=r.to_dict()
+
+                    sector_map={}
+                    for _,r in fund_df.iterrows():
+                        t=str(r["Ticker"]).upper().strip()
+                        sec=r.get("Sector",r.get("Sub-Sector",""))
+                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
+                    for t,r in cat_lookup.items():
+                        sec=r.get("Sector",r.get("Sub-Sector",""))
+                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
+
+                    data=(_mcs_large_universe_download(stocks) if len(stocks)>500 else _kratter_download_batches(stocks))
+                    benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
+                    if benchmark.empty:
+                        benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
+                        bench_source="Universe proxy (fallback)"
+                    rotation_map=_mbv24_sector_rotation(data,sector_map,benchmark)
+
+                    rows=[]
+                    for symbol in stocks:
+                        fr=lookup.get(str(symbol).upper().strip())
+                        if fr is None: continue
+                        try:
+                            fs=_mbv23_fundamental_score(fr.to_dict())
+                            if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min: continue
+                            sustain=_mbv23_sustainability(fr.to_dict())
+                            if sustain<sustain_min: continue
+                            t=str(symbol).upper().strip()
+                            sec=sector_map.get(t,"")
+                            rot=rotation_map.get(sec,{})
+                            cat=cat_lookup.get(t,fr.to_dict())
+                            cat_score=_mbv24_catalyst_score(cat)
+
+                            d=data.get(symbol); tech=None
+                            if d is not None and not d.empty:
+                                d=d.copy()
+                                d.index=pd.to_datetime(d.index,errors="coerce")
+                                if getattr(d.index,"tz",None) is not None: d.index=d.index.tz_localize(None)
+                                d=d[~d.index.isna()].sort_index(); d=d.loc[d.index<=analysis_ts]
+                                if len(d)>=210: tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
+
+                            ti=_mbv23_technical(tech)
+                            discovery=_mbv23_discovery_score(fs["Fundamental Score"],sustain,fs["Ownership Score"],fs["Valuation Score"])
+                            score=_mbv24_final_score(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"])
+                            status=_mbv24_classify(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"],ti["risk"],ti["rr"])
+
+                            rows.append({
+                                "Scan Date":analysis_date.strftime("%Y-%m-%d"),"Symbol":symbol,"Company":fr.get("Name",symbol),
+                                "Sector":sec,"V2.4 Score":score,"Status":status,"Discovery Score":discovery,
+                                "Fundamental Score":fs["Fundamental Score"],"Growth Sustainability":sustain,
+                                "Sector Rotation Score":rot.get("Sector Rotation Score",np.nan),
+                                "Sector 3M RS %":rot.get("Sector 3M RS %",np.nan),"Sector 6M RS %":rot.get("Sector 6M RS %",np.nan),
+                                "Sector 12M RS %":rot.get("Sector 12M RS %",np.nan),
+                                "Catalyst Score":cat_score,"Theme":cat.get("Theme",""),"Catalyst":cat.get("Catalyst",""),
+                                "Technology Exposure":cat.get("Technology Exposure",np.nan),
+                                "Technical State":ti["state"],"Technical V3.4 Score":ti["score"],"V3.4 Trade Quality":ti["quality"],
+                                "Risk %":ti["risk"],"Realistic R:R":ti["rr"],
+                                "Entry":tech.get("Confirmation Entry",np.nan) if tech else np.nan,
+                                "Stop Loss":tech.get("Stop Loss V3.4",np.nan) if tech else np.nan,
+                                "Target 1":tech.get("Target 1 V3.4",np.nan) if tech else np.nan,
+                                "Distance to Breakout %":tech.get("Distance to Breakout %",np.nan) if tech else np.nan,
+                                "Volume Ratio":tech.get("Volume Ratio",np.nan) if tech else np.nan,
+                                "ROCE":fr.get("ROCE",np.nan),"ROE":fr.get("Return on Equity",np.nan),
+                                "Debt to Equity":fr.get("Debt to Equity",np.nan),"PE Ratio":fr.get("PE Ratio",np.nan)
+                            })
+                        except Exception:
+                            continue
+
+                    out=pd.DataFrame(rows)
+                    if out.empty:
+                        st.warning("No V2.4 candidates met the selected criteria.")
+                    else:
+                        order=["💎 High Conviction","🚀 Emerging Multibagger","🔥 Catalyst + Sector Discovery","🟡 Fundamental Discovery","🟢 Technical Candidate","🔵 Watch"]
+                        out["_o"]=pd.Categorical(out["Status"],categories=order,ordered=True)
+                        out=out.sort_values(["_o","V2.4 Score"],ascending=[True,False]).drop(columns="_o")
+                        c1,c2,c3,c4,c5=st.columns(5)
+                        c1.metric("Candidates",len(out))
+                        c2.metric("💎 High",int(out["Status"].eq("💎 High Conviction").sum()))
+                        c3.metric("🚀 Emerging",int(out["Status"].eq("🚀 Emerging Multibagger").sum()))
+                        c4.metric("🔥 Catalyst",int(out["Status"].eq("🔥 Catalyst + Sector Discovery").sum()))
+                        c5.metric("Sector scored",int(out["Sector Rotation Score"].notna().sum()))
+                        st.caption(f"Benchmark: {bench_source}")
+                        cols=["Symbol","Company","Sector","Status","V2.4 Score","Discovery Score","Fundamental Score","Growth Sustainability",
+                              "Sector Rotation Score","Sector 3M RS %","Sector 6M RS %","Sector 12M RS %","Catalyst Score","Theme","Catalyst",
+                              "Technology Exposure","Technical State","Technical V3.4 Score","V3.4 Trade Quality","Risk %","Realistic R:R",
+                              "Entry","Stop Loss","Target 1","Distance to Breakout %","Volume Ratio","ROCE","ROE","Debt to Equity","PE Ratio"]
+                        cols=[c for c in cols if c in out.columns]
+                        st.dataframe(out[cols],width="stretch",hide_index=True)
+                        st.download_button("⬇️ Download Multibagger V2.4 Results",out.to_csv(index=False).encode("utf-8"),
+                                           f"multibagger_v24_{analysis_date.strftime('%Y%m%d')}.csv","text/csv",key="mbv24_download")
+            except Exception as e:
+                st.error(f"Multibagger V2.4 error: {e}")
 
     if scan_mode=="💎 Early Breakout V3.4 Risk/Reward":
         st.markdown("---")
@@ -17630,8 +18664,9 @@ elif module == "🏆 Top 20 Stocks":
     if universe == "NSE F&O Stocks":
 
         st.caption(
-            "Recommended universe: individual NSE F&O "
-            "stocks. Index derivatives are excluded."
+            "Recommended universe: current NSE individual-stock F&O underlyings. "
+            "The app removes stale excluded symbols (including IPCALAB) and "
+            "adds the latest notified F&O additions when using a fallback source."
         )
 
     batch_size = st.sidebar.slider(
