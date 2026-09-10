@@ -517,70 +517,6 @@ def load_nse_equity_universe():
 
 
 # ============================================================
-# LOAD BSE EQUITY UNIVERSE
-# ============================================================
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_bse_equity_universe():
-    """Load currently traded BSE equity symbols from the public BSE
-    daily equity bhavcopy and return Yahoo-compatible .BO tickers.
-    """
-    from datetime import datetime, timedelta
-    from zipfile import ZipFile
-    from io import BytesIO
-
-    headers={
-        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-        "Accept":"application/zip,application/octet-stream,text/csv,*/*",
-        "Referer":"https://www.bseindia.com/markets/MarketInfo/BhavCopy.aspx"
-    }
-
-    for back in range(0,8):
-        dt=datetime.now()-timedelta(days=back)
-        ymd=dt.strftime('%d%m%Y')
-        url=f"https://www.bseindia.com/download/BhavCopy/Equity/EQ_ISINCODE_{ymd}.zip"
-        try:
-            r=requests.get(url,headers=headers,timeout=25)
-            if r.status_code!=200 or not r.content:
-                continue
-            z=ZipFile(BytesIO(r.content))
-            csv_name=next((n for n in z.namelist() if n.upper().endswith('.CSV')),None)
-            if not csv_name:
-                continue
-            df=pd.read_csv(BytesIO(z.read(csv_name)),low_memory=False)
-            df.columns=[str(c).strip().upper() for c in df.columns]
-
-            code_col=next((c for c in ['SC_CODE','SCRIP CODE','SCRIPCODE','SECURITY CODE'] if c in df.columns),None)
-            symbol_col=next((c for c in ['SC_ID','SECURITY ID','SECURITYID','SYMBOL'] if c in df.columns),None)
-
-            if code_col:
-                codes=pd.to_numeric(df[code_col],errors='coerce').dropna().astype(int).astype(str)
-                tickers=[f"{c}.BO" for c in codes if c and c!='0']
-            elif symbol_col:
-                vals=df[symbol_col].astype(str).str.strip().str.upper()
-                vals=vals[~vals.isin({'','NAN','NONE','NULL'})]
-                tickers=[v if v.endswith('.BO') else f"{v}.BO" for v in vals]
-            else:
-                continue
-
-            # Keep regular equity series where a series column is available.
-            series_col=next((c for c in ['SC_GROUP','GROUP NAME','GROUP','SCTYSRS','SERIES'] if c in df.columns),None)
-            if series_col:
-                good=df[series_col].astype(str).str.upper().str.strip().isin({'A','B','T','X','XT','Z','EQ'})
-                if good.any() and len(good)==len(tickers):
-                    tickers=[t for t,m in zip(tickers,good.tolist()) if m]
-
-            tickers=sorted(set(tickers))
-            if len(tickers)>=500:
-                return tickers
-        except Exception:
-            continue
-
-    return []
-
-
-
-# ============================================================
 # NSE INDEX LOADING HELPERS
 # ============================================================
 
@@ -1095,8 +1031,7 @@ def resolve_stock_universe(
     nifty500,
     fno_stocks,
     nifty_midcap100,
-    nifty_smallcap250,
-    bse_stocks=None
+    nifty_smallcap250
 ):
     """
     Central universe resolver used by scanners and backtester.
@@ -1120,44 +1055,8 @@ def resolve_stock_universe(
     if universe == "Full NSE":
         return list(nse_stocks)
 
-    if universe == "Full BSE":
-        return list(bse_stocks or [])
-
     return []
 
-
-
-# ============================================================
-# CURRENT NSE F&O MEMBERSHIP NORMALIZATION
-# ============================================================
-
-# Safety layer for fallback/third-party symbol masters. NSE's recent
-# inclusion/exclusion notices are applied here so stale names such as
-# IPCALAB cannot reappear when a primary live contract source is unavailable.
-CURRENT_FNO_EXCLUSIONS = {
-    "ABBOTINDIA","ATUL","BATAINDIA","CANFINHOME","COROMANDEL","CUB",
-    "GNFC","GUJGASLTD","INDIAMART","IPCALAB","LALPATHLAB","METROPOLIS",
-    "NAVINFLUOR","PVRINOX","SUNTV","UBL",
-    "BERGEPAINT","DEEPAKNTR","ESCORTS","MRF","RAMCOCEM","APOLLOTYRE",
-    "JKCEMENT","LTTS","CYIENT","HFCL","NCC","TITAGARH","IGL","IIFL",
-    "IRCTC","HUDCO","PPLPHARMA","TATATECH","TORNTPOWER",
-    "SAMMAANCAP","EXIDEIND","NUVAMA"
-}
-
-CURRENT_FNO_ADDITIONS = {
-    "ADANIPOWER","COCHINSHIP","FORCEMOT","GODFRYPHLP",
-    "HYUNDAI","MOTILALOFS","NAM-INDIA","VMM"
-}
-
-def _normalize_current_fno_symbols(symbols):
-    clean=set()
-    for s in symbols:
-        s=str(s).strip().upper()
-        if s and s not in {"NAN","NONE","NULL"}:
-            clean.add(s)
-    clean -= CURRENT_FNO_EXCLUSIONS
-    clean |= CURRENT_FNO_ADDITIONS
-    return sorted(clean)
 
 # ============================================================
 # LOAD NSE F&O STOCK UNIVERSE
@@ -1284,7 +1183,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return _normalize_current_fno_symbols(symbols)
+                    return symbols
 
         except Exception:
             continue
@@ -1377,7 +1276,7 @@ def load_fno_stocks():
                 )
 
                 if len(symbols) >= 100:
-                    return _normalize_current_fno_symbols(symbols)
+                    return symbols
 
         except Exception:
             continue
@@ -1459,7 +1358,7 @@ def load_fno_stocks():
             )
 
             if len(symbols) >= 100:
-                return _normalize_current_fno_symbols(symbols)
+                return symbols
 
     except Exception:
         pass
@@ -1499,7 +1398,13 @@ MCDOWELL-N UPL VEDL IDEA VOLTAS WHIRLPOOL WIPRO ZEEL ZYDUSLIFE
 ADANIPOWER COCHINSHIP HYUNDAI MOTILALOFS NAM-INDIA VMM
 """
 
-    return _normalize_current_fno_symbols(fallback.split())
+    return sorted(
+        set(
+            x.strip().upper()
+            for x in fallback.split()
+            if x.strip()
+        )
+    )
 
 
 # ============================================================
@@ -7651,193 +7556,6 @@ def _mcs_get_reliable_benchmark(stocks=None, loaded_data=None, period="2y"):
 
     return pd.DataFrame(), "Unavailable"
 
-
-# ============================================================
-# MULTI-TIMEFRAME EMA 9/21/200 + RSI(9) + CCI(20) SCANNER
-# Added from the user's Monthly -> Weekly -> Daily chart setup.
-# ============================================================
-
-def _mtf_clean_symbol(symbol):
-    s=str(symbol).strip().upper()
-    s=s.replace('NSE:','').replace('BSE:','')
-    # Preserve Yahoo exchange suffixes when supplied explicitly.
-    suffix=''
-    if s.endswith('.NS'):
-        suffix='.NS'
-        s=s[:-3]
-    elif s.endswith('.BO'):
-        suffix='.BO'
-        s=s[:-3]
-    s=''.join(ch for ch in s if ch.isalnum() or ch in ('_','-','&'))
-    return s+suffix
-
-def _mtf_rsi9(close):
-    d=close.diff()
-    up=d.clip(lower=0)
-    dn=-d.clip(upper=0)
-    ag=up.ewm(alpha=1/9,adjust=False,min_periods=9).mean()
-    al=dn.ewm(alpha=1/9,adjust=False,min_periods=9).mean()
-    rs=ag/al.replace(0,np.nan)
-    r=100-(100/(1+rs))
-    return r.mask(al.eq(0)&ag.gt(0),100).fillna(50)
-
-def _mtf_cci20(df):
-    tp=(df['High']+df['Low']+df['Close'])/3.0
-    ma=tp.rolling(20).mean()
-    md=tp.rolling(20).apply(lambda x: np.mean(np.abs(x-np.mean(x))),raw=True)
-    return (tp-ma)/(0.015*md.replace(0,np.nan))
-
-def _mtf_prepare(df):
-    if df is None or df.empty:
-        return pd.DataFrame()
-    x=df.copy()
-    if isinstance(x.columns,pd.MultiIndex):
-        x.columns=[c[0] for c in x.columns]
-    x.columns=[str(c).title() for c in x.columns]
-    needed=['Open','High','Low','Close','Volume']
-    if not all(c in x.columns for c in needed):
-        return pd.DataFrame()
-    for c in needed:
-        x[c]=pd.to_numeric(x[c],errors='coerce')
-    x=x.dropna(subset=['Close']).sort_index()
-    x['EMA9']=x['Close'].ewm(span=9,adjust=False,min_periods=9).mean()
-    x['EMA21']=x['Close'].ewm(span=21,adjust=False,min_periods=21).mean()
-    x['EMA200']=x['Close'].ewm(span=200,adjust=False,min_periods=200).mean()
-    x['RSI9']=_mtf_rsi9(x['Close'])
-    x['CCI20']=_mtf_cci20(x)
-    x['VolSMA20']=x['Volume'].rolling(20).mean()
-    x['VolRatio']=x['Volume']/x['VolSMA20'].replace(0,np.nan)
-    x['GapPct']=(x['EMA9']-x['EMA21']).abs()/x['Close']*100
-    x['EMA200Slope10']=x['EMA200'].pct_change(10)*100
-    x['RSI9MA3']=x['RSI9'].rolling(3).mean()
-    x['Prior20High']=x['High'].shift(1).rolling(20).max()
-    return x.dropna(subset=['EMA200','RSI9','CCI20'])
-
-def _mtf_download(symbol, interval, period):
-    sym=str(symbol).upper()
-    if sym.endswith('.NS') or sym.endswith('.BO'):
-        ticker=sym
-    else:
-        ticker=sym+'.NS'
-    try:
-        d=yf.download(ticker,interval=interval,period=period,auto_adjust=False,progress=False,threads=False)
-        if d is None or d.empty:
-            return pd.DataFrame()
-        if isinstance(d.columns,pd.MultiIndex):
-            d.columns=[c[0] for c in d.columns]
-        d.index=pd.to_datetime(d.index)
-        try:
-            if getattr(d.index,'tz',None) is not None:
-                d.index=d.index.tz_localize(None)
-        except Exception:
-            pass
-        return d
-    except Exception:
-        return pd.DataFrame()
-
-def _mtf_latest(df):
-    x=_mtf_prepare(df)
-    if len(x)<2:
-        return None
-    a=x.iloc[-1]; p=x.iloc[-2]
-    price=float(a['Close'])
-    gap=float(a['GapPct']) if pd.notna(a['GapPct']) else np.nan
-    med20=x['GapPct'].tail(20).median()
-    return {
-        'Close':price,'EMA9':float(a['EMA9']),'EMA21':float(a['EMA21']),'EMA200':float(a['EMA200']),
-        'RSI9':float(a['RSI9']),'CCI20':float(a['CCI20']),
-        'VolRatio':float(a['VolRatio']) if pd.notna(a['VolRatio']) else np.nan,
-        'GapPct':gap,
-        'Trend':bool(price>a['EMA200']),
-        'Stack':bool(a['EMA9']>a['EMA21']>a['EMA200']),
-        'EMA9Above21':bool(a['EMA9']>a['EMA21']),
-        'EMA200Rising':bool(a['EMA200Slope10']>0),
-        'RSIRising':bool(a['RSI9']>p['RSI9']),
-        'RSIAbove50':bool(a['RSI9']>=50),
-        'RSIAboveMA3':bool(a['RSI9']>a['RSI9MA3']),
-        'CCIAbove100':bool(a['CCI20']>=100),
-        'CCIRising':bool(a['CCI20']>p['CCI20']),
-        'VolumeStrong':bool(pd.notna(a['VolRatio']) and a['VolRatio']>=1.2),
-        'Breakout20':bool(pd.notna(a['Prior20High']) and price>a['Prior20High']),
-        'NearEMA':bool(pd.notna(gap) and gap<=2.5),
-        'EMAExpansion':bool(pd.notna(med20) and pd.notna(gap) and gap>med20*1.25),
-        'Date':x.index[-1]
-    }
-
-def _mtf_analyze_stock(symbol):
-    specs=[('Monthly','1mo','max'),('Weekly','1wk','10y'),('Daily','1d','3y')]
-    f={}
-    for tf,interval,period in specs:
-        x=_mtf_latest(_mtf_download(symbol,interval,period))
-        if x is None:
-            return None
-        f[tf]=x
-    m,w,d=f['Monthly'],f['Weekly'],f['Daily']
-
-    score=0
-    # Long-term structure: 25 points
-    score+=12 if m['Trend'] else 0
-    score+=8 if m['EMA9Above21'] else 0
-    score+=3 if m['Stack'] else 0
-    score+=2 if m['EMA200Rising'] else 0
-    # Intermediate structure: 30 points
-    score+=14 if w['Trend'] else 0
-    score+=8 if w['EMA9Above21'] else 0
-    score+=4 if w['Stack'] else 0
-    score+=4 if w['RSIAbove50'] else 0
-    # Daily trigger: 45 points
-    score+=10 if d['Trend'] else 0
-    score+=8 if d['EMA9Above21'] else 0
-    score+=5 if d['Stack'] else 0
-    score+=5 if d['RSIAbove50'] else 0
-    score+=4 if d['RSIRising'] else 0
-    score+=4 if d['CCIAbove100'] else (2 if d['CCIRising'] else 0)
-    score+=3 if d['VolumeStrong'] else 0
-    score+=4 if d['Breakout20'] else 0
-    score+=2 if d['EMAExpansion'] else 0
-    score=min(100,int(score))
-
-    # Stages follow the chart logic: early -> confirmed -> strong.
-    early=(w['Trend'] and d['Trend'] and d['NearEMA'] and d['RSIAbove50'] and d['RSIRising'] and d['CCIRising'])
-    confirmed=(m['Trend'] and w['Trend'] and d['Trend'] and d['EMA9Above21'] and d['RSIAbove50'] and (d['CCIAbove100'] or d['CCIRising']) and (d['VolumeStrong'] or d['Breakout20']))
-    strong=(m['Stack'] and w['Stack'] and d['Stack'] and d['Breakout20'] and d['VolumeStrong'] and d['RSIAbove50'] and d['CCIAbove100'])
-
-    if strong:
-        stage='C — Strong Momentum'
-    elif confirmed:
-        stage='B — Confirmed Momentum'
-    elif early:
-        stage='A — Early Setup'
-    elif m['Trend'] and w['Trend'] and d['Trend']:
-        stage='Watch — 3TF Trend Aligned'
-    else:
-        stage='Mixed'
-
-    return {
-        'Stock':symbol,'MTF Score':score,'Stage':stage,
-        'Monthly Trend':'Yes' if m['Trend'] else 'No','Weekly Trend':'Yes' if w['Trend'] else 'No','Daily Trend':'Yes' if d['Trend'] else 'No',
-        'Monthly EMA9>21':'Yes' if m['EMA9Above21'] else 'No','Weekly EMA9>21':'Yes' if w['EMA9Above21'] else 'No','Daily EMA9>21':'Yes' if d['EMA9Above21'] else 'No',
-        'Daily Close':round(d['Close'],2),'Daily EMA9':round(d['EMA9'],2),'Daily EMA21':round(d['EMA21'],2),'Daily EMA200':round(d['EMA200'],2),
-        'RSI9 Daily':round(d['RSI9'],2),'CCI20 Daily':round(d['CCI20'],2),
-        'Volume x20':round(d['VolRatio'],2) if np.isfinite(d['VolRatio']) else np.nan,
-        'EMA9/21 Gap %':round(d['GapPct'],2) if np.isfinite(d['GapPct']) else np.nan,
-        '20D Breakout':'Yes' if d['Breakout20'] else 'No','EMA200 Rising':'Yes' if d['EMA200Rising'] else 'No',
-        'Monthly RSI9':round(m['RSI9'],2),'Weekly RSI9':round(w['RSI9'],2),
-        'Analysis Date':str(pd.Timestamp(d['Date']).date())
-    }
-
-def _mtf_universe_from_text(text):
-    vals=[]
-    for line in str(text).replace(',','\n').splitlines():
-        s=_mtf_clean_symbol(line)
-        if s: vals.append(s)
-    seen=set(); out=[]
-    for s in vals:
-        if s not in seen:
-            seen.add(s); out.append(s)
-    return out
-
-
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -7849,7 +7567,6 @@ st.sidebar.title(
 module = st.sidebar.radio(
     "Select Module",
     [
-        "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)",
         "🎯 CCI + EMA + RSI Strategy",
         "📚 Kratter Momentum Scanner",
         "🔥 Momentum Catalyst Scanner",
@@ -9715,81 +9432,6 @@ def _kratter_position_plan(entry_price, account_size, risk_pct=2.0):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _mcs_large_universe_download(tickers):
-    """Download a large NSE universe in conservative chunks.
-
-    Full NSE can contain far more symbols than the smaller universes.
-    This wrapper normalizes symbols, removes obvious non-equity entries,
-    downloads in 80-symbol chunks, retries rate-limit/temporary failures,
-    and returns only usable OHLC data.
-    """
-    import time as _mcs_time
-
-    cleaned=[]
-    for s in tickers:
-        s=str(s).strip().upper()
-        if not s or s in {"NAN","NONE","NULL"}:
-            continue
-        if s.startswith("^") or " " in s or "DERIVATIVES" in s:
-            continue
-        # NSE equity symbols can contain &, -, and periods; retain them.
-        if not s.endswith(".NS"):
-            s=s+".NS"
-        cleaned.append(s)
-
-    cleaned=list(dict.fromkeys(cleaned))
-    result={}
-
-    for start in range(0,len(cleaned),80):
-        batch=cleaned[start:start+80]
-        data=None
-
-        for attempt in range(3):
-            try:
-                data=yf.download(
-                    tickers=batch,
-                    period="2y",
-                    interval="1d",
-                    auto_adjust=False,
-                    progress=False,
-                    threads=False,
-                    group_by="ticker"
-                )
-                if data is not None and not data.empty:
-                    break
-            except Exception as exc:
-                msg=str(exc).lower()
-                # Back off specifically for rate limiting / transient Yahoo errors.
-                if "rate" in msg or "too many" in msg or "429" in msg:
-                    _mcs_time.sleep(2**(attempt+1))
-                else:
-                    _mcs_time.sleep(1)
-
-        if data is None or data.empty:
-            continue
-
-        if isinstance(data.columns,pd.MultiIndex):
-            for yahoo_symbol in batch:
-                try:
-                    if yahoo_symbol in data.columns.get_level_values(0):
-                        z=data[yahoo_symbol].copy()
-                    elif yahoo_symbol in data.columns.get_level_values(1):
-                        z=data.xs(yahoo_symbol,axis=1,level=1).copy()
-                    else:
-                        continue
-
-                    if z is not None and not z.empty and "Close" in z.columns:
-                        z=z.dropna(subset=["Close"])
-                        if len(z)>=60:
-                            result[yahoo_symbol.removesuffix(".NS")]=z
-                except Exception:
-                    continue
-
-    return result
-
-
 def _kratter_download_batches(tickers, batch_size=40):
     """Serial/batched Yahoo download with graceful failure."""
     result={}
@@ -10391,925 +10033,8 @@ def _mcs_early_breakout_v2(symbol, df, benchmark=None, fundamentals=None):
 
 
 # ============================================================
-# EARLY BREAKOUT V3.1 — LEADER + PRESSURE MODEL
-# ============================================================
-
-def _mcs_early_breakout_v31(symbol, df, benchmark=None, fundamentals=None):
-    """V3.1 adds four validated candidate-quality dimensions to V2:
-    volume surge, relative strength, close near daily high and
-    consolidation breakout structure.
-    """
-    x=_mcs_prepare(df)
-    if x.empty or len(x)<60:
-        return None
-
-    r=x.iloc[-1]
-    close=float(r["Close"])
-    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
-    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
-        return None
-
-    distance=(resistance-close)/resistance*100
-    if distance>2.0:
-        return None
-
-    recent=x.iloc[-15:].copy()
-    if len(recent)<12:
-        return None
-
-    # --- Core resistance pressure ---
-    test_threshold=resistance*0.99
-    tests=int((recent["High"]>=test_threshold).sum())
-
-    lows1=float(recent["Low"].iloc[:7].mean())
-    lows2=float(recent["Low"].iloc[7:].mean())
-    rising_lows=bool(lows2>lows1*1.005)
-
-    r7=recent.iloc[-7:]
-    r8=recent.iloc[:8]
-    range7=float(r7["High"].max()-r7["Low"].min())
-    range8=float(r8["High"].max()-r8["Low"].min())
-    compression=bool(range8>0 and range7<range8*.80)
-
-    # --- 1) Volume Surge ---
-    vr=float(r["Volume Ratio"]) if np.isfinite(r["Volume Ratio"]) else np.nan
-    vol_surge=bool(np.isfinite(vr) and vr>=1.50)
-    vol_strong=bool(np.isfinite(vr) and vr>=1.25)
-
-    vol=pd.to_numeric(recent["Volume"],errors="coerce")
-    test_mask=recent["High"]>=test_threshold
-    tv=vol[test_mask].mean() if test_mask.any() else np.nan
-    ntv=vol[~test_mask].mean() if (~test_mask).any() else np.nan
-    test_vol_strong=bool(
-        np.isfinite(tv) and np.isfinite(ntv) and tv>ntv*1.10
-    )
-
-    # --- 2) Relative Strength vs benchmark ---
-    rs20=np.nan
-    rs60=np.nan
-    if benchmark is not None and not benchmark.empty:
-        b=_mcs_prepare(benchmark)
-        if len(b)>=61:
-            stock20=float(r["Return 20D %"])
-            bench20=float(b.iloc[-1]["Return 20D %"])
-            rs20=stock20-bench20
-            stock60=(close/float(x["Close"].iloc[-61])-1)*100
-            bench60=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-61])-1)*100
-            rs60=stock60-bench60
-    rs_strong=bool(np.isfinite(rs20) and rs20>=5)
-    rs_positive=bool(np.isfinite(rs20) and rs20>=2)
-
-    # --- 3) Close near daily high ---
-    high=float(r["High"])
-    low=float(r["Low"])
-    day_range=high-low
-    clv=(close-low)/day_range if day_range>0 else np.nan
-    close_near_high=bool(np.isfinite(clv) and clv>=0.80)
-    close_very_high=bool(np.isfinite(clv) and clv>=0.90)
-
-    # --- 4) Consolidation breakout structure ---
-    atr=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else np.nan
-    atr5=float(x["ATR14"].iloc[-5:].mean())
-    atr20=float(x["ATR14"].iloc[-25:-5].mean())
-    atr_contract=bool(
-        np.isfinite(atr5) and np.isfinite(atr20) and atr5<atr20*.90
-    )
-
-    # Recent 5D range as % of price vs preceding 10D range.
-    recent5=x.iloc[-5:]
-    prior10=x.iloc[-15:-5]
-    rr5=float(recent5["High"].max()-recent5["Low"].min())
-    rr10=float(prior10["High"].max()-prior10["Low"].min())
-    range_contract=bool(rr10>0 and rr5<rr10*.75)
-    consolidation=bool(compression or (range_contract and atr_contract))
-
-    # --- Bullish moving averages ---
-    sma20=float(r["SMA20"]); sma50=float(r["SMA50"]); sma200=float(r["SMA200"])
-    trend_short=bool(close>sma20 and sma20>sma50)
-    trend_full=bool(trend_short and sma50>sma200)
-
-    # --- Score: 100 points ---
-    score=0
-    reasons=[]
-    missing=[]
-
-    # Resistance pressure: 25
-    if distance<=0.75:
-        score+=15; reasons.append(f"{distance:.2f}% below resistance")
-    elif distance<=1.25:
-        score+=12; reasons.append(f"{distance:.2f}% below resistance")
-    else:
-        score+=8; reasons.append(f"{distance:.2f}% below resistance")
-
-    if tests>=3:
-        score+=10; reasons.append(f"{tests} resistance tests")
-    elif tests==2:
-        score+=8; reasons.append("2 resistance tests")
-    elif tests==1:
-        score+=4; reasons.append("1 resistance test")
-    else:
-        missing.append("No recent resistance test")
-
-    # Rising lows: 10
-    if rising_lows:
-        score+=10; reasons.append("Rising lows")
-    else:
-        missing.append("Rising lows absent")
-
-    # Volume surge/confirmation: 15
-    if vol_surge:
-        score+=10; reasons.append(f"Volume surge {vr:.1f}x")
-    elif vol_strong:
-        score+=6; reasons.append(f"Volume {vr:.1f}x")
-    else:
-        missing.append("Volume surge <1.25x")
-
-    if test_vol_strong:
-        score+=5; reasons.append("Volume stronger on resistance tests")
-
-    # Relative strength: 15
-    if rs_strong:
-        score+=15; reasons.append(f"RS +{rs20:.1f}% vs Nifty")
-    elif rs_positive:
-        score+=9; reasons.append(f"RS +{rs20:.1f}% vs Nifty")
-    else:
-        missing.append("Relative strength <+2%")
-
-    # Close near high: 10
-    if close_very_high:
-        score+=10; reasons.append(f"Close in top {100*(1-clv):.0f}% of range")
-    elif close_near_high:
-        score+=7; reasons.append("Close near daily high")
-    else:
-        missing.append("Close not near daily high")
-
-    # Consolidation: 10
-    if consolidation:
-        score+=10; reasons.append("Tight consolidation")
-    else:
-        missing.append("Consolidation weak")
-
-    # MA structure: 10
-    if trend_full:
-        score+=10; reasons.append("Bullish MA stack")
-    elif trend_short:
-        score+=7; reasons.append("Bullish short MA trend")
-    else:
-        missing.append("MA trend weak")
-
-    # ATR contraction: 5
-    if atr_contract:
-        score+=5; reasons.append("ATR contraction")
-    else:
-        missing.append("ATR contraction absent")
-
-    # Rating and qualification.
-    if score>=85 and distance<=1.5 and tests>=2 and trend_short:
-        rating="🟢 Breakout Imminent V3.1"
-    elif score>=75 and tests>=1 and trend_short:
-        rating="🟡 Strong Breakout Setup V3.1"
-    elif score>=65:
-        rating="⚪ Watchlist V3.1"
-    else:
-        rating="⚪ Not Ready"
-
-    qualified=bool(
-        score>=65 and
-        distance<=2.0 and
-        tests>=1 and
-        trend_short and
-        (rising_lows or consolidation) and
-        (rs_positive or vol_strong or close_near_high)
-    )
-
-    return {
-        "Symbol":symbol,
-        "V3.1 Score":int(min(100,round(score))),
-        "V3.1 Rating":rating,
-        "V3.1 Qualified":qualified,
-        "Close":close,
-        "Resistance 20D":resistance,
-        "Distance to Breakout %":distance,
-        "Resistance Tests 15D":tests,
-        "Rising Lows":rising_lows,
-        "Volume Ratio":vr,
-        "Volume Surge":vol_surge,
-        "Test-Day Volume Stronger":test_vol_strong,
-        "RS 20D %":rs20,
-        "RS 60D %":rs60,
-        "Close Location %":(clv*100 if np.isfinite(clv) else np.nan),
-        "Close Near Daily High":close_near_high,
-        "Close Very Near High":close_very_high,
-        "Range Compression":compression,
-        "Consolidation":consolidation,
-        "ATR14":atr,
-        "ATR Contracting":atr_contract,
-        "SMA20":sma20,
-        "SMA50":sma50,
-        "SMA200":sma200,
-        "Bullish MA Stack":trend_full,
-        "Reasons":" | ".join(reasons),
-        "Missing Confirmations":" | ".join(missing)
-    }
-
-
-
-# ============================================================
 # V2 MARKET REGIME + BREAKOUT CONFIRMATION + TRADE PLAN
 # ============================================================
-
-
-# ============================================================
-# EARLY BREAKOUT V3.2 — BREAKOUT PROBABILITY + TRADE QUALITY
-# ============================================================
-
-
-# ============================================================
-# EARLY BREAKOUT V3.3 — ADAPTIVE BREAKOUT ENGINE
-# ============================================================
-
-def _mcs_early_breakout_v33(symbol, df, benchmark=None, fundamentals=None):
-    """Adaptive V3.3: V2 core + weighted evidence + trade quality.
-
-    Evidence from the ablation tests is used as weighting, not as mandatory
-    gates. Volume is highest-weighted, consolidation medium, close-location
-    lower, and relative strength informational/minor. No volume requirement
-    is mandatory.
-    """
-    x=_mcs_prepare(df)
-    if x.empty or len(x)<210:
-        return None
-
-    r=x.iloc[-1]
-    close=float(r["Close"])
-    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
-    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
-        return None
-
-    distance=(resistance-close)/resistance*100
-    if distance>2.5:
-        return None
-
-    # ---------------- V2 CORE: 50 points ----------------
-    recent15=x.iloc[-15:]
-    tests=int((recent15["High"]>=resistance*.99).sum())
-
-    lows_a=float(recent15["Low"].iloc[:7].mean())
-    lows_b=float(recent15["Low"].iloc[7:].mean())
-    rising_lows=bool(lows_b>lows_a*1.005)
-
-    sma20=float(r["SMA20"])
-    sma50=float(r["SMA50"])
-    sma200=float(r["SMA200"])
-    trend=bool(close>sma20 and sma20>sma50)
-    trend_full=bool(trend and sma50>sma200)
-
-    core=0
-    core_reasons=[]
-    if distance<=.75:
-        core+=15; core_reasons.append("Very close to resistance")
-    elif distance<=1.25:
-        core+=12; core_reasons.append("Close to resistance")
-    elif distance<=2:
-        core+=8
-    else:
-        core+=4
-
-    if tests>=4:
-        core+=15; core_reasons.append(f"{tests} resistance tests")
-    elif tests>=2:
-        core+=12; core_reasons.append(f"{tests} resistance tests")
-    elif tests==1:
-        core+=7; core_reasons.append("1 resistance test")
-
-    if rising_lows:
-        core+=8; core_reasons.append("Rising lows")
-
-    if trend_full:
-        core+=12; core_reasons.append("Bullish MA stack")
-    elif trend:
-        core+=8; core_reasons.append("Bullish short trend")
-
-    core=min(50,core)
-
-    # ---------------- VOLUME: 20 points ----------------
-    vol_ratio=np.nan
-    if "Volume" in x.columns:
-        avg20=float(x["Volume"].iloc[-21:-1].mean())
-        if avg20>0:
-            vol_ratio=float(r["Volume"])/avg20
-
-    volume_score=0
-    if np.isfinite(vol_ratio):
-        if vol_ratio>=2.0:
-            volume_score=20
-        elif vol_ratio>=1.5:
-            volume_score=17
-        elif vol_ratio>=1.25:
-            volume_score=13
-        elif vol_ratio>=1.0:
-            volume_score=8
-        elif vol_ratio>=.75:
-            volume_score=3
-
-    # ---------------- CONSOLIDATION: 15 points ----------------
-    last7=x.iloc[-7:]
-    prior8=x.iloc[-15:-7]
-    range7=float(last7["High"].max()-last7["Low"].min())
-    range8=float(prior8["High"].max()-prior8["Low"].min())
-    compression=bool(range8>0 and range7<range8*.80)
-
-    atr5=float(x["ATR14"].iloc[-5:].mean())
-    atr20=float(x["ATR14"].iloc[-25:-5].mean())
-    atr_contract=bool(
-        np.isfinite(atr5) and np.isfinite(atr20) and atr5<atr20*.90
-    )
-    consolidation=bool(compression or atr_contract)
-
-    consolidation_score=15 if compression and atr_contract else (
-        11 if consolidation else 0
-    )
-
-    # ---------------- CLOSE LOCATION: 10 points ----------------
-    high=float(r["High"])
-    low=float(r["Low"])
-    day_range=high-low
-    close_location=(close-low)/day_range if day_range>0 else np.nan
-    close_score=10 if np.isfinite(close_location) and close_location>=.90 else (
-        7 if np.isfinite(close_location) and close_location>=.80 else 0
-    )
-
-    # ---------------- RELATIVE STRENGTH: 5 points ----------------
-    rs20=np.nan
-    rs60=np.nan
-    if benchmark is not None and not benchmark.empty:
-        b=_mcs_prepare(benchmark)
-        if len(b)>=61:
-            stock20=float(r["Return 20D %"])
-            bench20=float(b.iloc[-1]["Return 20D %"])
-            rs20=stock20-bench20
-            stock60=(close/float(x["Close"].iloc[-61])-1)*100
-            bench60=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-61])-1)*100
-            rs60=stock60-bench60
-
-    rs_score=5 if np.isfinite(rs20) and rs20>=5 else (
-        3 if np.isfinite(rs20) and rs20>=2 else 0
-    )
-
-    raw_score=core+volume_score+consolidation_score+close_score+rs_score
-
-    # ---------------- TRADE QUALITY ----------------
-    atr14=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else close*.02
-    entry=resistance*1.002
-
-    swing_low=float(x["Low"].iloc[-10:].min())
-    atr_stop=entry-1.5*atr14
-    structural_stop=swing_low*.995
-    stop=min(atr_stop,structural_stop)
-    risk=entry-stop
-
-    if risk<=0:
-        return None
-
-    risk_pct=risk/entry*100
-    target1=entry+2*risk
-    target2=entry+3*risk
-    rr=2.0
-
-    quality=0
-    quality_reasons=[]
-
-    if risk_pct<=2:
-        quality+=30; quality_reasons.append("Risk <=2%")
-    elif risk_pct<=3:
-        quality+=22; quality_reasons.append("Risk <=3%")
-    elif risk_pct<=4:
-        quality+=10
-
-    if trend_full:
-        quality+=20; quality_reasons.append("Bullish MA stack")
-    elif trend:
-        quality+=12
-
-    if consolidation:
-        quality+=15; quality_reasons.append("Consolidation/ATR compression")
-
-    if np.isfinite(rs20) and rs20>=5:
-        quality+=10; quality_reasons.append("Strong relative strength")
-    elif np.isfinite(rs20) and rs20>=2:
-        quality+=5
-
-    if np.isfinite(close_location) and close_location>=.80:
-        quality+=10; quality_reasons.append("Strong close")
-
-    if np.isfinite(vol_ratio) and vol_ratio>=1.25:
-        quality+=15; quality_reasons.append("Volume participation")
-
-    quality=min(100,quality)
-
-    # Convert the 100-point setup score into an evidence score.
-    # Trade quality is a gate/secondary ranking rather than an extra indicator.
-    composite=.70*raw_score + .30*quality
-
-    if raw_score>=80 and quality>=70 and composite>=75:
-        status="🟢 A-Grade"
-    elif raw_score>=70 and quality>=55 and composite>=65:
-        status="🟡 B-Grade — Confirm"
-    elif raw_score>=60:
-        status="🔵 Watch"
-    else:
-        status="⚪ Low Priority"
-
-    return {
-        "Symbol":symbol,
-        "V3.3 Score":round(composite,1),
-        "Core V2 Score /50":core,
-        "Volume /20":volume_score,
-        "Consolidation /15":consolidation_score,
-        "Close High /10":close_score,
-        "Relative Strength /5":rs_score,
-        "Trade Quality /100":quality,
-        "Status":status,
-        "Close":close,
-        "Resistance":resistance,
-        "Distance to Breakout %":distance,
-        "Confirmation Entry":entry,
-        "Stop Loss":stop,
-        "Risk %":risk_pct,
-        "Target 1":target1,
-        "Target 2":target2,
-        "Risk Reward":rr,
-        "Volume Ratio":vol_ratio,
-        "Resistance Tests 15D":tests,
-        "Relative Strength 20D %":rs20,
-        "Relative Strength 60D %":rs60,
-        "Close Location %":close_location*100 if np.isfinite(close_location) else np.nan,
-        "Consolidation":consolidation,
-        "ATR Contracting":atr_contract,
-        "Bullish MA Stack":trend_full,
-        "Core Reasons":" | ".join(core_reasons),
-        "Trade Quality Reasons":" | ".join(quality_reasons)
-    }
-
-
-# ============================================================
-# EARLY BREAKOUT V3.4 — REALISTIC RISK / REWARD ENGINE
-# ============================================================
-
-def _mcs_early_breakout_v34(symbol, df, benchmark=None, fundamentals=None):
-    """V3.3 signal engine with realistic stop/target construction.
-
-    The signal score remains the V3.3 evidence-weighted score. The trade
-    layer now uses a capped structural/ATR risk and a nearby resistance
-    target instead of assuming a blind 2R/3R target.
-    """
-    base=_mcs_early_breakout_v33(symbol,df,benchmark,fundamentals)
-    if base is None:
-        return None
-
-    x=_mcs_prepare(df)
-    if x.empty or len(x)<210:
-        return None
-
-    entry=float(base["Confirmation Entry"])
-    resistance=float(base["Resistance"])
-    atr=float(x["ATR14"].iloc[-1]) if np.isfinite(x["ATR14"].iloc[-1]) else entry*.02
-
-    # Structural and ATR candidates.
-    swing_low=float(x["Low"].iloc[-10:].min())
-    atr_stop=entry-1.5*atr
-    structural_stop=swing_low*.995
-
-    # Prefer the tighter protective stop, but never allow a risk > 7%.
-    raw_stop=max(atr_stop,structural_stop)
-    max_risk_stop=entry*.93
-    stop=max(raw_stop,max_risk_stop)
-
-    risk=entry-stop
-    if risk<=0:
-        return None
-
-    risk_pct=risk/entry*100
-
-    # Find meaningful overhead resistance from prior highs.
-    prior=x.iloc[-120:-1].copy()
-    levels=[]
-
-    for lookback in (20,40,60,120):
-        z=x.iloc[-lookback-1:-1]
-        if not z.empty:
-            levels.append(float(z["High"].max()))
-
-    # Candidate levels must be above entry and meaningfully separated.
-    candidates=sorted(set(
-        round(v,6) for v in levels
-        if np.isfinite(v) and v>entry*1.01
-    ))
-
-    # Prefer the nearest meaningful overhead resistance.
-    target=candidates[0] if candidates else entry+2*risk
-
-    # Ensure the target is not below a minimum 1.5R opportunity.
-    minimum_target=entry+1.5*risk
-    if target<minimum_target:
-        target=entry+2*risk
-
-    reward=target-entry
-    rr=reward/risk if risk>0 else np.nan
-
-    # Second target: next resistance / 3R, whichever is reachable.
-    higher=[v for v in candidates if v>target*1.01]
-    target2=higher[0] if higher else entry+3*risk
-
-    # Realistic trade-quality score.
-    quality=0
-    quality_reasons=[]
-
-    if risk_pct<=3:
-        quality+=30
-        quality_reasons.append("Risk <=3%")
-    elif risk_pct<=5:
-        quality+=24
-        quality_reasons.append("Risk <=5%")
-    elif risk_pct<=7:
-        quality+=15
-        quality_reasons.append("Risk <=7%")
-    else:
-        quality+=0
-        quality_reasons.append("Risk >7%")
-
-    if rr>=2.5:
-        quality+=35
-        quality_reasons.append("R:R >=2.5")
-    elif rr>=2:
-        quality+=30
-        quality_reasons.append("R:R >=2")
-    elif rr>=1.5:
-        quality+=20
-        quality_reasons.append("R:R >=1.5")
-    else:
-        quality+=5
-        quality_reasons.append("R:R <1.5")
-
-    # Carry forward structural evidence from V3.3.
-    quality+=min(15,int(base["Core V2 Score /50"]*.30))
-
-    if base["Volume /20"]>=13:
-        quality+=10
-        quality_reasons.append("Strong volume")
-    if base["Consolidation /15"]>=11:
-        quality+=5
-        quality_reasons.append("Tight consolidation")
-
-    quality=min(100,quality)
-
-    setup=float(base["V3.3 Score"])
-    composite=.65*setup+.35*quality
-
-    if risk_pct<=5 and rr>=2 and setup>=75 and quality>=70:
-        status="🟢 A — Strong Trade"
-    elif risk_pct<=7 and rr>=1.5 and setup>=70 and quality>=60:
-        status="🟡 B — Confirm Breakout"
-    elif risk_pct<=7 and setup>=60:
-        status="🔵 Watch"
-    else:
-        status="🔴 Avoid — Poor Trade Economics"
-
-    result=dict(base)
-    result.update({
-        "V3.4 Score":round(composite,1),
-        "Trade Quality V3.4":int(quality),
-        "Status V3.4":status,
-        "Stop Loss V3.4":stop,
-        "Risk V3.4 %":risk_pct,
-        "Target 1 V3.4":target,
-        "Target 2 V3.4":target2,
-        "Realistic R:R":rr,
-        "Overhead Resistance Target":target,
-        "Trade Quality Reasons V3.4":" | ".join(quality_reasons)
-    })
-    return result
-
-
-# ============================================================
-# MULTIBAGGER INTELLIGENCE V2.4 — SECTOR ROTATION + CATALYST
-# ============================================================
-
-def _mbv24_norm_cols(df):
-    x=df.copy()
-    x.columns=[str(c).replace("\xa0"," ").strip() for c in x.columns]
-    return x
-
-def _mbv24_score_linear(s,lo,hi):
-    s=pd.to_numeric(s,errors="coerce")
-    return ((s-lo)/(hi-lo)*100).clip(0,100)
-
-def _mbv24_sector_rotation(stock_data,sector_map,benchmark):
-    if not sector_map or benchmark is None or benchmark.empty:
-        return {}
-    b=_mcs_prepare(benchmark)
-    if b.empty:
-        return {}
-    periods={"3M":63,"6M":126,"12M":252}
-    bench={}
-    for lab,n in periods.items():
-        bench[lab]=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-1-n])-1)*100 if len(b)>n else np.nan
-    groups={}
-    for symbol,d in stock_data.items():
-        sector=sector_map.get(str(symbol).upper().strip())
-        if not sector or d is None or d.empty:
-            continue
-        try:
-            z=_mcs_prepare(d)
-            for lab,n in periods.items():
-                if len(z)>n:
-                    ret=(float(z["Close"].iloc[-1])/float(z["Close"].iloc[-1-n])-1)*100
-                    groups.setdefault(sector,{}).setdefault(lab,[]).append(ret)
-        except Exception:
-            continue
-    out={}
-    for sector,vals in groups.items():
-        item={"Sector":sector}
-        rs=[]
-        for lab in periods:
-            arr=vals.get(lab,[])
-            sr=float(np.nanmean(arr)) if arr else np.nan
-            rel=sr-bench[lab] if np.isfinite(sr) and np.isfinite(bench[lab]) else np.nan
-            item[f"Sector {lab} Return %"]=sr
-            item[f"Sector {lab} RS %"]=rel
-            if np.isfinite(rel): rs.append(rel)
-        item["Sector Rotation Score"]=round(max(0,min(100,50+2*np.nanmean(rs))),1) if rs else np.nan
-        out[sector]=item
-    return out
-
-def _mbv24_catalyst_score(row):
-    def n(k):
-        try: return float(row.get(k,np.nan))
-        except Exception: return np.nan
-    vals=[]
-    for k in ["Catalyst Score","Technology Exposure"]:
-        v=n(k)
-        if np.isfinite(v): vals.append(max(0,min(100,v)))
-    for k,lo,hi in [("Order Book Growth %",5,40),("Capex Growth %",5,40),("Earnings Acceleration %",5,30)]:
-        v=n(k)
-        if np.isfinite(v): vals.append(float(_mbv24_score_linear(pd.Series([v]),lo,hi).iloc[0]))
-    f=n("Catalyst Freshness Days")
-    if np.isfinite(f): vals.append(100 if f<=30 else (75 if f<=90 else (50 if f<=180 else 25)))
-    return round(float(np.nanmean(vals)),1) if vals else np.nan
-
-def _mbv24_final_score(discovery,sustain,rotation,catalyst,timing):
-    parts=[]; weights=[]
-    for v,w in [(discovery,.40),(sustain,.25),(rotation,.15),(catalyst,.10),(timing,.10)]:
-        if np.isfinite(v):
-            parts.append(v); weights.append(w)
-    return round(float(np.average(parts,weights=weights)),1) if parts else np.nan
-
-def _mbv24_classify(discovery,sustain,rotation,catalyst,timing,risk,rr):
-    why_now=np.isfinite(rotation) and rotation>=65 and np.isfinite(catalyst) and catalyst>=65
-    strong=discovery>=78 and sustain>=70
-    if strong and why_now and np.isfinite(timing) and timing>=75 and (not np.isfinite(risk) or risk<=5) and (not np.isfinite(rr) or rr>=2):
-        return "💎 High Conviction"
-    if strong and why_now and np.isfinite(timing) and timing>=55:
-        return "🚀 Emerging Multibagger"
-    if strong and why_now:
-        return "🔥 Catalyst + Sector Discovery"
-    if strong:
-        return "🟡 Fundamental Discovery"
-    if np.isfinite(timing) and timing>=75:
-        return "🟢 Technical Candidate"
-    return "🔵 Watch"
-
-def _mcs_early_breakout_v32(symbol, df, benchmark=None, fundamentals=None):
-    """V3.2 separates breakout probability from trade quality.
-
-    It deliberately does not require volume surge. Relative strength,
-    consolidation, close location and resistance pressure identify the
-    setup; R:R and risk distance determine whether it is tradable.
-    """
-    x=_mcs_prepare(df)
-    if x.empty or len(x)<60:
-        return None
-
-    r=x.iloc[-1]
-    close=float(r["Close"])
-    resistance=float(r["High20Prev"]) if np.isfinite(r["High20Prev"]) else np.nan
-    if not np.isfinite(resistance) or resistance<=0 or close>=resistance:
-        return None
-
-    distance=(resistance-close)/resistance*100
-    if distance>2.5:
-        return None
-
-    recent=x.iloc[-15:]
-    test_threshold=resistance*.99
-    tests=int((recent["High"]>=test_threshold).sum())
-
-    lows1=float(recent["Low"].iloc[:7].mean())
-    lows2=float(recent["Low"].iloc[7:].mean())
-    rising_lows=bool(lows2>lows1*1.005)
-
-    # Consolidation / compression
-    r7=recent.iloc[-7:]
-    r8=recent.iloc[:8]
-    range7=float(r7["High"].max()-r7["Low"].min())
-    range8=float(r8["High"].max()-r8["Low"].min())
-    compression=bool(range8>0 and range7<range8*.80)
-
-    recent5=x.iloc[-5:]
-    prior10=x.iloc[-15:-5]
-    rr5=float(recent5["High"].max()-recent5["Low"].min())
-    rr10=float(prior10["High"].max()-prior10["Low"].min())
-    range_contract=bool(rr10>0 and rr5<rr10*.75)
-
-    atr14=float(r["ATR14"]) if np.isfinite(r["ATR14"]) else np.nan
-    atr5=float(x["ATR14"].iloc[-5:].mean())
-    atr20=float(x["ATR14"].iloc[-25:-5].mean())
-    atr_contract=bool(
-        np.isfinite(atr5) and np.isfinite(atr20) and atr5<atr20*.90
-    )
-    consolidation=bool(compression or (range_contract and atr_contract))
-
-    # Relative strength vs benchmark
-    rs20=np.nan
-    rs60=np.nan
-    if benchmark is not None and not benchmark.empty:
-        b=_mcs_prepare(benchmark)
-        if len(b)>=61:
-            stock20=float(r["Return 20D %"])
-            bench20=float(b.iloc[-1]["Return 20D %"])
-            rs20=stock20-bench20
-            stock60=(close/float(x["Close"].iloc[-61])-1)*100
-            bench60=(float(b["Close"].iloc[-1])/float(b["Close"].iloc[-61])-1)*100
-            rs60=stock60-bench60
-
-    rs_strong=bool(np.isfinite(rs20) and rs20>=5)
-    rs_positive=bool(np.isfinite(rs20) and rs20>=2)
-
-    # Close location
-    high=float(r["High"])
-    low=float(r["Low"])
-    day_range=high-low
-    clv=(close-low)/day_range if day_range>0 else np.nan
-    close_near_high=bool(np.isfinite(clv) and clv>=.80)
-    close_very_high=bool(np.isfinite(clv) and clv>=.90)
-
-    # Trend / regime
-    sma20=float(r["SMA20"])
-    sma50=float(r["SMA50"])
-    sma200=float(r["SMA200"])
-    trend_short=bool(close>sma20 and sma20>sma50)
-    trend_full=bool(trend_short and sma50>sma200)
-
-    # --------------------------------------------------------
-    # 1) BREAKOUT PROBABILITY SCORE — 100
-    # --------------------------------------------------------
-    bp=0
-    bp_reasons=[]
-
-    if distance<=.75:
-        bp+=20; bp_reasons.append("Very close to resistance")
-    elif distance<=1.25:
-        bp+=16; bp_reasons.append("Close to resistance")
-    elif distance<=2.0:
-        bp+=12; bp_reasons.append("Within 2% of resistance")
-    else:
-        bp+=7
-
-    if tests>=3:
-        bp+=15; bp_reasons.append(f"{tests} resistance tests")
-    elif tests==2:
-        bp+=12; bp_reasons.append("2 resistance tests")
-    elif tests==1:
-        bp+=7; bp_reasons.append("1 resistance test")
-
-    if rising_lows:
-        bp+=10; bp_reasons.append("Rising lows")
-
-    if consolidation:
-        bp+=20; bp_reasons.append("Consolidation/compression")
-
-    if close_very_high:
-        bp+=15; bp_reasons.append("Close very near daily high")
-    elif close_near_high:
-        bp+=10; bp_reasons.append("Close near daily high")
-
-    if rs_strong:
-        bp+=20; bp_reasons.append(f"Strong RS +{rs20:.1f}%")
-    elif rs_positive:
-        bp+=12; bp_reasons.append(f"Positive RS +{rs20:.1f}%")
-
-    bp=min(100,bp)
-
-    # --------------------------------------------------------
-    # 2) TRADE QUALITY / RISK-REWARD
-    # --------------------------------------------------------
-    # Conservative next-session confirmation entry above resistance.
-    entry=resistance*1.002
-
-    if not np.isfinite(atr14) or atr14<=0:
-        atr14=entry*.02
-
-    # Risk is based on ATR and recent structural low.
-    swing_low=float(x["Low"].iloc[-10:].min())
-    atr_stop=entry-1.5*atr14
-    structural_stop=swing_low*.995
-    stop=min(atr_stop,structural_stop)
-
-    risk=entry-stop
-    if risk<=0:
-        return None
-
-    # Projected targets using risk multiples.
-    target1=entry+2*risk
-    target2=entry+3*risk
-
-    reward1=target1-entry
-    rr1=reward1/risk if risk>0 else np.nan
-
-    # Quality components.
-    tq=0
-    tq_reasons=[]
-
-    if rr1>=2:
-        tq+=20; tq_reasons.append("R:R >= 2.0")
-    if rr1>=2.5:
-        tq+=5; tq_reasons.append("R:R >= 2.5")
-
-    risk_pct=risk/entry*100
-    if risk_pct<=2:
-        tq+=20; tq_reasons.append("Low risk distance")
-    elif risk_pct<=3:
-        tq+=12; tq_reasons.append("Moderate risk distance")
-    elif risk_pct<=4:
-        tq+=5
-    else:
-        tq_reasons.append("High risk distance")
-
-    if trend_full:
-        tq+=15; tq_reasons.append("Bullish MA stack")
-    elif trend_short:
-        tq+=10; tq_reasons.append("Bullish short trend")
-
-    if atr_contract:
-        tq+=10; tq_reasons.append("ATR contracting")
-
-    if consolidation:
-        tq+=10; tq_reasons.append("Tight base")
-
-    if rs_strong:
-        tq+=15; tq_reasons.append("Strong relative strength")
-    elif rs_positive:
-        tq+=8; tq_reasons.append("Positive relative strength")
-
-    if close_near_high:
-        tq+=5; tq_reasons.append("Strong close")
-
-    tq=min(100,tq)
-
-    # --------------------------------------------------------
-    # 3) FINAL DECISION
-    # --------------------------------------------------------
-    # Breakout probability gets more weight than trade quality, but both
-    # must clear minimum gates.
-    composite=.60*bp+.40*tq
-
-    if bp>=75 and tq>=70 and composite>=75 and rr1>=2:
-        status="🟢 A-Grade Breakout Trade"
-    elif bp>=70 and tq>=60 and composite>=68:
-        status="🟡 Breakout Ready — Confirm"
-    elif bp>=60:
-        status="🔵 Breakout Watch"
-    else:
-        status="⚪ Low Priority"
-
-    return {
-        "Symbol":symbol,
-        "V3.2 Composite":round(composite,1),
-        "Breakout Probability":int(bp),
-        "Trade Quality":int(tq),
-        "Status":status,
-        "Close":close,
-        "Resistance":resistance,
-        "Distance to Breakout %":distance,
-        "Confirmation Entry":entry,
-        "Stop Loss":stop,
-        "Risk %":risk_pct,
-        "Target 1":target1,
-        "Target 2":target2,
-        "Risk Reward":rr1,
-        "Resistance Tests 15D":tests,
-        "Rising Lows":rising_lows,
-        "Relative Strength 20D %":rs20,
-        "Relative Strength 60D %":rs60,
-        "Close Location %":clv*100 if np.isfinite(clv) else np.nan,
-        "Close Near Daily High":close_near_high,
-        "Consolidation":consolidation,
-        "ATR Contracting":atr_contract,
-        "Bullish MA Stack":trend_full,
-        "Breakout Reasons":" | ".join(bp_reasons),
-        "Trade Quality Reasons":" | ".join(tq_reasons)
-    }
-
 
 def _mcs_rsi(series, period=14):
     s=pd.Series(series,dtype="float64")
@@ -11576,149 +10301,6 @@ def _mcs_trade_plan_v2(symbol, df, benchmark=None, fundamentals=None,
 
 
 
-
-if module == "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)":
-
-    st.header("📈 Multi-Timeframe EMA 9/21/200 + RSI(9) + CCI(20)")
-    st.caption("Monthly → Weekly → Daily alignment using EMA 200 (red), EMA 9 (yellow), EMA 21 (green), RSI(9), CCI(20) and volume.")
-
-    # --------------------------------------------------------
-    # UNIVERSE SELECTION
-    # --------------------------------------------------------
-    st.subheader("📊 Stock Universe")
-    u1,u2,u3=st.columns(3)
-    with u1:
-        mtf_universe_type=st.selectbox(
-            "Select stock universe",
-            [
-                "Manual Symbols",
-                "Nifty 50",
-                "Nifty 500",
-                "NSE F&O Stocks",
-                "Full NSE Equity",
-                "Full BSE Equity",
-                "NSE + BSE Equity"
-            ],
-            key="mtf_universe_type"
-        )
-    with u2:
-        mtf_min_score=st.slider("Minimum MTF score",0,100,60,5,key="mtf_min_score")
-        mtf_stage=st.selectbox("Stage filter",["All","A — Early Setup","B — Confirmed Momentum","C — Strong Momentum","Watch — 3TF Trend Aligned"],key="mtf_stage")
-    with u3:
-        mtf_max=st.number_input("Maximum stocks (0 = entire selected universe)",0,10000,100,25,key="mtf_max")
-        st.info("For Full NSE/BSE, scanning every stock can take a long time because each stock uses Monthly + Weekly + Daily Yahoo data.")
-
-    if mtf_universe_type=="Manual Symbols":
-        mtf_universe=st.text_area(
-            "Enter symbols (one per line or comma separated)",
-            "RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK\nSBIN\nBEL\nHAL\nLT\nBHARTIARTL",
-            height=180,
-            key="mtf_manual_symbols"
-        )
-        syms=_mtf_universe_from_text(mtf_universe)
-        st.caption(f"Manual symbols loaded: **{len(syms)}**")
-    else:
-        syms=[]
-        with st.spinner("Loading selected stock universe..."):
-            try:
-                if mtf_universe_type=="Nifty 50":
-                    syms=list(load_nifty50())
-                elif mtf_universe_type=="Nifty 500":
-                    syms=list(load_nifty500())
-                elif mtf_universe_type=="NSE F&O Stocks":
-                    syms=list(load_fno_stocks())
-                elif mtf_universe_type=="Full NSE Equity":
-                    syms=list(load_nse_equity_universe())
-                    syms=[_mtf_clean_symbol(x) for x in syms]
-                elif mtf_universe_type=="Full BSE Equity":
-                    syms=list(load_bse_equity_universe())
-                elif mtf_universe_type=="NSE + BSE Equity":
-                    nse=list(load_nse_equity_universe())
-                    bse=list(load_bse_equity_universe())
-                    syms=[_mtf_clean_symbol(x) for x in nse]+list(bse)
-            except Exception as exc:
-                st.error(f"Could not load the selected universe: {type(exc).__name__}: {exc}")
-                syms=[]
-
-        # De-duplicate while preserving exchange suffixes.
-        seen=set(); cleaned=[]
-        for x in syms:
-            z=_mtf_clean_symbol(x)
-            if z and z not in seen:
-                seen.add(z); cleaned.append(z)
-        syms=cleaned
-        st.caption(f"**{mtf_universe_type}**: {len(syms):,} symbols loaded")
-
-        if mtf_universe_type=="Full NSE Equity" and not syms:
-            st.warning("Full NSE Equity could not be loaded. NSE's public securities list may be temporarily unavailable.")
-        if mtf_universe_type=="Full BSE Equity" and not syms:
-            st.warning("Full BSE Equity could not be loaded. BSE's public bhavcopy may be temporarily unavailable.")
-
-    if int(mtf_max)>0:
-        syms=syms[:int(mtf_max)]
-
-    st.caption(f"Stocks to scan this run: **{len(syms):,}**")
-
-    run_mtf=st.button("🚀 Run Multi-Timeframe Scanner",type="primary",key="run_mtf_scanner")
-
-    if run_mtf:
-        if not syms:
-            st.error("No stocks are available in the selected universe.")
-        else:
-            rows=[]; failures=[]; pb=st.progress(0); status=st.empty()
-            for i,sym in enumerate(syms,1):
-                status.write(f"Scanning {i}/{len(syms)} — {sym}")
-                try:
-                    r=_mtf_analyze_stock(sym)
-                    if r is not None:
-                        rows.append(r)
-                    else:
-                        failures.append(f"{sym}: insufficient/empty Monthly, Weekly or Daily data")
-                except Exception as exc:
-                    failures.append(f"{sym}: {type(exc).__name__}: {exc}")
-                pb.progress(i/max(1,len(syms)))
-            pb.empty(); status.empty()
-            if rows:
-                res=pd.DataFrame(rows).sort_values(['MTF Score','RSI9 Daily'],ascending=[False,False])
-                st.session_state['mtf_power_results']=res
-                st.success(f"Analysed {len(rows):,} stocks successfully; {len(failures):,} could not be analysed.")
-                if failures:
-                    with st.expander(f"⚠️ {len(failures):,} stocks could not be analysed"):
-                        st.code("\n".join(failures[:100]))
-            else:
-                st.error("No stocks could be analysed.")
-                if failures:
-                    with st.expander("Show scan diagnostics"):
-                        st.code("\n".join(failures[:100]))
-
-    if 'mtf_power_results' in st.session_state:
-        res=st.session_state['mtf_power_results'].copy()
-        res=res[res['MTF Score']>=mtf_min_score]
-        if mtf_stage!="All": res=res[res['Stage']==mtf_stage]
-
-        st.subheader("Top Multi-Timeframe Setups")
-        if res.empty:
-            st.warning("No stocks meet the selected MTF score/stage filter.")
-        else:
-            top=res.head(10)
-            cols=st.columns(min(5,len(top)))
-            for i,(_,row) in enumerate(top.iterrows()):
-                with cols[i%len(cols)]:
-                    st.metric(str(row['Stock']),f"{int(row['MTF Score'])}/100",str(row['Stage']))
-            st.dataframe(res,use_container_width=True,hide_index=True)
-            st.download_button("⬇️ Download MTF results",res.to_csv(index=False).encode('utf-8'),"MultiTF_EMA_RSI_CCI_results.csv","text/csv",key="download_mtf_results")
-
-            st.markdown("""
-**A — Early Setup:** Monthly/Weekly structure is bullish, Daily is above EMA200, EMA9/21 are compressed, RSI(9) is above 50 and rising, and CCI(20) is improving.
-
-**B — Confirmed Momentum:** all three timeframes are trend-positive, Daily EMA9 > EMA21, RSI(9) > 50, CCI is positive/rising, with volume or breakout confirmation.
-
-**C — Strong Momentum:** Monthly + Weekly + Daily have EMA9 > EMA21 > EMA200, Daily breaks the prior 20-day high, volume ≥ 1.2× 20D average, RSI(9) > 50 and CCI(20) > +100.
-
-This is a research module. It does not guarantee future returns; the thresholds should be backtested and then validated out of sample.
-""")
-
-
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -11744,10 +10326,6 @@ if module == "🚀 Smart Breakout Scanner":
 
         nse_stocks = (
             load_nse_equity_universe()
-        )
-
-        bse_stocks = (
-            load_bse_equity_universe()
         )
 
         nifty500 = (
@@ -11782,8 +10360,7 @@ if module == "🚀 Smart Breakout Scanner":
             "Nifty Midcap 100",
             "Nifty Smallcap 250",
             "NSE F&O Stocks",
-            "Full NSE",
-            "Full BSE"
+            "Full NSE"
         ]
     )
 
@@ -11793,8 +10370,7 @@ if module == "🚀 Smart Breakout Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap250,
-        bse_stocks
+        nifty_smallcap250
     )
 
     if (
@@ -11873,19 +10449,6 @@ if module == "🚀 Smart Breakout Scanner":
 
             Please try again later.
             """
-        )
-
-        st.stop()
-
-    if (
-        universe == "Full BSE"
-        and not stocks
-    ):
-
-        st.error(
-            "Full BSE equity list could not be loaded. "
-            "BSE public bhavcopy may be temporarily unavailable. "
-            "Please try again later."
         )
 
         st.stop()
@@ -12507,144 +11070,7 @@ MACD = 1 point
 # 120-DAY HIGH BREAKOUT SCANNER
 # ============================================================
 
-# ============================================================
-# V3.1 FACTOR ABLATION ENGINE
-# ============================================================
-
-def _mcs_ablation_backtest(symbol, df, benchmark=None, fundamentals=None,
-                            start_ts=None, end_ts=None, min_score=65,
-                            max_hold_days=10):
-    d=_mcs_prepare(df)
-    if d.empty or len(d)<210:
-        return {}
-    d=d.sort_index()
-
-    bfull=_mcs_prepare(benchmark) if benchmark is not None and not benchmark.empty else pd.DataFrame()
-    if not bfull.empty:
-        bfull=bfull.sort_index()
-
-    variants=[
-        "V2 Baseline","V2 + Volume Surge","V2 + Relative Strength",
-        "V2 + Close Near High","V2 + Consolidation","V3.1 All Factors"
-    ]
-    results={v:[] for v in variants}
-    previous={v:False for v in variants}
-
-    last_signal_index=len(d)-max_hold_days-1
-    if last_signal_index<205:
-        return results
-
-    for i in range(205,last_signal_index+1):
-        hist=d.iloc[:i+1]
-        sig_date=d.index[i]
-        if start_ts is not None and sig_date<pd.Timestamp(start_ts):
-            continue
-        if end_ts is not None and sig_date>pd.Timestamp(end_ts):
-            continue
-
-        b=bfull.loc[bfull.index<=sig_date] if not bfull.empty else pd.DataFrame()
-        v2=_mcs_early_breakout_v2(symbol,hist,b,fundamentals or {})
-        v2_ok=bool(v2 is not None and v2.get("V2 Qualified",False)
-                   and float(v2.get("V2 Score",0))>=min_score)
-
-        if not v2_ok:
-            for v in variants:
-                previous[v]=False
-            continue
-
-        v31=_mcs_early_breakout_v31(symbol,hist,b,fundamentals or {})
-
-        def qualifies(v):
-            if v=="V2 Baseline":
-                return True
-            if v=="V2 + Volume Surge":
-                return bool(v31 and (v31.get("Volume Surge",False) or
-                                     v31.get("Test-Day Volume Stronger",False)))
-            if v=="V2 + Relative Strength":
-                rs=v31.get("RS 20D %",np.nan) if v31 else np.nan
-                return bool(np.isfinite(rs) and rs>=2.0)
-            if v=="V2 + Close Near High":
-                return bool(v31 and v31.get("Close Near Daily High",False))
-            if v=="V2 + Consolidation":
-                return bool(v31 and v31.get("Consolidation",False))
-            if v=="V3.1 All Factors":
-                return bool(v31 and v31.get("V3.1 Qualified",False)
-                            and float(v31.get("V3.1 Score",0))>=min_score)
-            return False
-
-        future=d.iloc[i+1:i+1+max_hold_days].copy()
-        if future.empty:
-            continue
-        entry_date=future.index[0]
-        if entry_date<=sig_date:
-            continue
-
-        resistance=v2.get("Resistance 20D",np.nan)
-        entry=float(future["Open"].iloc[0])
-        hits=future[future["Close"]>float(resistance)] if np.isfinite(resistance) else pd.DataFrame()
-        days=np.nan
-        breakout_date=""
-        if not hits.empty:
-            hit=hits.index[0]
-            days=int(future.index.get_loc(hit)+1)
-            breakout_date=hit.strftime("%Y-%m-%d")
-
-        forward=(float(future["Close"].iloc[-1])/entry-1)*100
-        max_gain=(float(future["High"].max())/entry-1)*100
-        max_dd=(float(future["Low"].min())/entry-1)*100
-
-        atr=float(v2.get("ATR14",np.nan))
-        if not np.isfinite(atr):
-            atr=entry*.02
-        risk=1.5*atr
-
-        for variant in variants:
-            current=qualifies(variant)
-            if current and previous[variant]:
-                continue
-            previous[variant]=current
-            if not current:
-                continue
-
-            results[variant].append({
-                "Variant":variant,"Symbol":symbol,
-                "Signal Date":sig_date.strftime("%Y-%m-%d"),
-                "Entry Date":entry_date.strftime("%Y-%m-%d"),
-                "V2 Score":float(v2.get("V2 Score",np.nan)),
-                "V3.1 Score":float(v31.get("V3.1 Score",np.nan)) if v31 else np.nan,
-                "Entry":entry,"Resistance":resistance,
-                "Breakout Date":breakout_date,"Days To Breakout":days,
-                "Breakout Within 5D":bool(np.isfinite(days) and days<=5),
-                "Forward Return %":forward,"Max Gain %":max_gain,
-                "Max Drawdown %":max_dd,
-                "Stop Hit":bool((future["Low"]<=entry-risk).any()),
-                "Target 1 Hit":bool((future["High"]>=entry+2*risk).any()),
-                "Target 2 Hit":bool((future["High"]>=entry+3*risk).any())
-            })
-    return results
-
-
-def _mcs_ablation_summary(rows):
-    df=pd.DataFrame(rows)
-    if df.empty:
-        return {"Signals":0,"Breakout <=5D %":np.nan,
-                "Avg Forward Return %":np.nan,
-                "Median Forward Return %":np.nan,
-                "Target 1 Hit %":np.nan,"Stop Hit %":np.nan,
-                "Avg Max Gain %":np.nan,"Avg Max Drawdown %":np.nan}
-    days=pd.to_numeric(df["Days To Breakout"],errors="coerce")
-    return {
-        "Signals":len(df),
-        "Breakout <=5D %":float((days<=5).mean()*100),
-        "Avg Forward Return %":float(df["Forward Return %"].mean()),
-        "Median Forward Return %":float(df["Forward Return %"].median()),
-        "Target 1 Hit %":float(df["Target 1 Hit"].mean()*100),
-        "Stop Hit %":float(df["Stop Hit"].mean()*100),
-        "Avg Max Gain %":float(df["Max Gain %"].mean()),
-        "Avg Max Drawdown %":float(df["Max Drawdown %"].mean())
-    }
-
-if module == "🎯 Buy / Sell Signal Engine":
+elif module == "🎯 Buy / Sell Signal Engine":
 
     st.header(
         "🎯 Scanner Behaviour → BUY / SELL Signal Engine"
@@ -12676,7 +11102,6 @@ if module == "🎯 Buy / Sell Signal Engine":
     st.caption("Loading stock universes...")
 
     nse_stocks=load_nse_equity_universe()
-    bse_stocks=load_bse_equity_universe()
     nifty500=load_nifty500()
     fno_stocks=load_fno_stocks()
     nifty_midcap100=load_nifty_midcap100()
@@ -12690,8 +11115,7 @@ if module == "🎯 Buy / Sell Signal Engine":
             "Nifty Midcap 100",
             "Nifty Smallcap 250",
             "NSE F&O Stocks",
-            "Full NSE",
-            "Full BSE"
+            "Full NSE"
         ],
         key="signal_engine_universe"
     )
@@ -12702,14 +11126,13 @@ if module == "🎯 Buy / Sell Signal Engine":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap250,
-        bse_stocks
+        nifty_smallcap250
     )
 
     max_stocks=st.sidebar.slider(
         "Maximum Stocks",
         10,
-        min(3000,max(10,len(stocks))),
+        min(500,max(10,len(stocks))),
         min(100,max(10,len(stocks))),
         10,
         key="signal_engine_max_stocks"
@@ -13754,13 +12177,81 @@ elif module == "📚 Kratter Momentum Scanner":
 
     st.subheader("1️⃣ Select universe")
 
+    def _mcs_normalize_bse_symbol(s):
+        s=str(s).strip().upper().replace(".BO","").replace(".NS","")
+        return s
+
+    def _mcs_load_bse_universe(kind="bse"):
+        """Load BSE symbols with a deterministic fallback.
+
+        BSE Equity: use the broadest stock universe already available in the
+        app and convert to .BO. This avoids an empty universe when the generic
+        NSE-equity endpoint is temporarily unavailable.
+
+        BSE 100/200/500: use bundled constituent lists only; never pretend a
+        generic list is an official index constituent list.
+        """
+        names={
+            "bse100":["BSE100","BSE_100","BSE100_LIST"],
+            "bse200":["BSE200","BSE_200","BSE200_LIST"],
+            "bse500":["BSE500","BSE_500","BSE500_LIST"],
+            "bse":["BSE_EQUITY","BSE_STOCKS","BSE_SYMBOLS"]
+        }
+
+        for name in names.get(kind,[]):
+            obj=globals().get(name)
+            if obj:
+                try:
+                    vals=[_mcs_normalize_bse_symbol(x) for x in obj]
+                    vals=list(dict.fromkeys(x for x in vals if x))
+                    if vals:
+                        return vals
+                except Exception:
+                    pass
+
+        if kind!="bse":
+            return []
+
+        # Broad fallback: combine every stock universe that is already
+        # supported by the app. Duplicates are removed.
+        pools=[]
+        loaders=[
+            "load_nse_equity_universe",
+            "load_nifty500",
+            "load_nifty_midcap100",
+            "load_nifty_smallcap250",
+            "load_fno_stocks"
+        ]
+        for fname in loaders:
+            fn=globals().get(fname)
+            if callable(fn):
+                try:
+                    vals=fn()
+                    if vals:
+                        pools.extend(list(vals))
+                except Exception:
+                    continue
+
+        vals=[_mcs_normalize_bse_symbol(x) for x in pools]
+        vals=list(dict.fromkeys(x for x in vals if x))
+        return vals
+
+    def _mcs_to_bse_tickers(symbols):
+        return [f"{_mcs_normalize_bse_symbol(s)}.BO"
+                for s in symbols if _mcs_normalize_bse_symbol(s)]
+
     universe_options={
         "Nifty 50":"nifty50",
         "Nifty 500":"nifty500",
         "Nifty Midcap 100":"midcap100",
         "Nifty Smallcap 250":"smallcap250",
         "F&O Stocks":"fno",
-        "NSE Equity":"nse"
+        "NSE Equity":"nse",
+        "BSE 100":"bse100",
+        "BSE 200":"bse200",
+        "BSE 500":"bse500",
+        "BSE Equity":"bse",
+        "NSE + BSE Combined":"nse_bse"
     }
 
     selected_universe=st.selectbox(
@@ -13783,6 +12274,12 @@ elif module == "📚 Kratter Momentum Scanner":
             stocks=load_nifty_smallcap250()
         elif universe_key=="fno":
             stocks=load_fno_stocks()
+        elif universe_key in ("bse100","bse200","bse500","bse"):
+            stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(universe_key))
+        elif universe_key=="nse_bse":
+            stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(
+                _mcs_load_bse_universe("bse")
+            )
         else:
             stocks=load_nse_equity_universe()
     except Exception:
@@ -13972,180 +12469,7 @@ elif module == "📚 Kratter Momentum Scanner":
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
-# ============================================================
-# EMA 9/21/200 POWER BREAKOUT SCANNER
-# ============================================================
-
-def _ema_power_rsi(close, period=9):
-    delta=close.diff()
-    gain=delta.clip(lower=0)
-    loss=-delta.clip(upper=0)
-    avg_gain=gain.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
-    avg_loss=loss.ewm(alpha=1/period,adjust=False,min_periods=period).mean()
-    rs=avg_gain/avg_loss.replace(0,np.nan)
-    rsi=100-(100/(1+rs))
-    rsi=rsi.where(avg_loss.ne(0),100.0)
-    rsi=rsi.where(~((avg_gain==0)&(avg_loss==0)),50.0)
-    return rsi
-
-def _ema_power_cci(df, period=20):
-    tp=(df["High"]+df["Low"]+df["Close"])/3
-    sma=tp.rolling(period,min_periods=period).mean()
-    md=tp.rolling(period,min_periods=period).apply(
-        lambda x: np.mean(np.abs(x-np.mean(x))),raw=True
-    )
-    return (tp-sma)/(0.015*md.replace(0,np.nan))
-
-def _ema_power_prepare(df):
-    d=df.copy()
-    for c in ["Open","High","Low","Close","Volume"]:
-        if c in d.columns:
-            d[c]=pd.to_numeric(d[c],errors="coerce")
-    d=d.dropna(subset=["High","Low","Close"]).sort_index()
-    d["EMA9"]=d["Close"].ewm(span=9,adjust=False,min_periods=9).mean()
-    d["EMA21"]=d["Close"].ewm(span=21,adjust=False,min_periods=21).mean()
-    d["EMA200"]=d["Close"].ewm(span=200,adjust=False,min_periods=200).mean()
-    d["RSI9"]=_ema_power_rsi(d["Close"],9)
-    d["CCI20"]=_ema_power_cci(d,20)
-    d["VOL_SMA20"]=d["Volume"].rolling(20,min_periods=20).mean() if "Volume" in d else np.nan
-    d["VOL_RATIO"]=d["Volume"]/d["VOL_SMA20"].replace(0,np.nan) if "Volume" in d else np.nan
-    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
-    d["EMA21_SLOPE10"]=(d["EMA21"]/d["EMA21"].shift(10)-1)*100
-    d["EMA9_SLOPE5"]=(d["EMA9"]/d["EMA9"].shift(5)-1)*100
-    d["RES20_PREV"]=d["High"].rolling(20,min_periods=20).max().shift(1)
-    d["EMA21_CROSS_200"]=(
-        (d["EMA21"]>d["EMA200"]) &
-        (d["EMA21"].shift(1)<=d["EMA200"].shift(1))
-    )
-    d["EMA9_CROSS_21"]=(
-        (d["EMA9"]>d["EMA21"]) &
-        (d["EMA9"].shift(1)<=d["EMA21"].shift(1))
-    )
-    return d
-
-def _ema_power_signal(symbol,df,mode="Pre-breakout",
-                      slope_threshold=1.0,volume_threshold=1.5,
-                      rsi_threshold=55,cci_threshold=100):
-    d=_ema_power_prepare(df)
-    if len(d)<220:
-        return None
-    r=d.iloc[-1]
-    prev=d.iloc[-2]
-
-    required=[r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],r["EMA200_SLOPE10"]]
-    if not all(np.isfinite(v) for v in required):
-        return None
-
-    established=bool(r["EMA9"]>r["EMA21"]>r["EMA200"])
-    recent_cross=bool(
-        d["EMA21_CROSS_200"].iloc[-20:].any() or
-        d["EMA9_CROSS_21"].iloc[-10:].any()
-    )
-    bullish_cross=bool(d["EMA21_CROSS_200"].iloc[-20:].any())
-    steep_slope=bool(r["EMA200_SLOPE10"]>=slope_threshold)
-
-    if mode=="Fresh Cross Only" and not bullish_cross:
-        return None
-    if mode=="Pre-breakout" and not (established or recent_cross):
-        return None
-
-    resistance=float(r["RES20_PREV"]) if np.isfinite(r["RES20_PREV"]) else np.nan
-    distance=(
-        (resistance-float(r["Close"]))/resistance*100
-        if np.isfinite(resistance) and resistance>0 else np.nan
-    )
-    breakout=bool(np.isfinite(resistance) and r["Close"]>resistance)
-    near_resistance=bool(np.isfinite(distance) and 0<=distance<=3)
-
-    if mode=="Pre-breakout" and breakout and float(r["Close"])>resistance*1.01:
-        return None
-    if mode=="Confirmed Breakout" and not breakout:
-        return None
-
-    score=0
-    reasons=[]
-
-    if established:
-        score+=25
-        reasons.append("EMA9 > EMA21 > EMA200")
-    elif recent_cross and r["EMA9"]>r["EMA21"] and r["Close"]>r["EMA200"]:
-        score+=20
-        reasons.append("Fresh EMA transition")
-    elif r["Close"]>r["EMA200"]:
-        score+=10
-        reasons.append("Price above EMA200")
-
-    if steep_slope:
-        score+=15
-        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%/10D")
-    elif r["EMA200_SLOPE10"]>=0.5:
-        score+=10
-    elif r["EMA200_SLOPE10"]>0:
-        score+=5
-
-    if r["RSI9"]>=60 and r["RSI9"]>prev["RSI9"]:
-        score+=15
-        reasons.append(f"RSI9 {r['RSI9']:.1f} rising")
-    elif r["RSI9"]>=rsi_threshold and r["RSI9"]>=prev["RSI9"]:
-        score+=10
-        reasons.append(f"RSI9 {r['RSI9']:.1f}")
-
-    if r["CCI20"]>=150:
-        score+=10
-        reasons.append(f"CCI20 {r['CCI20']:.0f}")
-    elif r["CCI20"]>=cci_threshold:
-        score+=8
-        reasons.append(f"CCI20 {r['CCI20']:.0f}")
-    elif r["CCI20"]>0:
-        score+=4
-
-    if np.isfinite(r["VOL_RATIO"]):
-        if r["VOL_RATIO"]>=2:
-            score+=10
-            reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
-        elif r["VOL_RATIO"]>=volume_threshold:
-            score+=8
-            reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
-        elif r["VOL_RATIO"]>=1:
-            score+=4
-
-    if mode=="Confirmed Breakout":
-        score+=10
-        reasons.append("20D resistance breakout")
-    elif near_resistance:
-        score+=10
-        reasons.append(f"{distance:.2f}% from 20D resistance")
-    elif np.isfinite(distance) and distance<=5:
-        score+=5
-
-    score=min(100,score)
-    rating=("🟢 Power Setup" if score>=85 else
-            "🟡 Strong Setup" if score>=75 else
-            "🔵 Watch" if score>=65 else "⚪ Weak")
-
-    return {
-        "Symbol":symbol,
-        "Power Score":score,
-        "Rating":rating,
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
-        "EMA21 Slope 10D %":float(r["EMA21_SLOPE10"]),
-        "EMA9 Slope 5D %":float(r["EMA9_SLOPE5"]),
-        "EMA21 > EMA200":bool(r["EMA21"]>r["EMA200"]),
-        "Fresh EMA21/200 Cross":bullish_cross,
-        "RSI9":float(r["RSI9"]),
-        "CCI20":float(r["CCI20"]),
-        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
-        "Resistance 20D":resistance,
-        "Distance to Resistance %":distance,
-        "Breakout":breakout,
-        "Reasons":" | ".join(reasons)
-    }
-
-if module == "🔥 Momentum Catalyst Scanner":
+elif module == "🔥 Momentum Catalyst Scanner":
 
     st.header("🔥 Momentum Catalyst Scanner")
     st.caption("Breakout-first scanner: resistance breakout + volume confirmation + strong close + trend, with momentum/fundamentals as confirmation.")
@@ -14154,20 +12478,81 @@ if module == "🔥 Momentum Catalyst Scanner":
 
 
 
-    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse"}
+    universe_options={"Nifty 50":"nifty50","Nifty 500":"nifty500","Nifty Midcap 100":"midcap100","Nifty Smallcap 250":"smallcap250","F&O Stocks":"fno","NSE Equity":"nse","BSE 100":"bse100","BSE 200":"bse200","BSE 500":"bse500","BSE Equity":"bse","NSE + BSE Combined":"nse_bse","Manual Symbols":"manual"}
     selected_universe=st.selectbox("Stock Universe",list(universe_options.keys()),key="mcs_universe")
     uk=universe_options[selected_universe]
-    try:
-        if uk=="nifty50": stocks=load_nifty50()
-        elif uk=="nifty500": stocks=load_nifty500()
-        elif uk=="midcap100": stocks=load_nifty_midcap100()
-        elif uk=="smallcap250": stocks=load_nifty_smallcap250()
-        elif uk=="fno": stocks=load_fno_stocks()
-        else: stocks=load_nse_equity_universe()
-    except Exception: stocks=[]
-    stocks=list(stocks or [])
+
+    # Optional direct symbol entry. For BSE, enter either a BSE scrip code
+    # such as 500325 or a Yahoo/BSE ticker such as RELIANCE.BO.
+    manual_symbols=[]
+    if uk=="manual":
+        manual_exchange=st.radio(
+            "Manual symbol exchange",
+            ["NSE", "BSE", "Mixed NSE + BSE"],
+            horizontal=True,
+            key="mcs_manual_exchange"
+        )
+        manual_text=st.text_area(
+            "Enter symbols / BSE scrip codes",
+            placeholder="NSE: RELIANCE, TCS, INFY\nBSE: 500325, 532540, RELIANCE.BO",
+            height=90,
+            key="mcs_manual_symbols"
+        )
+        raw_parts=[x.strip().upper() for x in manual_text.replace("\n",",").split(",") if x.strip()]
+        if manual_exchange=="BSE":
+            manual_symbols=[
+                x if x.endswith(".BO") else f"{x}.BO"
+                for x in raw_parts
+            ]
+        elif manual_exchange=="NSE":
+            manual_symbols=[
+                x if x.endswith(".NS") else f"{x}.NS"
+                for x in raw_parts
+            ]
+        else:
+            for x in raw_parts:
+                if x.endswith(".BO") or x.endswith(".NS"):
+                    manual_symbols.append(x)
+                else:
+                    # Mixed mode defaults unqualified symbols to NSE;
+                    # BSE symbols should be entered with .BO or scrip code + .BO.
+                    manual_symbols.append(f"{x}.NS")
+        stocks=list(dict.fromkeys(manual_symbols))
+    else:
+        try:
+            if uk=="nifty50": stocks=load_nifty50()
+            elif uk=="nifty500": stocks=load_nifty500()
+            elif uk=="midcap100": stocks=load_nifty_midcap100()
+            elif uk=="smallcap250": stocks=load_nifty_smallcap250()
+            elif uk=="fno": stocks=load_fno_stocks()
+            elif uk in ("bse100","bse200","bse500","bse"):
+                stocks=_mcs_to_bse_tickers(_mcs_load_bse_universe(uk))
+            elif uk=="nse_bse":
+                stocks=list(load_nse_equity_universe() or []) + _mcs_to_bse_tickers(_mcs_load_bse_universe("bse"))
+            else: stocks=load_nse_equity_universe()
+        except Exception: stocks=[]
+        stocks=list(stocks or [])
+    if selected_universe=="BSE Equity" and stocks:
+        st.info(
+            f"BSE Equity loaded {len(stocks):,} symbols. The scanner will "
+            "request their BSE (.BO) market-data listings. BSE 100/200/500 "
+            "remain separate official constituent universes."
+        )
+    elif selected_universe in ("BSE 100","BSE 200","BSE 500") and not stocks:
+        st.warning(
+            f"{selected_universe} needs an official constituent list. "
+            "Use BSE Equity for the automatic broad BSE universe, or upload "
+            "the corresponding constituent CSV when we add that option."
+        )
     if selected_universe=="Nifty 50" and not stocks:
         stocks=list(NIFTY50)
+    if uk=="manual" and stocks:
+        bse_count=sum(1 for x in stocks if str(x).endswith(".BO"))
+        nse_count=sum(1 for x in stocks if str(x).endswith(".NS"))
+        st.info(
+            f"Manual symbols loaded: {len(stocks):,} ({nse_count:,} NSE, {bse_count:,} BSE). "
+            "BSE entries are sent to Yahoo Finance using the .BO suffix."
+        )
     st.sidebar.markdown("### Momentum thresholds")
     min_score=st.sidebar.slider("Minimum score",50,90,70,5,key="mcs_min_score")
     min_vol=st.sidebar.slider("Minimum volume ratio",1.0,3.0,1.5,0.1,key="mcs_min_vol")
@@ -14208,13 +12593,6 @@ if module == "🔥 Momentum Catalyst Scanner":
             "Confirmed Breakout",
             "Early Breakout",
             "🔥 Early Breakout V2",
-            "🚀 Early Breakout V3.1",
-            "🎯 Early Breakout V3.2",
-            "🏆 Early Breakout V3.3 Adaptive",
-            "💎 Early Breakout V3.4 Risk/Reward",
-            "⚡ EMA 9/21 Power Breakout",
-            "🚀 Multibagger Intelligence V2.4",
-            "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
         ],
@@ -14222,116 +12600,6 @@ if module == "🔥 Momentum Catalyst Scanner":
         key="mcs_scan_mode",
         help="Confirmed Breakout finds stocks already breaking resistance. Early Breakout finds stocks still below resistance but preparing to break out."
     )
-
-
-    # ========================================================
-    # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
-    # ========================================================
-
-    if scan_mode=="⚡ EMA 9/21 Power Breakout":
-        st.markdown("---")
-        st.subheader("⚡ EMA 9/21/200 Power Breakout")
-        st.caption(
-            "Experimental scanner based on EMA structure, normalized EMA200 "
-            "slope, RSI(9), CCI(20), volume participation and 20D resistance."
-        )
-
-        e1,e2,e3=st.columns(3)
-        ema_mode=e1.selectbox(
-            "Signal Mode",
-            ["Pre-breakout","Confirmed Breakout","Fresh Cross Only"],
-            key="ema_power_mode"
-        )
-        slope_thr=e2.slider(
-            "Minimum EMA200 slope (% over 10D)",
-            0.25,3.0,1.0,0.25,key="ema_power_slope"
-        )
-        min_power=e3.slider(
-            "Minimum Power Score",
-            50,90,65,5,key="ema_power_min"
-        )
-
-        e4,e5,e6=st.columns(3)
-        vol_thr=e4.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
-        rsi_thr=e5.slider("Minimum RSI(9)",50,70,55,1,key="ema_power_rsi")
-        cci_thr=e6.slider("Minimum CCI(20)",0,150,100,10,key="ema_power_cci")
-
-        if st.button(
-            "⚡ RUN EMA POWER BREAKOUT SCANNER",
-            key="ema_power_run",type="primary"
-        ):
-            ema_rows=[]
-            with st.spinner("Scanning EMA 9/21/200 + RSI(9) + CCI(20) + Volume..."):
-                ema_data=(
-                    _mcs_large_universe_download(stocks)
-                    if len(stocks)>500 else _kratter_download_batches(stocks)
-                )
-
-                for symbol in stocks:
-                    d=ema_data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-                        if len(d)<220:
-                            continue
-
-                        result=_ema_power_signal(
-                            symbol,d,ema_mode,
-                            slope_threshold=slope_thr,
-                            volume_threshold=vol_thr,
-                            rsi_threshold=rsi_thr,
-                            cci_threshold=cci_thr
-                        )
-                        if result is not None and result["Power Score"]>=min_power:
-                            ema_rows.append(result)
-                    except Exception:
-                        continue
-
-            ema_df=pd.DataFrame(ema_rows)
-            if ema_df.empty:
-                st.warning(
-                    f"No EMA Power setups met the {min_power}-point threshold "
-                    f"for {analysis_date.strftime('%d-%b-%Y')}."
-                )
-            else:
-                ema_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
-                ema_df=ema_df.sort_values(
-                    ["Power Score","EMA200 Slope 10D %","Volume Ratio"],
-                    ascending=[False,False,False]
-                )
-
-                a,b,c,dcol=st.columns(4)
-                a.metric("Setups",len(ema_df))
-                b.metric("🟢 Power",int(ema_df["Rating"].eq("🟢 Power Setup").sum()))
-                c.metric("🟡 Strong",int(ema_df["Rating"].eq("🟡 Strong Setup").sum()))
-                dcol.metric("Avg Score",f'{ema_df["Power Score"].mean():.1f}')
-
-                display_cols=[
-                    "Scan Date","Symbol","Power Score","Rating","Close",
-                    "EMA9","EMA21","EMA200","EMA200 Slope 10D %",
-                    "EMA21 Slope 10D %","EMA9 Slope 5D %",
-                    "EMA21 > EMA200","Fresh EMA21/200 Cross",
-                    "RSI9","CCI20","Volume Ratio",
-                    "Resistance 20D","Distance to Resistance %",
-                    "Breakout","Reasons"
-                ]
-                st.dataframe(
-                    ema_df[display_cols],
-                    width="stretch",hide_index=True
-                )
-
-                st.download_button(
-                    "⬇️ Download EMA Power Results",
-                    ema_df.to_csv(index=False).encode("utf-8"),
-                    f"ema_power_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="ema_power_download"
-                )
 
     early_min=st.slider(
         "Minimum Early Breakout Score",
@@ -14578,678 +12846,6 @@ if module == "🔥 Momentum Catalyst Scanner":
     # ========================================================
     # V2 + MARKET REGIME + CONFIRMATION + TRADE PLAN
     # ========================================================
-    if scan_mode=="🚀 Early Breakout V3.1":
-        st.markdown("---")
-        st.subheader("🚀 Early Breakout V3.1 — Leader + Pressure Model")
-        st.caption(
-            "V2 resistance pressure plus Volume Surge, Relative Strength, "
-            "Close Near Daily High and Consolidation Breakout."
-        )
-
-        v31_min=st.slider(
-            "Minimum V3.1 Score",60,90,70,5,key="mcs_v31_min_score"
-        )
-        v31_run=st.button(
-            "🚀 RUN EARLY BREAKOUT V3.1",
-            key="mcs_v31_run",
-            type="primary"
-        )
-
-        if v31_run:
-            v31_rows=[]
-            with st.spinner("Scanning leaders under breakout pressure..."):
-                v31_data=_kratter_download_batches(stocks)
-                v31_benchmark, v31_benchmark_source=_mcs_get_reliable_benchmark(
-                    stocks,v31_data,"2y"
-                )
-                if v31_benchmark.empty:
-                    v31_benchmark=_mcs_build_universe_proxy(
-                        v31_data,analysis_ts,min_stocks=8
-                    )
-                    v31_benchmark_source="Universe proxy (fallback)"
-
-                for symbol in stocks:
-                    d=v31_data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()]
-                        d=d.loc[d.index<=analysis_ts].sort_index()
-                    except Exception:
-                        continue
-                    if d.empty:
-                        continue
-
-                    r31=_mcs_early_breakout_v31(
-                        symbol,d,v31_benchmark,
-                        fundamentals.get(str(symbol).upper(),{})
-                    )
-                    if (
-                        r31 is not None and
-                        r31["V3.1 Qualified"] and
-                        r31["V3.1 Score"]>=v31_min
-                    ):
-                        v31_rows.append(r31)
-
-            v31_df=pd.DataFrame(v31_rows)
-            if v31_df.empty:
-                st.warning(
-                    f"No V3.1 setups met the threshold for "
-                    f"{analysis_date.strftime('%d-%b-%Y')}."
-                )
-            else:
-                v31_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
-                q1,q2,q3,q4=st.columns(4)
-                q1.metric("V3.1 Setups",len(v31_df))
-                q2.metric(
-                    "🟢 Imminent",
-                    int(v31_df["V3.1 Rating"].str.contains("Imminent").sum())
-                )
-                q3.metric(
-                    "🟡 Strong",
-                    int(v31_df["V3.1 Rating"].str.contains("Strong").sum())
-                )
-                q4.metric("Avg Score",f'{v31_df["V3.1 Score"].mean():.1f}')
-
-                st.caption(f"Benchmark source: {v31_benchmark_source}")
-
-                cols=[
-                    "Scan Date","Symbol","V3.1 Score","V3.1 Rating","Close",
-                    "Resistance 20D","Distance to Breakout %",
-                    "Resistance Tests 15D","Volume Ratio","Volume Surge",
-                    "Test-Day Volume Stronger","RS 20D %","RS 60D %",
-                    "Close Location %","Close Near Daily High",
-                    "Consolidation","Range Compression","ATR Contracting",
-                    "Bullish MA Stack","Reasons","Missing Confirmations"
-                ]
-                cols=[c for c in cols if c in v31_df.columns]
-
-                display_df=v31_df.sort_values(
-                    ["V3.1 Score","Distance to Breakout %"],
-                    ascending=[False,True]
-                )[cols]
-
-                st.dataframe(display_df,width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download V3.1 Results",
-                    v31_df.to_csv(index=False).encode("utf-8"),
-                    f"early_breakout_v31_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",
-                    key="mcs_v31_download"
-                )
-
-    if scan_mode=="🚀 Multibagger Intelligence V2.4":
-        st.markdown("---")
-        st.subheader("🚀 Multibagger Intelligence V2.4 — Sector Rotation + Catalyst")
-        st.caption(
-            "Adds a 'why now?' layer. Sector rotation is calculated from the same "
-            "price data; technology/business catalyst evidence is optional and never invented."
-        )
-
-        fund_file=st.file_uploader("Upload Multibagger fundamental CSV",type=["csv"],key="mbv24_fund_csv")
-        catalyst_file=st.file_uploader("Optional Sector / Technology Catalyst CSV",type=["csv"],key="mbv24_cat_csv")
-        c1,c2,c3=st.columns(3)
-        fund_min=c1.slider("Minimum Fundamental Score",50,90,65,5,key="mbv24_fund_min")
-        sustain_min=c2.slider("Minimum Sustainability Score",40,90,60,5,key="mbv24_sustain_min")
-        maxrisk=c3.slider("Maximum Trade Risk %",3,10,7,1,key="mbv24_risk")
-
-        if fund_file is None:
-            st.info("Upload the V2.3/V2.2 fundamental CSV to begin.")
-        elif st.button("🚀 RUN MULTIBAGGER V2.4",key="mbv24_run",type="primary"):
-            try:
-                fund_df=_mbv24_norm_cols(pd.read_csv(fund_file))
-                if "Ticker" not in fund_df.columns and "Symbol" in fund_df.columns: fund_df["Ticker"]=fund_df["Symbol"]
-                if "Name" not in fund_df.columns and "Company" in fund_df.columns: fund_df["Name"]=fund_df["Company"]
-                if "Ticker" not in fund_df.columns or "Name" not in fund_df.columns:
-                    st.error("Use Name/Ticker or Company/Symbol columns.")
-                else:
-                    lookup={str(r["Ticker"]).upper().strip():r for _,r in fund_df.iterrows()}
-                    cat_lookup={}
-                    if catalyst_file is not None:
-                        cdf=_mbv24_norm_cols(pd.read_csv(catalyst_file))
-                        if "Ticker" not in cdf.columns and "Symbol" in cdf.columns: cdf["Ticker"]=cdf["Symbol"]
-                        for _,r in cdf.iterrows(): cat_lookup[str(r.get("Ticker","")).upper().strip()]=r.to_dict()
-
-                    sector_map={}
-                    for _,r in fund_df.iterrows():
-                        t=str(r["Ticker"]).upper().strip()
-                        sec=r.get("Sector",r.get("Sub-Sector",""))
-                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
-                    for t,r in cat_lookup.items():
-                        sec=r.get("Sector",r.get("Sub-Sector",""))
-                        if pd.notna(sec) and str(sec).strip(): sector_map[t]=str(sec).strip()
-
-                    data=(_mcs_large_universe_download(stocks) if len(stocks)>500 else _kratter_download_batches(stocks))
-                    benchmark,bench_source=_mcs_get_reliable_benchmark(stocks,data,"2y")
-                    if benchmark.empty:
-                        benchmark=_mcs_build_universe_proxy(data,analysis_ts,min_stocks=8)
-                        bench_source="Universe proxy (fallback)"
-                    rotation_map=_mbv24_sector_rotation(data,sector_map,benchmark)
-
-                    rows=[]
-                    for symbol in stocks:
-                        fr=lookup.get(str(symbol).upper().strip())
-                        if fr is None: continue
-                        try:
-                            fs=_mbv23_fundamental_score(fr.to_dict())
-                            if not fs["Fundamental Eligible"] or fs["Fundamental Score"]<fund_min: continue
-                            sustain=_mbv23_sustainability(fr.to_dict())
-                            if sustain<sustain_min: continue
-                            t=str(symbol).upper().strip()
-                            sec=sector_map.get(t,"")
-                            rot=rotation_map.get(sec,{})
-                            cat=cat_lookup.get(t,fr.to_dict())
-                            cat_score=_mbv24_catalyst_score(cat)
-
-                            d=data.get(symbol); tech=None
-                            if d is not None and not d.empty:
-                                d=d.copy()
-                                d.index=pd.to_datetime(d.index,errors="coerce")
-                                if getattr(d.index,"tz",None) is not None: d.index=d.index.tz_localize(None)
-                                d=d[~d.index.isna()].sort_index(); d=d.loc[d.index<=analysis_ts]
-                                if len(d)>=210: tech=_mcs_early_breakout_v34(symbol,d,benchmark,{})
-
-                            ti=_mbv23_technical(tech)
-                            discovery=_mbv23_discovery_score(fs["Fundamental Score"],sustain,fs["Ownership Score"],fs["Valuation Score"])
-                            score=_mbv24_final_score(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"])
-                            status=_mbv24_classify(discovery,sustain,rot.get("Sector Rotation Score",np.nan),cat_score,ti["score"],ti["risk"],ti["rr"])
-
-                            rows.append({
-                                "Scan Date":analysis_date.strftime("%Y-%m-%d"),"Symbol":symbol,"Company":fr.get("Name",symbol),
-                                "Sector":sec,"V2.4 Score":score,"Status":status,"Discovery Score":discovery,
-                                "Fundamental Score":fs["Fundamental Score"],"Growth Sustainability":sustain,
-                                "Sector Rotation Score":rot.get("Sector Rotation Score",np.nan),
-                                "Sector 3M RS %":rot.get("Sector 3M RS %",np.nan),"Sector 6M RS %":rot.get("Sector 6M RS %",np.nan),
-                                "Sector 12M RS %":rot.get("Sector 12M RS %",np.nan),
-                                "Catalyst Score":cat_score,"Theme":cat.get("Theme",""),"Catalyst":cat.get("Catalyst",""),
-                                "Technology Exposure":cat.get("Technology Exposure",np.nan),
-                                "Technical State":ti["state"],"Technical V3.4 Score":ti["score"],"V3.4 Trade Quality":ti["quality"],
-                                "Risk %":ti["risk"],"Realistic R:R":ti["rr"],
-                                "Entry":tech.get("Confirmation Entry",np.nan) if tech else np.nan,
-                                "Stop Loss":tech.get("Stop Loss V3.4",np.nan) if tech else np.nan,
-                                "Target 1":tech.get("Target 1 V3.4",np.nan) if tech else np.nan,
-                                "Distance to Breakout %":tech.get("Distance to Breakout %",np.nan) if tech else np.nan,
-                                "Volume Ratio":tech.get("Volume Ratio",np.nan) if tech else np.nan,
-                                "ROCE":fr.get("ROCE",np.nan),"ROE":fr.get("Return on Equity",np.nan),
-                                "Debt to Equity":fr.get("Debt to Equity",np.nan),"PE Ratio":fr.get("PE Ratio",np.nan)
-                            })
-                        except Exception:
-                            continue
-
-                    out=pd.DataFrame(rows)
-                    if out.empty:
-                        st.warning("No V2.4 candidates met the selected criteria.")
-                    else:
-                        order=["💎 High Conviction","🚀 Emerging Multibagger","🔥 Catalyst + Sector Discovery","🟡 Fundamental Discovery","🟢 Technical Candidate","🔵 Watch"]
-                        out["_o"]=pd.Categorical(out["Status"],categories=order,ordered=True)
-                        out=out.sort_values(["_o","V2.4 Score"],ascending=[True,False]).drop(columns="_o")
-                        c1,c2,c3,c4,c5=st.columns(5)
-                        c1.metric("Candidates",len(out))
-                        c2.metric("💎 High",int(out["Status"].eq("💎 High Conviction").sum()))
-                        c3.metric("🚀 Emerging",int(out["Status"].eq("🚀 Emerging Multibagger").sum()))
-                        c4.metric("🔥 Catalyst",int(out["Status"].eq("🔥 Catalyst + Sector Discovery").sum()))
-                        c5.metric("Sector scored",int(out["Sector Rotation Score"].notna().sum()))
-                        st.caption(f"Benchmark: {bench_source}")
-                        cols=["Symbol","Company","Sector","Status","V2.4 Score","Discovery Score","Fundamental Score","Growth Sustainability",
-                              "Sector Rotation Score","Sector 3M RS %","Sector 6M RS %","Sector 12M RS %","Catalyst Score","Theme","Catalyst",
-                              "Technology Exposure","Technical State","Technical V3.4 Score","V3.4 Trade Quality","Risk %","Realistic R:R",
-                              "Entry","Stop Loss","Target 1","Distance to Breakout %","Volume Ratio","ROCE","ROE","Debt to Equity","PE Ratio"]
-                        cols=[c for c in cols if c in out.columns]
-                        st.dataframe(out[cols],width="stretch",hide_index=True)
-                        st.download_button("⬇️ Download Multibagger V2.4 Results",out.to_csv(index=False).encode("utf-8"),
-                                           f"multibagger_v24_{analysis_date.strftime('%Y%m%d')}.csv","text/csv",key="mbv24_download")
-            except Exception as e:
-                st.error(f"Multibagger V2.4 error: {e}")
-
-    if scan_mode=="💎 Early Breakout V3.4 Risk/Reward":
-        st.markdown("---")
-        st.subheader("💎 Early Breakout V3.4 — Realistic Risk / Reward")
-        st.caption(
-            "V3.3 breakout evidence with capped risk and nearby-resistance "
-            "targets. This version does not assume a blind 2R/3R target."
-        )
-
-        v34_min=st.slider(
-            "Minimum V3.4 Score",55,90,65,5,key="mcs_v34_min"
-        )
-        v34_maxrisk=st.slider(
-            "Maximum Risk %",3,10,7,1,key="mcs_v34_maxrisk"
-        )
-
-        if st.button(
-            "💎 RUN EARLY BREAKOUT V3.4",
-            key="mcs_v34_run",type="primary"
-        ):
-            rows=[]
-            with st.spinner("Scanning with realistic trade economics..."):
-                if len(stocks)>500:
-                    data=_mcs_large_universe_download(stocks)
-                else:
-                    data=_kratter_download_batches(stocks)
-
-                benchmark,bench_source=_mcs_get_reliable_benchmark(
-                    stocks,data,"2y"
-                )
-                if benchmark.empty:
-                    benchmark=_mcs_build_universe_proxy(
-                        data,analysis_ts,min_stocks=8
-                    )
-                    bench_source="Universe proxy (fallback)"
-
-                for symbol in stocks:
-                    d=data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-                    except Exception:
-                        continue
-                    if len(d)<210:
-                        continue
-                    try:
-                        result=_mcs_early_breakout_v34(
-                            symbol,d,benchmark,
-                            fundamentals.get(str(symbol).upper(),{})
-                        )
-                        if result is not None and (
-                            result["V3.4 Score"]>=v34_min
-                            and result["Risk V3.4 %"]<=v34_maxrisk
-                            and result["Realistic R:R"]>=1.5
-                        ):
-                            rows.append(result)
-                    except Exception:
-                        continue
-
-            out=pd.DataFrame(rows)
-            if out.empty:
-                st.warning(
-                    f"No V3.4 setups met the selected criteria on "
-                    f"{analysis_date.strftime('%d-%b-%Y')}."
-                )
-            else:
-                out.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
-
-                c1,c2,c3,c4=st.columns(4)
-                c1.metric("Setups",len(out))
-                c2.metric("🟢 A",int(out["Status V3.4"].str.startswith("🟢").sum()))
-                c3.metric("🟡 B",int(out["Status V3.4"].str.startswith("🟡").sum()))
-                c4.metric("Avg R:R",f'{out["Realistic R:R"].mean():.2f}')
-
-                st.caption(f"Benchmark: {bench_source}")
-
-                display_cols=[
-                    "Scan Date","Symbol","V3.4 Score","V3.3 Score",
-                    "Core V2 Score /50","Volume /20","Consolidation /15",
-                    "Close High /10","Relative Strength /5",
-                    "Trade Quality V3.4","Status V3.4","Close",
-                    "Resistance","Distance to Breakout %",
-                    "Confirmation Entry","Stop Loss V3.4","Risk V3.4 %",
-                    "Target 1 V3.4","Target 2 V3.4","Realistic R:R",
-                    "Overhead Resistance Target","Trade Quality Reasons V3.4"
-                ]
-                display_cols=[c for c in display_cols if c in out.columns]
-
-                display=out.sort_values(
-                    ["V3.4 Score","Realistic R:R"],
-                    ascending=[False,False]
-                )[display_cols]
-
-                st.dataframe(display,width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download V3.4 Results",
-                    out.to_csv(index=False).encode("utf-8"),
-                    f"early_breakout_v34_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="mcs_v34_download"
-                )
-
-    if scan_mode=="🏆 Early Breakout V3.3 Adaptive":
-        st.markdown("---")
-        st.subheader("🏆 Early Breakout V3.3 — Adaptive NSE Breakout Engine")
-        st.caption(
-            "V2 core + evidence-weighted factors + trade quality. "
-            "No experimental factor is a mandatory gate."
-        )
-
-        v33_min=st.slider(
-            "Minimum V3.3 Score",55,90,65,5,key="mcs_v33_min"
-        )
-
-        if st.button(
-            "🏆 RUN EARLY BREAKOUT V3.3",
-            key="mcs_v33_run",type="primary"
-        ):
-            rows=[]
-            with st.spinner("Scanning the selected NSE universe with V3.3..."):
-                if len(stocks)>500:
-                    data=_mcs_large_universe_download(stocks)
-                else:
-                    data=_kratter_download_batches(stocks)
-
-                benchmark,bench_source=_mcs_get_reliable_benchmark(
-                    stocks,data,"2y"
-                )
-                if benchmark.empty:
-                    benchmark=_mcs_build_universe_proxy(
-                        data,analysis_ts,min_stocks=8
-                    )
-                    bench_source="Universe proxy (fallback)"
-
-                for symbol in stocks:
-                    d=data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-                    except Exception:
-                        continue
-                    if len(d)<210:
-                        continue
-                    try:
-                        result=_mcs_early_breakout_v33(
-                            symbol,d,benchmark,
-                            fundamentals.get(str(symbol).upper(),{})
-                        )
-                        if result is not None and result["V3.3 Score"]>=v33_min:
-                            rows.append(result)
-                    except Exception:
-                        continue
-
-            out=pd.DataFrame(rows)
-            if out.empty:
-                st.warning(
-                    f"No V3.3 setups met the {v33_min}-point threshold "
-                    f"on {analysis_date.strftime('%d-%b-%Y')}."
-                )
-            else:
-                out.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
-
-                c1,c2,c3,c4=st.columns(4)
-                c1.metric("Setups",len(out))
-                c2.metric("🟢 A-Grade",int((out["Status"]=="🟢 A-Grade").sum()))
-                c3.metric("🟡 B-Grade",int(out["Status"].str.contains("B-Grade").sum()))
-                c4.metric("Avg Score",f'{out["V3.3 Score"].mean():.1f}')
-
-                st.caption(f"Benchmark: {bench_source}")
-
-                display_cols=[
-                    "Scan Date","Symbol","V3.3 Score",
-                    "Core V2 Score /50","Volume /20","Consolidation /15",
-                    "Close High /10","Relative Strength /5",
-                    "Trade Quality /100","Status","Close","Resistance",
-                    "Distance to Breakout %","Confirmation Entry","Stop Loss",
-                    "Risk %","Target 1","Target 2","Risk Reward",
-                    "Volume Ratio","Resistance Tests 15D",
-                    "Relative Strength 20D %","Close Location %",
-                    "Consolidation","ATR Contracting","Bullish MA Stack",
-                    "Core Reasons","Trade Quality Reasons"
-                ]
-                display_cols=[c for c in display_cols if c in out.columns]
-                display=out.sort_values(
-                    ["V3.3 Score","Trade Quality /100"],
-                    ascending=[False,False]
-                )[display_cols]
-
-                st.dataframe(display,width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download V3.3 Results",
-                    out.to_csv(index=False).encode("utf-8"),
-                    f"early_breakout_v33_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="mcs_v33_download"
-                )
-
-    if scan_mode=="🎯 Early Breakout V3.2":
-        st.markdown("---")
-        st.subheader("🎯 Early Breakout V3.2 — Probability + Trade Quality")
-        st.caption(
-            "Separates the probability of a near-term breakout from whether "
-            "the setup offers a tradable risk/reward."
-        )
-
-        v32_min=st.slider(
-            "Minimum V3.2 Composite",60,90,70,5,key="mcs_v32_min"
-        )
-        v32_run=st.button(
-            "🎯 RUN EARLY BREAKOUT V3.2",
-            key="mcs_v32_run",type="primary"
-        )
-
-        if v32_run:
-            v32_rows=[]
-            with st.spinner("Evaluating breakout probability and trade quality..."):
-                v32_data=_kratter_download_batches(stocks)
-                v32_benchmark,v32_source=_mcs_get_reliable_benchmark(
-                    stocks,v32_data,"2y"
-                )
-                if v32_benchmark.empty:
-                    v32_benchmark=_mcs_build_universe_proxy(
-                        v32_data,analysis_ts,min_stocks=8
-                    )
-                    v32_source="Universe proxy (fallback)"
-
-                for symbol in stocks:
-                    d=v32_data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-                    except Exception:
-                        continue
-                    if d.empty:
-                        continue
-
-                    try:
-                        row=_mcs_early_breakout_v32(
-                            symbol,d,v32_benchmark,
-                            fundamentals.get(str(symbol).upper(),{})
-                        )
-                        if row is not None and (
-                            row["V3.2 Composite"]>=v32_min
-                            and row["Breakout Probability"]>=60
-                        ):
-                            v32_rows.append(row)
-                    except Exception:
-                        continue
-
-            v32_df=pd.DataFrame(v32_rows)
-
-            if v32_df.empty:
-                st.warning(
-                    f"No V3.2 setups met the threshold for "
-                    f"{analysis_date.strftime('%d-%b-%Y')}."
-                )
-            else:
-                v32_df.insert(
-                    0,"Scan Date",analysis_date.strftime("%Y-%m-%d")
-                )
-
-                c1,c2,c3,c4=st.columns(4)
-                c1.metric("Setups",len(v32_df))
-                c2.metric(
-                    "🟢 A-Grade",
-                    int(v32_df["Status"].str.contains("A-Grade").sum())
-                )
-                c3.metric(
-                    "🟡 Confirm",
-                    int(v32_df["Status"].str.contains("Confirm").sum())
-                )
-                c4.metric(
-                    "Avg Composite",
-                    f'{v32_df["V3.2 Composite"].mean():.1f}'
-                )
-
-                st.caption(f"Benchmark source: {v32_source}")
-
-                cols=[
-                    "Scan Date","Symbol","V3.2 Composite",
-                    "Breakout Probability","Trade Quality","Status",
-                    "Close","Resistance","Distance to Breakout %",
-                    "Confirmation Entry","Stop Loss","Risk %",
-                    "Target 1","Target 2","Risk Reward",
-                    "Resistance Tests 15D","Relative Strength 20D %",
-                    "Close Location %","Consolidation","ATR Contracting",
-                    "Bullish MA Stack","Breakout Reasons",
-                    "Trade Quality Reasons"
-                ]
-                cols=[c for c in cols if c in v32_df.columns]
-
-                display=v32_df.sort_values(
-                    ["V3.2 Composite","Breakout Probability"],
-                    ascending=[False,False]
-                )[cols]
-
-                st.dataframe(display,width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download V3.2 Results",
-                    v32_df.to_csv(index=False).encode("utf-8"),
-                    f"early_breakout_v32_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="mcs_v32_download"
-                )
-
-    if scan_mode=="🧪 V3.1 Factor Ablation Lab":
-        st.markdown("---")
-        st.subheader("🧪 V3.1 Factor Ablation Lab")
-        st.caption(
-            "V2 baseline vs Volume Surge, Relative Strength, Close Near High, "
-            "Consolidation, and all four factors together."
-        )
-
-        import datetime as _dt_ab
-        ab_end=analysis_date
-        ab_start=ab_end-_dt_ab.timedelta(days=365)
-
-        a1,a2,a3=st.columns(3)
-        ab_start_date=a1.date_input("Test Start Date",value=ab_start,
-                                    max_value=_dt_ab.date.today(),key="mcs_ab_start")
-        ab_end_date=a2.date_input("Test End Date",value=ab_end,
-                                  max_value=_dt_ab.date.today(),key="mcs_ab_end")
-        ab_hold=a3.slider("Forward Evaluation Days",5,20,10,1,key="mcs_ab_hold")
-        ab_min=st.slider("Minimum V2 / V3.1 Score",50,90,65,5,key="mcs_ab_min")
-
-        if len(stocks)>500:
-            st.info(
-                f"Large-universe mode detected ({len(stocks)} symbols). "
-                "The app will download NSE equity data in conservative chunks "
-                "and skip symbols with unavailable history. The first run may take longer."
-            )
-
-        if st.button("🧪 RUN FACTOR ABLATION TEST",type="primary",key="mcs_ab_run"):
-            if ab_start_date>=ab_end_date:
-                st.error("Test start date must be before the end date.")
-            elif not stocks:
-                st.error("No stocks are available in the selected universe.")
-            else:
-                start_ts=pd.Timestamp(ab_start_date)
-                end_ts=pd.Timestamp(ab_end_date)
-                variants=["V2 Baseline","V2 + Volume Surge","V2 + Relative Strength",
-                           "V2 + Close Near High","V2 + Consolidation","V3.1 All Factors"]
-                all_rows={v:[] for v in variants}
-                progress=st.progress(0)
-                status=st.empty()
-
-                with st.spinner("Running walk-forward factor ablation..."):
-                    # Full NSE is large: use the dedicated conservative downloader.
-                    if len(stocks) > 500:
-                        ab_data=_mcs_large_universe_download(stocks)
-                    else:
-                        ab_data=_kratter_download_batches(stocks)
-                    ab_benchmark,ab_source=_mcs_get_reliable_benchmark(stocks,ab_data,"2y")
-                    if ab_benchmark.empty:
-                        ab_benchmark=_mcs_build_universe_proxy(ab_data,analysis_ts,min_stocks=8)
-                        ab_source="Universe proxy (fallback)"
-
-                    for idx,symbol in enumerate(stocks,1):
-                        status.text(f"Testing {symbol} — {idx}/{len(stocks)} stocks")
-                        progress.progress(int(idx/len(stocks)*100))
-                        d=ab_data.get(symbol)
-                        if d is None or d.empty:
-                            continue
-                        try:
-                            d=d.copy()
-                            d.index=pd.to_datetime(d.index,errors="coerce")
-                            if getattr(d.index,"tz",None) is not None:
-                                d.index=d.index.tz_localize(None)
-                            d=d[~d.index.isna()].sort_index().loc[lambda z:z.index<=end_ts]
-                        except Exception:
-                            continue
-                        if len(d)<210:
-                            continue
-                        try:
-                            result=_mcs_ablation_backtest(
-                                symbol,d,ab_benchmark,
-                                fundamentals.get(str(symbol).upper(),{}),
-                                start_ts,end_ts,ab_min,ab_hold
-                            )
-                            for k,rows in result.items():
-                                all_rows[k].extend(rows)
-                        except Exception:
-                            continue
-
-                progress.empty()
-                status.empty()
-
-                summary_rows=[]
-                for variant,rows in all_rows.items():
-                    s=_mcs_ablation_summary(rows)
-                    s["Variant"]=variant
-                    summary_rows.append(s)
-
-                summary_df=pd.DataFrame(summary_rows)[[
-                    "Variant","Signals","Breakout <=5D %",
-                    "Avg Forward Return %","Median Forward Return %",
-                    "Target 1 Hit %","Stop Hit %",
-                    "Avg Max Gain %","Avg Max Drawdown %"
-                ]]
-
-                st.success(f"Factor ablation completed. Benchmark: {ab_source}")
-                st.dataframe(summary_df.sort_values(
-                    "Avg Forward Return %",ascending=False,na_position="last"
-                ),width="stretch",hide_index=True)
-
-                base=summary_df.loc[summary_df["Variant"]=="V2 Baseline"].iloc[0]
-                st.markdown("### Change vs V2 Baseline")
-                for _,row in summary_df.iterrows():
-                    if row["Variant"]=="V2 Baseline" or pd.isna(row["Avg Forward Return %"]):
-                        continue
-                    st.write(
-                        f"**{row['Variant']}** → "
-                        f"Return {(row['Avg Forward Return %']-base['Avg Forward Return %']):+.2f} pp | "
-                        f"Breakout {(row['Breakout <=5D %']-base['Breakout <=5D %']):+.1f} pp | "
-                        f"Stop {(row['Stop Hit %']-base['Stop Hit %']):+.1f} pp | "
-                        f"Signals {int(row['Signals'])}"
-                    )
-
-                detail=[pd.DataFrame(r) for r in all_rows.values() if r]
-                if detail:
-                    st.download_button(
-                        "⬇️ Download Factor Ablation Details",
-                        pd.concat(detail,ignore_index=True).to_csv(index=False).encode("utf-8"),
-                        f"breakout_factor_ablation_{ab_start_date}_{ab_end_date}.csv",
-                        "text/csv",key="mcs_ab_detail_download"
-                    )
-
     if scan_mode=="🚦 V2 + Regime & Trade Plan":
         st.markdown("---")
         st.subheader("🚦 V2 + Market Regime + Breakout Confirmation")
@@ -17804,9 +15400,8 @@ elif module == "🏆 Top 20 Stocks":
     if universe == "NSE F&O Stocks":
 
         st.caption(
-            "Recommended universe: current NSE individual-stock F&O underlyings. "
-            "The app removes stale excluded symbols (including IPCALAB) and "
-            "adds the latest notified F&O additions when using a fallback source."
+            "Recommended universe: individual NSE F&O "
+            "stocks. Index derivatives are excluded."
         )
 
     batch_size = st.sidebar.slider(
