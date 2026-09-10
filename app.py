@@ -7583,6 +7583,180 @@ def _mcs_get_reliable_benchmark(stocks=None, loaded_data=None, period="2y"):
 
     return pd.DataFrame(), "Unavailable"
 
+
+# ============================================================
+# MULTI-TIMEFRAME EMA 9/21/200 + RSI(9) + CCI(20) SCANNER
+# Added from the user's Monthly -> Weekly -> Daily chart setup.
+# ============================================================
+
+def _mtf_clean_symbol(symbol):
+    s=str(symbol).strip().upper()
+    s=s.replace('NSE:','').replace('.NS','')
+    return ''.join(ch for ch in s if ch.isalnum() or ch in ('_','-'))
+
+def _mtf_rsi9(close):
+    d=close.diff()
+    up=d.clip(lower=0)
+    dn=-d.clip(upper=0)
+    ag=up.ewm(alpha=1/9,adjust=False,min_periods=9).mean()
+    al=dn.ewm(alpha=1/9,adjust=False,min_periods=9).mean()
+    rs=ag/al.replace(0,np.nan)
+    r=100-(100/(1+rs))
+    return r.mask(al.eq(0)&ag.gt(0),100).fillna(50)
+
+def _mtf_cci20(df):
+    tp=(df['High']+df['Low']+df['Close'])/3.0
+    ma=tp.rolling(20).mean()
+    md=tp.rolling(20).apply(lambda x: np.mean(np.abs(x-np.mean(x))),raw=True)
+    return (tp-ma)/(0.015*md.replace(0,np.nan))
+
+def _mtf_prepare(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    x=df.copy()
+    if isinstance(x.columns,pd.MultiIndex):
+        x.columns=[c[0] for c in x.columns]
+    x.columns=[str(c).title() for c in x.columns]
+    needed=['Open','High','Low','Close','Volume']
+    if not all(c in x.columns for c in needed):
+        return pd.DataFrame()
+    for c in needed:
+        x[c]=pd.to_numeric(x[c],errors='coerce')
+    x=x.dropna(subset=['Close']).sort_index()
+    x['EMA9']=x['Close'].ewm(span=9,adjust=False,min_periods=9).mean()
+    x['EMA21']=x['Close'].ewm(span=21,adjust=False,min_periods=21).mean()
+    x['EMA200']=x['Close'].ewm(span=200,adjust=False,min_periods=200).mean()
+    x['RSI9']=_mtf_rsi9(x['Close'])
+    x['CCI20']=_mtf_cci20(x)
+    x['VolSMA20']=x['Volume'].rolling(20).mean()
+    x['VolRatio']=x['Volume']/x['VolSMA20'].replace(0,np.nan)
+    x['GapPct']=(x['EMA9']-x['EMA21']).abs()/x['Close']*100
+    x['EMA200Slope10']=x['EMA200'].pct_change(10)*100
+    x['RSI9MA3']=x['RSI9'].rolling(3).mean()
+    x['Prior20High']=x['High'].shift(1).rolling(20).max()
+    return x.dropna(subset=['EMA200','RSI9','CCI20'])
+
+def _mtf_download(symbol, interval, period):
+    ticker=symbol if str(symbol).upper().endswith('.NS') else str(symbol).upper()+'.NS'
+    try:
+        d=yf.download(ticker,interval=interval,period=period,auto_adjust=False,progress=False,threads=False)
+        if d is None or d.empty:
+            return pd.DataFrame()
+        if isinstance(d.columns,pd.MultiIndex):
+            d.columns=[c[0] for c in d.columns]
+        d.index=pd.to_datetime(d.index)
+        try:
+            if getattr(d.index,'tz',None) is not None:
+                d.index=d.index.tz_localize(None)
+        except Exception:
+            pass
+        return d
+    except Exception:
+        return pd.DataFrame()
+
+def _mtf_latest(df):
+    x=_mtf_prepare(df)
+    if len(x)<2:
+        return None
+    a=x.iloc[-1]; p=x.iloc[-2]
+    price=float(a['Close'])
+    gap=float(a['GapPct']) if pd.notna(a['GapPct']) else np.nan
+    med20=x['GapPct'].tail(20).median()
+    return {
+        'Close':price,'EMA9':float(a['EMA9']),'EMA21':float(a['EMA21']),'EMA200':float(a['EMA200']),
+        'RSI9':float(a['RSI9']),'CCI20':float(a['CCI20']),
+        'VolRatio':float(a['VolRatio']) if pd.notna(a['VolRatio']) else np.nan,
+        'GapPct':gap,
+        'Trend':bool(price>a['EMA200']),
+        'Stack':bool(a['EMA9']>a['EMA21']>a['EMA200']),
+        'EMA9Above21':bool(a['EMA9']>a['EMA21']),
+        'EMA200Rising':bool(a['EMA200Slope10']>0),
+        'RSIRising':bool(a['RSI9']>p['RSI9']),
+        'RSIAbove50':bool(a['RSI9']>=50),
+        'RSIAboveMA3':bool(a['RSI9']>a['RSI9MA3']),
+        'CCIAbove100':bool(a['CCI20']>=100),
+        'CCIRising':bool(a['CCI20']>p['CCI20']),
+        'VolumeStrong':bool(pd.notna(a['VolRatio']) and a['VolRatio']>=1.2),
+        'Breakout20':bool(pd.notna(a['Prior20High']) and price>a['Prior20High']),
+        'NearEMA':bool(pd.notna(gap) and gap<=2.5),
+        'EMAExpansion':bool(pd.notna(med20) and pd.notna(gap) and gap>med20*1.25),
+        'Date':x.index[-1]
+    }
+
+def _mtf_analyze_stock(symbol):
+    specs=[('Monthly','1mo','10y'),('Weekly','1wk','5y'),('Daily','1d','2y')]
+    f={}
+    for tf,interval,period in specs:
+        x=_mtf_latest(_mtf_download(symbol,interval,period))
+        if x is None:
+            return None
+        f[tf]=x
+    m,w,d=f['Monthly'],f['Weekly'],f['Daily']
+
+    score=0
+    # Long-term structure: 25 points
+    score+=12 if m['Trend'] else 0
+    score+=8 if m['EMA9Above21'] else 0
+    score+=3 if m['Stack'] else 0
+    score+=2 if m['EMA200Rising'] else 0
+    # Intermediate structure: 30 points
+    score+=14 if w['Trend'] else 0
+    score+=8 if w['EMA9Above21'] else 0
+    score+=4 if w['Stack'] else 0
+    score+=4 if w['RSIAbove50'] else 0
+    # Daily trigger: 45 points
+    score+=10 if d['Trend'] else 0
+    score+=8 if d['EMA9Above21'] else 0
+    score+=5 if d['Stack'] else 0
+    score+=5 if d['RSIAbove50'] else 0
+    score+=4 if d['RSIRising'] else 0
+    score+=4 if d['CCIAbove100'] else (2 if d['CCIRising'] else 0)
+    score+=3 if d['VolumeStrong'] else 0
+    score+=4 if d['Breakout20'] else 0
+    score+=2 if d['EMAExpansion'] else 0
+    score=min(100,int(score))
+
+    # Stages follow the chart logic: early -> confirmed -> strong.
+    early=(w['Trend'] and d['Trend'] and d['NearEMA'] and d['RSIAbove50'] and d['RSIRising'] and d['CCIRising'])
+    confirmed=(m['Trend'] and w['Trend'] and d['Trend'] and d['EMA9Above21'] and d['RSIAbove50'] and (d['CCIAbove100'] or d['CCIRising']) and (d['VolumeStrong'] or d['Breakout20']))
+    strong=(m['Stack'] and w['Stack'] and d['Stack'] and d['Breakout20'] and d['VolumeStrong'] and d['RSIAbove50'] and d['CCIAbove100'])
+
+    if strong:
+        stage='C — Strong Momentum'
+    elif confirmed:
+        stage='B — Confirmed Momentum'
+    elif early:
+        stage='A — Early Setup'
+    elif m['Trend'] and w['Trend'] and d['Trend']:
+        stage='Watch — 3TF Trend Aligned'
+    else:
+        stage='Mixed'
+
+    return {
+        'Stock':symbol,'MTF Score':score,'Stage':stage,
+        'Monthly Trend':'Yes' if m['Trend'] else 'No','Weekly Trend':'Yes' if w['Trend'] else 'No','Daily Trend':'Yes' if d['Trend'] else 'No',
+        'Monthly EMA9>21':'Yes' if m['EMA9Above21'] else 'No','Weekly EMA9>21':'Yes' if w['EMA9Above21'] else 'No','Daily EMA9>21':'Yes' if d['EMA9Above21'] else 'No',
+        'Daily Close':round(d['Close'],2),'Daily EMA9':round(d['EMA9'],2),'Daily EMA21':round(d['EMA21'],2),'Daily EMA200':round(d['EMA200'],2),
+        'RSI9 Daily':round(d['RSI9'],2),'CCI20 Daily':round(d['CCI20'],2),
+        'Volume x20':round(d['VolRatio'],2) if np.isfinite(d['VolRatio']) else np.nan,
+        'EMA9/21 Gap %':round(d['GapPct'],2) if np.isfinite(d['GapPct']) else np.nan,
+        '20D Breakout':'Yes' if d['Breakout20'] else 'No','EMA200 Rising':'Yes' if d['EMA200Rising'] else 'No',
+        'Monthly RSI9':round(m['RSI9'],2),'Weekly RSI9':round(w['RSI9'],2),
+        'Analysis Date':str(pd.Timestamp(d['Date']).date())
+    }
+
+def _mtf_universe_from_text(text):
+    vals=[]
+    for line in str(text).replace(',','\n').splitlines():
+        s=_mtf_clean_symbol(line)
+        if s: vals.append(s)
+    seen=set(); out=[]
+    for s in vals:
+        if s not in seen:
+            seen.add(s); out.append(s)
+    return out
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -7594,6 +7768,7 @@ st.sidebar.title(
 module = st.sidebar.radio(
     "Select Module",
     [
+        "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)",
         "🎯 CCI + EMA + RSI Strategy",
         "📚 Kratter Momentum Scanner",
         "🔥 Momentum Catalyst Scanner",
@@ -11320,6 +11495,70 @@ def _mcs_trade_plan_v2(symbol, df, benchmark=None, fundamentals=None,
 
 
 
+
+if module == "📈 Multi-Timeframe EMA 9/21/200 + RSI(9)":
+
+    st.header("📈 Multi-Timeframe EMA 9/21/200 + RSI(9) + CCI(20)")
+    st.caption("Monthly → Weekly → Daily trend alignment, using EMA 200 (red), EMA 9 (yellow), EMA 21 (green) and RSI(9).")
+
+    c1,c2,c3=st.columns(3)
+    with c1:
+        mtf_universe=st.text_area("NSE symbols", "RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK\nSBIN\nBEL\nHAL\nLT\nBHARTIARTL", height=180)
+    with c2:
+        mtf_min_score=st.slider("Minimum MTF score",0,100,60,5)
+        mtf_stage=st.selectbox("Stage filter",["All","A — Early Setup","B — Confirmed Momentum","C — Strong Momentum","Watch — 3TF Trend Aligned"])
+    with c3:
+        mtf_max=st.number_input("Maximum stocks",1,500,50,10)
+        st.info("Run after market close so the completed Monthly/Weekly/Daily bars are used.")
+
+    run_mtf=st.button("🚀 Run Multi-Timeframe Scanner",type="primary",key="run_mtf_scanner")
+
+    if run_mtf:
+        syms=_mtf_universe_from_text(mtf_universe)[:int(mtf_max)]
+        rows=[]; pb=st.progress(0); status=st.empty()
+        for i,sym in enumerate(syms,1):
+            status.write(f"Scanning {i}/{len(syms)} — {sym}")
+            try:
+                r=_mtf_analyze_stock(sym)
+                if r is not None: rows.append(r)
+            except Exception:
+                pass
+            pb.progress(i/max(1,len(syms)))
+        pb.empty(); status.empty()
+        if rows:
+            res=pd.DataFrame(rows).sort_values(['MTF Score','RSI9 Daily'],ascending=[False,False])
+            st.session_state['mtf_power_results']=res
+        else:
+            st.error("No stocks could be analysed. Check symbols/network.")
+
+    if 'mtf_power_results' in st.session_state:
+        res=st.session_state['mtf_power_results'].copy()
+        res=res[res['MTF Score']>=mtf_min_score]
+        if mtf_stage!="All": res=res[res['Stage']==mtf_stage]
+
+        st.subheader("Top Multi-Timeframe Setups")
+        if res.empty:
+            st.warning("No stocks meet the selected MTF score/stage filter.")
+        else:
+            top=res.head(10)
+            cols=st.columns(min(5,len(top)))
+            for i,(_,row) in enumerate(top.iterrows()):
+                with cols[i%len(cols)]:
+                    st.metric(str(row['Stock']),f"{int(row['MTF Score'])}/100",str(row['Stage']))
+            st.dataframe(res,use_container_width=True,hide_index=True)
+            st.download_button("⬇️ Download MTF results",res.to_csv(index=False).encode('utf-8'),"MultiTF_EMA_RSI_CCI_results.csv","text/csv",key="download_mtf_results")
+
+            st.markdown("""
+**A — Early Setup:** Monthly/Weekly structure is bullish, Daily is above EMA200, EMA9/21 are compressed, RSI(9) is above 50 and rising, and CCI(20) is improving.
+
+**B — Confirmed Momentum:** all three timeframes are trend-positive, Daily EMA9 > EMA21, RSI(9) > 50, CCI is positive/rising, with volume or breakout confirmation.
+
+**C — Strong Momentum:** Monthly + Weekly + Daily have EMA9 > EMA21 > EMA200, Daily breaks the prior 20-day high, volume ≥ 1.2× 20D average, RSI(9) > 50 and CCI(20) > +100.
+
+This is a research module. It does not guarantee future returns; the thresholds should be backtested and then validated out of sample.
+""")
+
+
 if module == "🚀 Smart Breakout Scanner":
 
     st.header(
@@ -13551,295 +13790,10 @@ elif module == "📚 Kratter Momentum Scanner":
             d.metric("Capital",f"₹{calc['Capital Required']:,.0f}")
 
 
+el
 # ============================================================
 # EMA 9/21/200 POWER BREAKOUT SCANNER
 # ============================================================
-
-
-# ============================================================
-# EMA9 / EMA21 BUY-SELL CROSSOVER SIGNAL
-# ============================================================
-
-
-# ============================================================
-# EMA9 < EMA21 > EMA200 + RSI9/WMA21 + CCI(20) RECOVERY SETUP
-# ============================================================
-
-def _wma(series, period):
-    weights=np.arange(1,period+1,dtype=float)
-    return series.rolling(period,min_periods=period).apply(
-        lambda x: np.dot(x,weights)/weights.sum(), raw=True
-    )
-
-def _ema921_rsi_cci_setup(symbol, df,
-                          rsi_min=50.0,
-                          cci_target=100.0,
-                          cci_lookback=3,
-                          ema_gap_max_pct=2.0,
-                          require_gap_tightening=True,
-                          require_wma_rising=True,
-                          cci_mode="Toward +100",
-                          volume_threshold=1.0,
-                          require_volume=True):
-    d=_ema_power_prepare(df)
-    if len(d)<220:
-        return None
-
-    # RSI(9) on price, then WMA(21) of RSI(9), matching the chart concept.
-    d["RSI9_WMA21"]=_wma(d["RSI9"],21)
-    d["RSI9_WMA21_SLOPE5"]=(d["RSI9_WMA21"]/d["RSI9_WMA21"].shift(5)-1)*100
-    d["EMA_GAP_PCT"]=(d["EMA21"]-d["EMA9"])/d["EMA21"]*100
-    d["EMA_GAP_CHANGE"] = d["EMA_GAP_PCT"].diff()
-    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
-
-    r=d.iloc[-1]
-    p=d.iloc[-2]
-
-    req=[
-        r["EMA9"],r["EMA21"],r["EMA200"],
-        r["RSI9"],r["RSI9_WMA21"],r["CCI20"]
-    ]
-    if not all(np.isfinite(v) for v in req):
-        return None
-
-    # Core price structure requested by the user:
-    # EMA9 is still below EMA21 (pullback/early-turn structure)
-    # while both remain above the long-term EMA200 regime.
-    trend_structure=bool(
-        r["EMA9"]<r["EMA21"] and
-        r["EMA9"]>r["EMA200"] and
-        r["EMA21"]>r["EMA200"]
-    )
-    if not trend_structure:
-        return None
-
-    # EMA9 must be close to EMA21, indicating an early-turn setup rather than
-    # a deep pullback. Measure the gap as a percentage of EMA21.
-    ema_gap_pct=(r["EMA21"]-r["EMA9"])/r["EMA21"]*100
-    if not np.isfinite(ema_gap_pct) or ema_gap_pct>ema_gap_max_pct:
-        return None
-
-    # RSI9 crosses above WMA21 today and RSI is already above 50.
-    rsi_cross=bool(
-        r["RSI9"]>r["RSI9_WMA21"] and
-        p["RSI9"]<=p["RSI9_WMA21"] and
-        r["RSI9"]>rsi_min
-    )
-    if not rsi_cross:
-        return None
-
-    # CCI momentum: rising for several sessions. We support two chart-useful
-    # modes: (1) early recovery toward +100, or (2) fresh bullish break of +100.
-    lb=max(1,int(cci_lookback))
-    cci_vals=d["CCI20"].iloc[-(lb+1):]
-    cci_rising=bool(
-        len(cci_vals)==lb+1 and
-        (cci_vals.diff().iloc[1:]>0).all()
-    )
-    cci_current=float(r["CCI20"])
-    cci_prev=float(p["CCI20"])
-
-    if cci_mode=="Toward +100":
-        cci_condition=bool(cci_rising and 0 < cci_current < cci_target)
-    else:
-        cci_condition=bool(
-            cci_rising and
-            cci_current >= cci_target and
-            cci_prev < cci_target
-        )
-    if not cci_condition:
-        return None
-
-    # The chart suggests the signal is strongest when EMA9 is compressed
-    # beneath EMA21 and that gap is narrowing toward a bullish turn.
-    gap_tightening=bool(r["EMA_GAP_CHANGE"]<=0)
-    if require_gap_tightening and not gap_tightening:
-        return None
-
-    # RSI-WMA recovery is stronger when the WMA itself is no longer falling.
-    wma_rising=bool(
-        not require_wma_rising or
-        (np.isfinite(r["RSI9_WMA21_SLOPE5"]) and r["RSI9_WMA21_SLOPE5"]>=0)
-    )
-    if not wma_rising:
-        return None
-
-    volume_ok=(
-        np.isfinite(r["VOL_RATIO"]) and
-        r["VOL_RATIO"]>=volume_threshold
-    )
-
-    # Directional volume support: recent positive closes should carry at least
-    # as much volume as recent negative closes. This matches the visual pattern
-    # of green volume expanding as price begins to turn upward.
-    recent_up_volume=False
-    if len(d)>=4 and "Volume" in d.columns:
-        recent=d.iloc[-3:]
-        price_change=recent["Close"].diff()
-        up_days=recent[price_change>0]
-        recent_up_volume=(
-            len(up_days)>0 and
-            float(up_days["Volume"].mean())>=float(recent["Volume"].mean())
-        )
-
-    volume_support=bool(volume_ok and (recent_up_volume or r["Volume"]>=d["Volume"].iloc[-5:].mean()))
-    if require_volume and not volume_support:
-        return None
-
-    # Score is a quality measure; core conditions above are mandatory.
-    score=60
-    reasons=[
-        "EMA9 < EMA21 and both above EMA200",
-        f"EMA9 is {ema_gap_pct:.2f}% below EMA21",
-        f"RSI9 {r['RSI9']:.1f} crossed above RSI WMA21 {r['RSI9_WMA21']:.1f}",
-        f"CCI20 rising ({r['CCI20']:.1f})"
-    ]
-    if gap_tightening:
-        score+=10
-        reasons.append("EMA9-EMA21 gap tightening")
-    if wma_rising:
-        score+=5
-        reasons.append("RSI WMA21 rising")
-    if r["EMA200_SLOPE10"]>0:
-        score+=5
-        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%")
-    if volume_support:
-        score+=20
-        reasons.append(f"Volume support {r['VOL_RATIO']:.2f}x SMA20")
-    elif volume_ok:
-        score+=10
-        reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
-
-    if r["EMA9_ANGLE5"]>0:
-        score+=10
-        reasons.append(f"EMA9 angle {r['EMA9_ANGLE5']:.1f}°")
-    if r["EMA21_ANGLE10"]>0:
-        score+=10
-        reasons.append(f"EMA21 angle {r['EMA21_ANGLE10']:.1f}°")
-
-    return {
-        "Symbol":symbol,
-        "Signal":"BUY",
-        "Setup Score":int(min(score,100)),
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
-        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
-        "RSI9":float(r["RSI9"]),
-        "RSI9 WMA21":float(r["RSI9_WMA21"]),
-        "RSI9 Cross Above WMA21":True,
-        "CCI20":cci_current,
-        "CCI Rising":cci_rising,
-        "CCI Distance to +100":float(cci_target-cci_current),
-        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
-        "Volume Support":bool(volume_support),
-        "EMA9-EMA21 Gap %":float(ema_gap_pct),
-        "EMA Gap Tightening":bool(gap_tightening),
-        "RSI WMA21 Rising":bool(wma_rising),
-        "RSI WMA21 Slope 5D %":float(r["RSI9_WMA21_SLOPE5"]),
-        "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
-        "Below EMA21 %":float(ema21_distance),
-        "Reasons":" | ".join(reasons)
-    }
-
-def _ema921_cross_signal(symbol, df, direction="Both",
-                         angle_threshold=40.0,
-                         rsi_buy=55.0, rsi_sell=45.0,
-                         cci_threshold=100.0,
-                         volume_threshold=1.5):
-    d=_ema_power_prepare(df)
-    if len(d)<220:
-        return None
-
-    r=d.iloc[-1]
-    p=d.iloc[-2]
-
-    bull_cross=bool(r["EMA9"]>r["EMA21"] and p["EMA9"]<=p["EMA21"])
-    bear_cross=bool(r["EMA9"]<r["EMA21"] and p["EMA9"]>=p["EMA21"])
-
-    if direction=="Buy" and not bull_cross:
-        return None
-    if direction=="Sell" and not bear_cross:
-        return None
-    if direction=="Both" and not (bull_cross or bear_cross):
-        return None
-
-    is_buy=bull_cross
-    is_sell=bear_cross
-
-    # Long-term trend context remains visible, but the trade trigger is
-    # specifically the EMA9/EMA21 crossover requested by the user.
-    ema200_ok=(r["Close"]>=r["EMA200"]) if is_buy else (
-        r["Close"]<=r["EMA200"] if is_sell else True
-    )
-
-    angle_ok=(
-        r["EMA9_ANGLE5"]>=angle_threshold and
-        r["EMA21_ANGLE10"]>=angle_threshold
-    ) if is_buy else (
-        r["EMA9_ANGLE5"]<=-angle_threshold and
-        r["EMA21_ANGLE10"]<=-angle_threshold
-    )
-
-    rsi_ok=(r["RSI9"]>=rsi_buy and r["RSI9"]>p["RSI9"]) if is_buy else (
-        r["RSI9"]<=rsi_sell and r["RSI9"]<p["RSI9"]
-    )
-
-    cci_ok=(r["CCI20"]>=cci_threshold) if is_buy else (
-        r["CCI20"]<=-cci_threshold
-    )
-
-    volume_ok=(
-        np.isfinite(r["VOL_RATIO"]) and
-        r["VOL_RATIO"]>=volume_threshold
-    )
-
-    # A confirmation score, while keeping the raw crossover as the trigger.
-    score=40  # crossover itself
-    reasons=[("BUY" if is_buy else "SELL") + " EMA9/EMA21 crossover"]
-
-    if ema200_ok:
-        score+=15
-        reasons.append("EMA200 trend context confirmed")
-    if angle_ok:
-        score+=15
-        reasons.append(
-            f"EMA9 {r['EMA9_ANGLE5']:.1f}° / EMA21 {r['EMA21_ANGLE10']:.1f}°"
-        )
-    if rsi_ok:
-        score+=10
-        reasons.append(f"RSI9 {r['RSI9']:.1f}")
-    if cci_ok:
-        score+=10
-        reasons.append(f"CCI20 {r['CCI20']:.0f}")
-    if volume_ok:
-        score+=10
-        reasons.append(f"Volume {r['VOL_RATIO']:.2f}x")
-
-    score=min(100,score)
-
-    return {
-        "Symbol":symbol,
-        "Signal":"BUY" if is_buy else "SELL",
-        "Power Score":score,
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
-        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
-        "RSI9":float(r["RSI9"]),
-        "CCI20":float(r["CCI20"]),
-        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
-        "EMA200 Context":bool(ema200_ok),
-        "Angle Confirmation":bool(angle_ok),
-        "RSI Confirmation":bool(rsi_ok),
-        "CCI Confirmation":bool(cci_ok),
-        "Volume Confirmation":bool(volume_ok),
-        "Reasons":" | ".join(reasons)
-    }
 
 def _ema_power_rsi(close, period=9):
     delta=close.diff()
@@ -13874,35 +13828,9 @@ def _ema_power_prepare(df):
     d["CCI20"]=_ema_power_cci(d,20)
     d["VOL_SMA20"]=d["Volume"].rolling(20,min_periods=20).mean() if "Volume" in d else np.nan
     d["VOL_RATIO"]=d["Volume"]/d["VOL_SMA20"].replace(0,np.nan) if "Volume" in d else np.nan
-    # ATR-normalized slopes/angles for EMA9 and EMA21 make the angle
-    # comparable across stocks with very different price levels/volatility.
-    prev_close=d["Close"].shift(1)
-    tr=pd.concat([
-        d["High"]-d["Low"],
-        (d["High"]-prev_close).abs(),
-        (d["Low"]-prev_close).abs()
-    ],axis=1).max(axis=1)
-    d["ATR14"]=tr.rolling(14,min_periods=14).mean()
-
-    prev_ema21=d["EMA21"].shift(10)
-    prev_ema9=d["EMA9"].shift(5)
-
     d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
-    d["EMA21_SLOPE10"]=(d["EMA21"]/prev_ema21-1)*100
-    d["EMA9_SLOPE5"]=(d["EMA9"]/prev_ema9-1)*100
-
-    d["EMA21_ANGLE10"] = np.degrees(
-        np.arctan(
-            (d["EMA21"]-prev_ema21) /
-            (10*d["ATR14"].replace(0,np.nan))
-        )
-    )
-    d["EMA9_ANGLE5"] = np.degrees(
-        np.arctan(
-            (d["EMA9"]-prev_ema9) /
-            (5*d["ATR14"].replace(0,np.nan))
-        )
-    )
+    d["EMA21_SLOPE10"]=(d["EMA21"]/d["EMA21"].shift(10)-1)*100
+    d["EMA9_SLOPE5"]=(d["EMA9"]/d["EMA9"].shift(5)-1)*100
     d["RES20_PREV"]=d["High"].rolling(20,min_periods=20).max().shift(1)
     d["EMA21_CROSS_200"]=(
         (d["EMA21"]>d["EMA200"]) &
@@ -13915,9 +13843,7 @@ def _ema_power_prepare(df):
     return d
 
 def _ema_power_signal(symbol,df,mode="Pre-breakout",
-                      ema21_angle_threshold=40.0,
-                      ema9_angle_threshold=40.0,
-                      volume_threshold=1.5,
+                      slope_threshold=1.0,volume_threshold=1.5,
                       rsi_threshold=55,cci_threshold=100):
     d=_ema_power_prepare(df)
     if len(d)<220:
@@ -13925,10 +13851,7 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
     r=d.iloc[-1]
     prev=d.iloc[-2]
 
-    required=[
-        r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],
-        r["EMA21_ANGLE10"],r["EMA9_ANGLE5"]
-    ]
+    required=[r["EMA9"],r["EMA21"],r["EMA200"],r["RSI9"],r["CCI20"],r["EMA200_SLOPE10"]]
     if not all(np.isfinite(v) for v in required):
         return None
 
@@ -13938,8 +13861,7 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         d["EMA9_CROSS_21"].iloc[-10:].any()
     )
     bullish_cross=bool(d["EMA21_CROSS_200"].iloc[-20:].any())
-    steep_ema21=bool(r["EMA21_ANGLE10"]>=ema21_angle_threshold)
-    steep_ema9=bool(r["EMA9_ANGLE5"]>=ema9_angle_threshold)
+    steep_slope=bool(r["EMA200_SLOPE10"]>=slope_threshold)
 
     if mode=="Fresh Cross Only" and not bullish_cross:
         return None
@@ -13972,21 +13894,13 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         score+=10
         reasons.append("Price above EMA200")
 
-    if steep_ema21:
+    if steep_slope:
+        score+=15
+        reasons.append(f"EMA200 slope {r['EMA200_SLOPE10']:.2f}%/10D")
+    elif r["EMA200_SLOPE10"]>=0.5:
         score+=10
-        reasons.append(f"EMA21 angle {r['EMA21_ANGLE10']:.1f}°")
-    elif r["EMA21_ANGLE10"]>=ema21_angle_threshold*0.75:
-        score+=6
-    elif r["EMA21_ANGLE10"]>0:
-        score+=3
-
-    if steep_ema9:
-        score+=10
-        reasons.append(f"EMA9 angle {r['EMA9_ANGLE5']:.1f}°")
-    elif r["EMA9_ANGLE5"]>=ema9_angle_threshold*0.75:
-        score+=6
-    elif r["EMA9_ANGLE5"]>0:
-        score+=3
+    elif r["EMA200_SLOPE10"]>0:
+        score+=5
 
     if r["RSI9"]>=60 and r["RSI9"]>prev["RSI9"]:
         score+=15
@@ -14038,9 +13952,7 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         "EMA200":float(r["EMA200"]),
         "EMA200 Slope 10D %":float(r["EMA200_SLOPE10"]),
         "EMA21 Slope 10D %":float(r["EMA21_SLOPE10"]),
-        "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
         "EMA9 Slope 5D %":float(r["EMA9_SLOPE5"]),
-        "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
         "EMA21 > EMA200":bool(r["EMA21"]>r["EMA200"]),
         "Fresh EMA21/200 Cross":bullish_cross,
         "RSI9":float(r["RSI9"]),
@@ -14051,444 +13963,6 @@ def _ema_power_signal(symbol,df,mode="Pre-breakout",
         "Breakout":breakout,
         "Reasons":" | ".join(reasons)
     }
-
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _ema_company_name(symbol):
-    """Best-effort company name lookup for signal output."""
-    s=str(symbol).strip().upper()
-    try:
-        info=yf.Ticker(f"{s}.NS").info
-        return info.get("shortName") or info.get("longName") or s
-    except Exception:
-        return s
-
-
-# ============================================================
-# EMA9/21 CROSSOVER + RETEST + BREAKOUT RULE ENGINE
-# User-defined Rules 1–3
-# ============================================================
-
-def _ema921_rule_engine(df, direction="Buy", max_retest_bars=10, confirmation_bars=3):
-    """
-    Bullish rules:
-      1) EMA9 crosses above EMA21; crossover candle closes above EMA9.
-      2) Later retest candle: Low <= EMA9 and Close > EMA9.
-      3) Retest candle or next 1..N bars breaks the HIGH of the candle
-         immediately before the retest candle.
-
-    Bearish mirror:
-      1) EMA9 crosses below EMA21; crossover candle closes below EMA9.
-      2) Retest candle: High >= EMA9 and Close < EMA9.
-      3) Retest candle or next 1..N bars breaks the LOW of the candle
-         immediately before the retest candle.
-
-    The function evaluates the latest completed setup, avoiding future data
-    beyond the specified confirmation window.
-    """
-    d=_ema_power_prepare(df)
-    if len(d)<220:
-        return None
-
-    # Use a compact copy with clean numeric OHLC.
-    d=d.dropna(subset=["Open","High","Low","Close","EMA9","EMA21"]).copy()
-
-    cross_idx=None
-    bullish=direction=="Buy"
-    bearish=direction=="Sell"
-
-    # Find the most recent qualifying crossover candle.
-    for i in range(len(d)-1,0,-1):
-        r=d.iloc[i]; p=d.iloc[i-1]
-        if bullish:
-            cross=bool(r["EMA9"]>r["EMA21"] and p["EMA9"]<=p["EMA21"])
-            close_ok=bool(r["Close"]>r["EMA9"])
-        else:
-            cross=bool(r["EMA9"]<r["EMA21"] and p["EMA9"]>=p["EMA21"])
-            close_ok=bool(r["Close"]<r["EMA9"])
-        if cross and close_ok:
-            cross_idx=i
-            break
-
-    if cross_idx is None:
-        return None
-
-    # Search for the first valid retest after the crossover.
-    last_i=min(len(d)-2,cross_idx+max(1,int(max_retest_bars)))
-    retest_idx=None
-    for j in range(cross_idx+1,last_i+1):
-        r=d.iloc[j]
-        if bullish:
-            valid=bool(r["Low"]<=r["EMA9"] and r["Close"]>r["EMA9"])
-        else:
-            valid=bool(r["High"]>=r["EMA9"] and r["Close"]<r["EMA9"])
-        if valid:
-            retest_idx=j
-            break
-
-    if retest_idx is None:
-        return None
-
-    # Rule 3: reference candle is the candle immediately BEFORE the retest.
-    reference_idx=retest_idx-1
-    ref=d.iloc[reference_idx]
-    trigger_level=float(ref["High"] if bullish else ref["Low"])
-
-    # Retest candle itself + next N candles are eligible.
-    end_idx=min(len(d)-1,retest_idx+int(confirmation_bars))
-    trigger_idx=None
-    for k in range(retest_idx,end_idx+1):
-        bar=d.iloc[k]
-        if bullish and float(bar["High"])>trigger_level:
-            trigger_idx=k
-            break
-        if bearish and float(bar["Low"])<trigger_level:
-            trigger_idx=k
-            break
-
-    if trigger_idx is None:
-        return None
-
-    # Make sure the trigger has happened by the latest completed candle.
-    if trigger_idx!=len(d)-1:
-        # Historical completed setup remains valid only if the latest bar is
-        # still at/after the trigger; report the current state but tag timing.
-        pass
-
-    r=d.iloc[-1]
-    cross=d.iloc[cross_idx]
-    ret=d.iloc[retest_idx]
-    trig=d.iloc[trigger_idx]
-
-    # Simple quality details, not extra hard gates.
-    ema200_ok=bool(r["EMA200"]<r["Close"]) if bullish else bool(r["EMA200"]>r["Close"])
-    volume_ok=bool(np.isfinite(r["VOL_RATIO"]) and r["VOL_RATIO"]>=1.0)
-    rsi_ok=bool(r["RSI9"]>=50) if bullish else bool(r["RSI9"]<=50)
-    cci_ok=bool(r["CCI20"]>0) if bullish else bool(r["CCI20"]<0)
-
-    score=60
-    reasons=[
-        "Rule 1 passed: crossover candle closed beyond EMA9",
-        "Rule 2 passed: retest touched EMA9 and reclaimed it",
-        "Rule 3 passed: trigger candle broke pre-retest high" if bullish
-        else "Rule 3 passed: trigger candle broke pre-retest low"
-    ]
-    if ema200_ok: score+=10; reasons.append("EMA200 trend aligned")
-    if volume_ok: score+=10; reasons.append(f"Volume {r['VOL_RATIO']:.2f}x SMA20")
-    if rsi_ok: score+=10; reasons.append(f"RSI9 {r['RSI9']:.1f}")
-    if cci_ok: score+=10; reasons.append(f"CCI20 {r['CCI20']:.1f}")
-
-    return {
-        "Signal":"BUY" if bullish else "SELL",
-        "Setup Score":min(100,score),
-        "Crossover Date":d.index[cross_idx],
-        "Retest Date":d.index[retest_idx],
-        "Trigger Date":d.index[trigger_idx],
-        "Reference Candle High":float(ref["High"]),
-        "Reference Candle Low":float(ref["Low"]),
-        "Trigger Level":trigger_level,
-        "Close":float(r["Close"]),
-        "EMA9":float(r["EMA9"]),
-        "EMA21":float(r["EMA21"]),
-        "EMA200":float(r["EMA200"]),
-        "RSI9":float(r["RSI9"]),
-        "CCI20":float(r["CCI20"]),
-        "Volume Ratio":float(r["VOL_RATIO"]) if np.isfinite(r["VOL_RATIO"]) else np.nan,
-        "EMA200 Aligned":ema200_ok,
-        "Volume Confirmed":volume_ok,
-        "RSI Confirmed":rsi_ok,
-        "CCI Confirmed":cci_ok,
-        "Bars Crossover→Retest":retest_idx-cross_idx,
-        "Bars Retest→Trigger":trigger_idx-retest_idx,
-        "Reasons":" | ".join(reasons)
-    }
-
-def _ema921_timeframe_params(timeframe):
-    # yfinance-compatible interval + history.
-    mapping={
-        "Daily":("1d","5y"),
-        "Weekly":("1wk","10y"),
-        "Monthly":("1mo","max"),
-        "5 Minutes":("5m","60d"),
-        "15 Minutes":("15m","60d"),
-        "30 Minutes":("30m","60d"),
-        "1 Hour":("60m","730d"),
-    }
-    return mapping.get(timeframe,("1d","5y"))
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _ema921_download_timeframe(tickers, timeframe):
-    interval,period=_ema921_timeframe_params(timeframe)
-    result={}
-    tickers=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
-
-    for start in range(0,len(tickers),40):
-        batch=tickers[start:start+40]
-        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
-        try:
-            raw=yf.download(
-                tickers=yahoo,
-                period=period,
-                interval=interval,
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-                group_by="ticker"
-            )
-        except Exception:
-            continue
-        if raw is None or raw.empty:
-            continue
-
-        if len(batch)==1:
-            x=raw.copy()
-            if isinstance(x.columns,pd.MultiIndex):
-                x.columns=x.columns.get_level_values(0)
-            if "Close" in x.columns:
-                result[batch[0]]=x
-            continue
-
-        if isinstance(raw.columns,pd.MultiIndex):
-            for symbol,yahoo_symbol in zip(batch,yahoo):
-                x=None
-                try:
-                    if yahoo_symbol in raw.columns.get_level_values(0):
-                        x=raw[yahoo_symbol].copy()
-                    elif yahoo_symbol in raw.columns.get_level_values(1):
-                        x=raw.xs(yahoo_symbol,axis=1,level=1).copy()
-                    elif symbol in raw.columns.get_level_values(0):
-                        x=raw[symbol].copy()
-                    elif symbol in raw.columns.get_level_values(1):
-                        x=raw.xs(symbol,axis=1,level=1).copy()
-                except Exception:
-                    x=None
-                if x is not None and not x.empty and "Close" in x.columns:
-                    result[symbol]=x
-    return result
-
-# ============================================================
-# EMA 9/21 THREE-STAGE STRATEGY
-# ============================================================
-
-def _ema_three_stage_features(df):
-    d=_ema_power_prepare(df)
-    d["RSI9_WMA21"]=_wma(d["RSI9"],21)
-    d["RSI9_WMA21_SLOPE5"]=(d["RSI9_WMA21"]/d["RSI9_WMA21"].shift(5)-1)*100
-    d["EMA_GAP_PCT"]=(d["EMA21"]-d["EMA9"])/d["EMA21"]*100
-    d["EMA_GAP_CHANGE"]=d["EMA_GAP_PCT"].diff()
-    d["EMA21_SLOPE10"]=(d["EMA21"]/d["EMA21"].shift(10)-1)*100
-    d["EMA200_SLOPE10"]=(d["EMA200"]/d["EMA200"].shift(10)-1)*100
-    d["VOL_SMA20"]=d["Volume"].rolling(20,min_periods=20).mean()
-    d["VOL_RATIO"]=d["Volume"]/d["VOL_SMA20"].replace(0,np.nan)
-    d["BULLISH_CANDLE"]=d["Close"]>d["Open"]
-    d["EMA9_CROSS_21_BULL"]=(
-        (d["EMA9"]>d["EMA21"]) &
-        (d["EMA9"].shift(1)<=d["EMA21"].shift(1))
-    )
-    return d
-
-def _ema_three_stage_current(symbol, df, setup, angle_threshold=40,
-                             gap_max=3.0, rsi_min=50, volume_ratio=1.0):
-    d=_ema_three_stage_features(df)
-    if len(d)<220:
-        return None
-    r=d.iloc[-1]
-    p=d.iloc[-2]
-    req=["EMA9","EMA21","EMA200","RSI9","RSI9_WMA21","CCI20","VOL_RATIO",
-         "EMA9_ANGLE5","EMA21_ANGLE10"]
-    if not all(np.isfinite(r.get(k,np.nan)) for k in req):
-        return None
-
-    if setup=="Early Reversal":
-        gap=float(r["EMA_GAP_PCT"])
-        rsi_cross=bool(
-            ((d["RSI9"]>d["RSI9_WMA21"]) &
-             (d["RSI9"].shift(1)<=d["RSI9_WMA21"].shift(1))).iloc[-3:].any()
-        )
-        cci_rising=bool(
-            r["CCI20"]>d["CCI20"].iloc[-3] and
-            r["CCI20"]>p["CCI20"] and
-            0<r["CCI20"]<100
-        )
-        if not (
-            r["EMA9"]<r["EMA21"] and
-            r["EMA9"]>r["EMA200"] and
-            r["EMA21"]>r["EMA200"] and
-            0<=gap<=gap_max and
-            rsi_cross and r["RSI9"]>rsi_min and
-            cci_rising and r["VOL_RATIO"]>=volume_ratio
-        ):
-            return None
-        score=65
-        reasons=["EMA9<EMA21; both above EMA200",
-                 f"EMA gap {gap:.2f}%",
-                 "RSI9 crossed above RSI-WMA21",
-                 f"CCI20 rising toward +100 ({r['CCI20']:.1f})",
-                 f"Volume {r['VOL_RATIO']:.2f}x"]
-        if r["EMA_GAP_CHANGE"]<=0: score+=10; reasons.append("EMA gap tightening")
-        if r["EMA9_ANGLE5"]>0: score+=5
-        if r["EMA21_ANGLE10"]>0: score+=5
-        if r["EMA200_SLOPE10"]>0: score+=5
-        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
-                "Setup":setup,"Signal":"WATCH","Setup Score":min(100,score),
-                "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
-                "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
-                "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
-                "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
-                "EMA Gap %":gap,"RSI9":float(r["RSI9"]),
-                "RSI9 WMA21":float(r["RSI9_WMA21"]),
-                "CCI20":float(r["CCI20"]),"Volume Ratio":float(r["VOL_RATIO"]),
-                "Reasons":" | ".join(reasons)}
-
-    if setup=="Fresh Momentum":
-        if not (
-            bool(r["EMA9_CROSS_21_BULL"]) and
-            r["Close"]>r["EMA9"] and r["Close"]>r["EMA21"] and
-            r["BULLISH_CANDLE"] and r["RSI9"]>rsi_min and
-            r["VOL_RATIO"]>=volume_ratio
-        ):
-            return None
-        score=65
-        reasons=["EMA9 crossed above EMA21","Price above both EMAs",
-                 "Bullish candle",f"RSI9 {r['RSI9']:.1f}",
-                 f"Volume {r['VOL_RATIO']:.2f}x"]
-        if r["Close"]>r["EMA200"]: score+=10; reasons.append("Price above EMA200")
-        if r["EMA9_ANGLE5"]>=angle_threshold: score+=5
-        if r["EMA21_ANGLE10"]>=angle_threshold: score+=5
-        if r["EMA200_SLOPE10"]>0: score+=5
-        if r["CCI20"]>0: score+=5
-        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
-                "Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
-                "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
-                "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
-                "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
-                "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
-                "EMA Gap %":float((r["EMA21"]-r["EMA9"])/r["EMA21"]*100),
-                "RSI9":float(r["RSI9"]),"RSI9 WMA21":float(r["RSI9_WMA21"]),
-                "CCI20":float(r["CCI20"]),"Volume Ratio":float(r["VOL_RATIO"]),
-                "Reasons":" | ".join(reasons)}
-
-    if setup=="Retest Continuation":
-        prior=d.iloc[-6:-1]
-        trend=bool((prior["EMA9"]>prior["EMA21"]).all())
-        price_above=bool(r["Close"]>r["EMA21"] and r["EMA9"]>r["EMA21"])
-        pullback=bool(((d["Low"].iloc[-4:]<=d["EMA9"].iloc[-4:]*1.01) |
-                       (d["Low"].iloc[-4:]<=d["EMA21"].iloc[-4:]*1.01)).any())
-        vol_contract=bool(d["VOL_RATIO"].iloc[-2]<1.0)
-        reclaim=bool(r["BULLISH_CANDLE"] and r["Close"]>p["Close"] and r["Close"]>r["EMA9"])
-        vol_reclaim=bool(r["VOL_RATIO"]>=volume_ratio)
-        if not (trend and price_above and pullback and vol_contract and reclaim and vol_reclaim):
-            return None
-        score=70
-        reasons=["EMA9>EMA21","Price above EMA zone","Recent EMA-zone pullback",
-                 "Pullback volume contracted","Bullish reclaim with volume"]
-        if r["EMA9_ANGLE5"]>0: score+=5
-        if r["EMA21_ANGLE10"]>0: score+=5
-        if r["RSI9"]>50: score+=5
-        if r["CCI20"]>0: score+=5
-        if r["EMA200_SLOPE10"]>0: score+=5
-        return {"Symbol":symbol,"Stock Name":_ema_company_name(symbol),
-                "Setup":setup,"Signal":"BUY","Setup Score":min(100,int(score)),
-                "Close":float(r["Close"]),"EMA9":float(r["EMA9"]),
-                "EMA21":float(r["EMA21"]),"EMA200":float(r["EMA200"]),
-                "EMA9 Angle 5D °":float(r["EMA9_ANGLE5"]),
-                "EMA21 Angle 10D °":float(r["EMA21_ANGLE10"]),
-                "EMA Gap %":float((r["EMA21"]-r["EMA9"])/r["EMA21"]*100),
-                "RSI9":float(r["RSI9"]),"RSI9 WMA21":float(r["RSI9_WMA21"]),
-                "CCI20":float(r["CCI20"]),"Volume Ratio":float(r["VOL_RATIO"]),
-                "Reasons":" | ".join(reasons)}
-    return None
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _ema_three_stage_download(tickers, period="3y"):
-    """Download enough history for EMA200 + historical signal backtesting."""
-    result={}
-    ticker_list=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
-    for start in range(0,len(ticker_list),40):
-        batch=ticker_list[start:start+40]
-        yahoo=[s if s.endswith(".NS") or s.startswith("^") else s+".NS" for s in batch]
-        try:
-            d=yf.download(
-                tickers=yahoo,period=period,interval="1d",
-                auto_adjust=False,progress=False,threads=False,group_by="ticker"
-            )
-        except Exception:
-            continue
-        if d is None or d.empty:
-            continue
-        if len(batch)==1:
-            stock=d.copy()
-            if isinstance(stock.columns,pd.MultiIndex):
-                lv0=stock.columns.get_level_values(0)
-                lv1=stock.columns.get_level_values(1)
-                if "Close" in lv0: stock.columns=lv0
-                elif "Close" in lv1: stock.columns=lv1
-            if "Close" in stock.columns:
-                result[batch[0]]=stock.dropna(subset=["Close"])
-            continue
-        if isinstance(d.columns,pd.MultiIndex):
-            for symbol,yahoo_symbol in zip(batch,yahoo):
-                stock=None
-                for key in (yahoo_symbol,symbol):
-                    try:
-                        if key in d.columns.get_level_values(0):
-                            stock=d[key].copy(); break
-                        if key in d.columns.get_level_values(1):
-                            stock=d.xs(key,axis=1,level=1).copy(); break
-                    except Exception:
-                        pass
-                if stock is not None and not stock.empty and "Close" in stock.columns:
-                    result[symbol]=stock.dropna(subset=["Close"])
-    return result
-
-def _ema_three_stage_backtest(df, setup, forward_days, min_score,
-                              angle_threshold, gap_max, rsi_min, volume_ratio):
-    d=_ema_three_stage_features(df)
-    results=[]
-    if len(d)<260:
-        return results
-
-    # Precompute indicators once. Test each historical bar without repeatedly
-    # downloading/rebuilding data.
-    last_signal=-999
-    for i in range(220,len(d)-forward_days):
-        if i-last_signal<5:
-            continue
-        past=d.iloc[:i+1].copy()
-
-        try:
-            sig=_ema_three_stage_current(
-                "HIST",past,setup,angle_threshold,gap_max,rsi_min,volume_ratio
-            )
-        except Exception:
-            continue
-
-        if sig is None or sig["Setup Score"]<min_score:
-            continue
-
-        entry=float(d["Close"].iloc[i])
-        fut=d.iloc[i+1:i+1+forward_days]
-        if len(fut)<forward_days:
-            continue
-
-        ret=(float(fut["Close"].iloc[-1])/entry-1)*100
-        max_gain=(float(fut["High"].max())/entry-1)*100
-        max_dd=(float(fut["Low"].min())/entry-1)*100
-
-        results.append({
-            "Signal Date":d.index[i].strftime("%Y-%m-%d"),
-            "Power Score":int(sig["Setup Score"]),
-            f"Forward {forward_days}D Return %":round(ret,3),
-            "Max Gain %":round(max_gain,3),
-            "Max Drawdown %":round(max_dd,3)
-        })
-        last_signal=i
-
-    return results
-
-
 
 if module == "🔥 Momentum Catalyst Scanner":
 
@@ -14558,10 +14032,6 @@ if module == "🔥 Momentum Catalyst Scanner":
             "🏆 Early Breakout V3.3 Adaptive",
             "💎 Early Breakout V3.4 Risk/Reward",
             "⚡ EMA 9/21 Power Breakout",
-            "🧩 EMA 9/21 Three-Stage Strategy",
-            "🎯 EMA9/21 Crossover + Retest Rules 1-3",
-            "🔄 EMA9/21 Buy-Sell Crossover",
-            "🎯 EMA9<EMA21 + RSI-WMA + CCI Setup",
             "🚀 Multibagger Intelligence V2.4",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
@@ -14577,509 +14047,6 @@ if module == "🔥 Momentum Catalyst Scanner":
     # INDEPENDENT EMA 9/21/200 POWER BREAKOUT SCANNER
     # ========================================================
 
-
-
-    if scan_mode=="🎯 EMA9<EMA21 + RSI-WMA + CCI Setup":
-        st.markdown("---")
-        st.subheader("🎯 EMA9 < EMA21 Pullback + RSI9/WMA21 + CCI20 Recovery")
-        st.caption(
-            "Looks for the specific early-turn structure: EMA9 remains below EMA21 "
-            "but both are above EMA200, while RSI9 crosses above its WMA21 above 50 "
-            "and CCI20 is rising toward +100."
-        )
-
-        c1,c2,c3=st.columns(3)
-        cci_lb=c1.slider(
-            "CCI rising lookback (days)",2,5,3,1,key="ema_rsi_cci_lb"
-        )
-        rsi_min=c2.slider(
-            "RSI9 minimum",45,70,50,1,key="ema_rsi_cci_rsi"
-        )
-        cci_target=c3.slider(
-            "CCI target ceiling",70,120,100,5,key="ema_rsi_cci_target"
-        )
-
-        c4,c5,c6=st.columns(3)
-        ema_gap_max=c4.slider(
-            "Maximum EMA9-EMA21 gap (%)",0.25,5.0,2.0,0.25,
-            key="ema_rsi_cci_gap",
-            help="EMA9 must remain below EMA21 but within this percentage gap."
-        )
-        gap_tighten=c5.checkbox(
-            "Require EMA gap tightening",value=True,key="ema_rsi_cci_gap_tighten",
-            help="Requires today's EMA9-EMA21 gap to be no wider than yesterday's gap."
-        )
-        cci_mode=c6.selectbox(
-            "CCI mode",
-            ["Toward +100","Fresh Cross +100"],
-            key="ema_rsi_cci_mode",
-            help="Toward +100 finds early recovery below +100; Fresh Cross +100 finds the first bullish move through +100."
-        )
-
-        c7,c8,c9=st.columns(3)
-        vol_thr=c7.slider(
-            "Minimum Volume / SMA20",0.75,3.0,1.0,0.25,key="ema_rsi_cci_vol"
-        )
-        require_vol=c8.checkbox(
-            "Require volume support",value=True,key="ema_rsi_cci_req_vol"
-        )
-        wma_rise=c9.checkbox(
-            "Require RSI-WMA21 rising",value=True,key="ema_rsi_cci_wma_rise"
-        )
-
-        if st.button(
-            "🎯 RUN EMA9/21 RSI-WMA CCI SETUP",
-            key="ema_rsi_cci_run",type="primary"
-        ):
-            rows=[]
-            with st.spinner(
-                "Scanning EMA9/21 structure + RSI9/WMA21 cross + CCI recovery..."
-            ):
-                setup_data=(
-                    _mcs_large_universe_download(stocks)
-                    if len(stocks)>500 else _kratter_download_batches(stocks)
-                )
-
-                for symbol in stocks:
-                    d=setup_data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-                        if len(d)<220:
-                            continue
-
-                        result=_ema921_rsi_cci_setup(
-                            symbol,d,
-                            rsi_min=rsi_min,
-                            cci_target=cci_target,
-                            cci_lookback=cci_lb,
-                            ema_gap_max_pct=ema_gap_max,
-                            require_gap_tightening=gap_tighten,
-                            require_wma_rising=wma_rise,
-                            cci_mode=cci_mode,
-                            volume_threshold=vol_thr,
-                            require_volume=require_vol
-                        )
-                        if result is not None:
-                            result["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
-                            rows.append(result)
-                    except Exception:
-                        continue
-
-            out=pd.DataFrame(rows)
-            if out.empty:
-                st.warning(
-                    "No setups matched the requested EMA9/21 + RSI-WMA + CCI conditions."
-                )
-            else:
-                out=out.sort_values(
-                    ["Setup Score","CCI20","Volume Ratio"],
-                    ascending=[False,False,False]
-                )
-                a,b,c,dcol=st.columns(4)
-                a.metric("Setups",len(out))
-                b.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
-                c.metric("RSI9 >50",int((out["RSI9"]>50).sum()))
-                dcol.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
-
-                display_cols=[
-                    "Signal Date","Symbol","Signal","Setup Score","Close",
-                    "EMA9","EMA21","EMA200","Below EMA21 %",
-                    "EMA9 Angle 5D °","EMA21 Angle 10D °",
-                    "RSI9","RSI9 WMA21","RSI9 Cross Above WMA21",
-                    "CCI20","CCI Rising","CCI Distance to +100",
-                    "Volume Ratio","Volume Support","EMA9-EMA21 Gap %",
-                    "EMA Gap Tightening","RSI WMA21 Rising","RSI WMA21 Slope 5D %",
-                    "EMA200 Slope 10D %","Reasons"
-                ]
-                display_cols=[c for c in display_cols if c in out.columns]
-                st.dataframe(out[display_cols],width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download EMA9/21 RSI-WMA CCI Setup",
-                    out.to_csv(index=False).encode("utf-8"),
-                    f"ema921_rsi_wma_cci_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="ema_rsi_cci_download"
-                )
-
-
-    if scan_mode=="🎯 EMA9/21 Crossover + Retest Rules 1-3":
-        st.markdown("---")
-        st.subheader("🎯 EMA9/EMA21 Crossover + Retest Strategy")
-        st.caption(
-            "User-defined rules: crossover candle closes beyond EMA9 → "
-            "retest touches EMA9 and closes back beyond it → retest candle or "
-            "next N candles breaks the high/low of the candle immediately before the retest."
-        )
-
-        c1,c2,c3,c4=st.columns(4)
-        tf=c1.selectbox(
-            "Time frame",
-            ["Daily","Weekly","Monthly","5 Minutes","15 Minutes","30 Minutes","1 Hour"],
-            index=0,key="ema921_rule_tf"
-        )
-        direction=c2.selectbox(
-            "Trade direction",["Buy","Sell","Both"],key="ema921_rule_dir"
-        )
-        max_retest=c3.slider(
-            "Max candles to find retest after crossover",2,15,10,1,
-            key="ema921_rule_retest"
-        )
-        confirm_bars=c4.slider(
-            "Retest + next N candles",0,5,3,1,
-            key="ema921_rule_confirm"
-        )
-
-        c5,c6,c7=st.columns(3)
-        min_score_rule=c5.slider(
-            "Minimum setup score",50,100,70,5,key="ema921_rule_score"
-        )
-        use_ema200=c6.checkbox(
-            "Require EMA200 trend alignment",value=True,key="ema921_rule_ema200"
-        )
-        use_volume=c7.checkbox(
-            "Require volume ≥ 1× SMA20",value=False,key="ema921_rule_vol"
-        )
-
-        st.info(
-            "Rule 3 is interpreted as: the retest candle itself OR any of the "
-            "next N candles must break the HIGH of the candle immediately before "
-            "the retest (BUY), with the exact mirror condition for SELL."
-        )
-
-        if st.button(
-            "🎯 RUN CROSSOVER + RETEST RULES 1-3",
-            key="ema921_rule_run",type="primary"
-        ):
-            rows=[]
-            with st.spinner(f"Scanning {tf} setups..."):
-                data=_ema921_download_timeframe(stocks,tf)
-                for symbol in stocks:
-                    d=data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-
-                        dirs=["Buy","Sell"] if direction=="Both" else [direction]
-                        for dr in dirs:
-                            sig=_ema921_rule_engine(
-                                d,dr,max_retest_bars=max_retest,
-                                confirmation_bars=confirm_bars
-                            )
-                            if sig is None:
-                                continue
-                            if use_ema200 and not sig["EMA200 Aligned"]:
-                                continue
-                            if use_volume and not sig["Volume Confirmed"]:
-                                continue
-                            if sig["Setup Score"]<min_score_rule:
-                                continue
-
-                            sig["Symbol"]=symbol
-                            sig["Stock Name"]=(
-                                _ema_company_name(symbol)
-                                if "_ema_company_name" in globals()
-                                else symbol
-                            )
-                            sig["Time Frame"]=tf
-                            sig["As Of"]=d.index[-1].strftime("%Y-%m-%d %H:%M")
-                            rows.append(sig)
-                    except Exception:
-                        continue
-
-            out=pd.DataFrame(rows)
-            if out.empty:
-                st.warning(
-                    "No completed Rule 1-3 setups matched the selected time frame/settings."
-                )
-            else:
-                out=out.sort_values(
-                    ["Setup Score","Trigger Date"],
-                    ascending=[False,False]
-                )
-                a,b,c,dcol,e=st.columns(5)
-                a.metric("Setups",len(out))
-                b.metric("BUY",int(out["Signal"].eq("BUY").sum()))
-                c.metric("SELL",int(out["Signal"].eq("SELL").sum()))
-                dcol.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
-                e.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
-
-                cols=[
-                    "As Of","Stock Name","Symbol","Time Frame","Signal","Setup Score",
-                    "Crossover Date","Retest Date","Trigger Date",
-                    "Bars Crossover→Retest","Bars Retest→Trigger",
-                    "Reference Candle High","Reference Candle Low","Trigger Level",
-                    "Close","EMA9","EMA21","EMA200","RSI9","CCI20","Volume Ratio",
-                    "EMA200 Aligned","Volume Confirmed","RSI Confirmed","CCI Confirmed","Reasons"
-                ]
-                cols=[c for c in cols if c in out.columns]
-                st.dataframe(out[cols],width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download EMA9/21 Rule 1-3 Results",
-                    out.to_csv(index=False).encode("utf-8"),
-                    f"ema921_rules13_{tf.replace(' ','_').lower()}.csv",
-                    "text/csv",key="ema921_rule_download"
-                )
-
-    if scan_mode=="🔄 EMA9/21 Buy-Sell Crossover":
-        st.markdown("---")
-        st.subheader("🔄 EMA9 / EMA21 Buy-Sell Crossover")
-        st.caption(
-            "BUY = EMA9 crosses EMA21 upward on the latest completed session. "
-            "SELL = EMA9 crosses EMA21 downward."
-        )
-
-        c1,c2,c3=st.columns(3)
-        crossover_direction=c1.selectbox(
-            "Signal Direction",
-            ["Buy","Sell","Both"],
-            key="ema921_direction"
-        )
-        cross_angle=c2.slider(
-            "Angle confirmation (°)",
-            10,60,40,1,
-            key="ema921_angle",
-            help="Applied to both EMA9 and EMA21. Set to 0 conceptually to ignore, but the UI minimum is 10°."
-        )
-        cross_score=c3.slider(
-            "Minimum Power Score",
-            40,100,65,5,
-            key="ema921_min_score"
-        )
-
-        c4,c5,c6=st.columns(3)
-        cross_vol=c4.slider(
-            "Volume / SMA20 ≥",
-            1.0,3.0,1.5,0.25,key="ema921_vol"
-        )
-        cross_rsi_buy=c5.slider(
-            "BUY RSI9 ≥",
-            50,70,55,1,key="ema921_rsi_buy"
-        )
-        cross_cci=c6.slider(
-            "CCI confirmation magnitude ≥",
-            50,200,100,10,key="ema921_cci"
-        )
-
-        if st.button(
-            "🔄 RUN EMA9/21 BUY-SELL CROSSOVER",
-            key="ema921_run",type="primary"
-        ):
-            rows=[]
-            with st.spinner("Scanning for EMA9/EMA21 crossover signals..."):
-                cross_data=(
-                    _mcs_large_universe_download(stocks)
-                    if len(stocks)>500 else _kratter_download_batches(stocks)
-                )
-
-                for symbol in stocks:
-                    d=cross_data.get(symbol)
-                    if d is None or d.empty:
-                        continue
-                    try:
-                        d=d.copy()
-                        d.index=pd.to_datetime(d.index,errors="coerce")
-                        if getattr(d.index,"tz",None) is not None:
-                            d.index=d.index.tz_localize(None)
-                        d=d[~d.index.isna()].sort_index()
-                        d=d.loc[d.index<=analysis_ts]
-
-                        result=_ema921_cross_signal(
-                            symbol,d,crossover_direction,
-                            angle_threshold=cross_angle,
-                            rsi_buy=cross_rsi_buy,
-                            rsi_sell=100-cross_rsi_buy,
-                            cci_threshold=cross_cci,
-                            volume_threshold=cross_vol
-                        )
-                        if result is not None and result["Power Score"]>=cross_score:
-                            result["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
-                            rows.append(result)
-                    except Exception:
-                        continue
-
-            out=pd.DataFrame(rows)
-            if out.empty:
-                st.warning(
-                    "No EMA9/EMA21 crossover signals met the selected "
-                    "confirmation threshold."
-                )
-            else:
-                out=out.sort_values(
-                    ["Power Score","Signal"],
-                    ascending=[False,True]
-                )
-
-                a,b,c,dcol=st.columns(4)
-                a.metric("Signals",len(out))
-                b.metric("🟢 BUY",int(out["Signal"].eq("BUY").sum()))
-                c.metric("🔴 SELL",int(out["Signal"].eq("SELL").sum()))
-                dcol.metric("Avg Score",f'{out["Power Score"].mean():.1f}')
-
-                display_cols=[
-                    "Signal Date","Symbol","Signal","Power Score","Close",
-                    "EMA9","EMA21","EMA200","EMA9 Angle 5D °",
-                    "EMA21 Angle 10D °","RSI9","CCI20","Volume Ratio",
-                    "EMA200 Context","Angle Confirmation","RSI Confirmation",
-                    "CCI Confirmation","Volume Confirmation","Reasons"
-                ]
-                display_cols=[c for c in display_cols if c in out.columns]
-                st.dataframe(out[display_cols],width="stretch",hide_index=True)
-
-                st.download_button(
-                    "⬇️ Download EMA9/21 Buy-Sell Signals",
-                    out.to_csv(index=False).encode("utf-8"),
-                    f"ema921_buy_sell_{analysis_date.strftime('%Y%m%d')}.csv",
-                    "text/csv",key="ema921_download"
-                )
-
-
-    if scan_mode=="🧩 EMA 9/21 Three-Stage Strategy":
-        st.markdown("---")
-        st.subheader("🧩 EMA 9/21 Three-Stage Strategy")
-        st.caption(
-            "Three stages from the chart examples: Early Reversal, Fresh Momentum Cross, and Retest Continuation. "
-            "Signal output now includes the company name."
-        )
-        run_mode=st.radio(
-            "Run Mode",["Current Scan","Historical Backtest"],
-            horizontal=True,key="ema3_run_mode"
-        )
-
-        c1,c2,c3=st.columns(3)
-        setup= c1.selectbox(
-            "Setup",
-            ["Early Reversal","Fresh Momentum","Retest Continuation"],
-            key="ema3_setup"
-        )
-        min_score=c2.slider("Minimum Setup Score",50,100,65,5,key="ema3_score")
-        angle=c3.slider("EMA angle threshold °",10,60,40,1,key="ema3_angle")
-        c4,c5,c6=st.columns(3)
-        gap=c4.slider("Maximum EMA9-EMA21 gap %",0.5,5.0,3.0,0.25,key="ema3_gap")
-        vol=c5.slider("Volume / SMA20 ≥",0.5,3.0,1.0,0.25,key="ema3_vol")
-        rsi=c6.slider("RSI9 minimum",45,70,50,1,key="ema3_rsi")
-
-        if run_mode=="Current Scan":
-            if st.button("🧩 RUN THREE-STAGE SCAN",key="ema3_scan",type="primary"):
-                rows=[]
-                with st.spinner("Scanning selected EMA stage..."):
-                    data=(_mcs_large_universe_download(stocks)
-                          if len(stocks)>500 else _kratter_download_batches(stocks))
-                    for symbol in stocks:
-                        d=data.get(symbol)
-                        if d is None or d.empty: continue
-                        try:
-                            d=d.copy()
-                            d.index=pd.to_datetime(d.index,errors="coerce")
-                            if getattr(d.index,"tz",None) is not None:
-                                d.index=d.index.tz_localize(None)
-                            d=d[~d.index.isna()].sort_index()
-                            d=d.loc[d.index<=analysis_ts]
-                            sig=_ema_three_stage_current(symbol,d,setup,angle,gap,rsi,vol)
-                            if sig is not None and sig["Setup Score"]>=min_score:
-                                sig["Signal Date"]=analysis_date.strftime("%Y-%m-%d")
-                                sig["Symbol"]=sig.get("Symbol",symbol)
-                                sig["Stock Name"]=sig.get("Stock Name",_ema_company_name(symbol))
-                                rows.append(sig)
-                        except Exception:
-                            continue
-                out=pd.DataFrame(rows)
-                if out.empty:
-                    st.warning("No setups matched the selected stage/settings.")
-                else:
-                    out=out.sort_values(["Setup Score","Volume Ratio"],ascending=[False,False])
-                    a,b,c=st.columns(3)
-                    a.metric("Setups",len(out))
-                    b.metric("Score ≥80",int((out["Setup Score"]>=80).sum()))
-                    c.metric("Avg Score",f'{out["Setup Score"].mean():.1f}')
-                    cols=["Signal Date","Symbol","Stock Name","Setup","Signal","Setup Score","Close",
-                          "EMA9","EMA21","EMA200","EMA9 Angle 5D °","EMA21 Angle 10D °",
-                          "EMA Gap %","RSI9","RSI9 WMA21","CCI20","Volume Ratio","Reasons"]
-                    st.dataframe(out[[x for x in cols if x in out.columns]],width="stretch",hide_index=True)
-                    st.download_button(
-                        "⬇️ Download Three-Stage Results",
-                        out.to_csv(index=False).encode("utf-8"),
-                        f"ema_three_stage_{analysis_date.strftime('%Y%m%d')}.csv",
-                        "text/csv",key="ema3_download"
-                    )
-        else:
-            fwd=st.selectbox("Forward return window",[5,10,20],key="ema3_fwd")
-            years=st.selectbox("History",["2y","3y","5y"],index=1,key="ema3_hist")
-            bt_scope=st.radio(
-                "Backtest scope",
-                ["Selected Setup","Compare All 3 Setups"],
-                horizontal=True,key="ema3_bt_scope"
-            )
-            if st.button("📊 RUN EMA THREE-STAGE BACKTEST",key="ema3_bt",type="primary"):
-                all_rows=[]
-                setups_to_test=(
-                    [setup] if bt_scope=="Selected Setup"
-                    else ["Early Reversal","Fresh Momentum","Retest Continuation"]
-                )
-                with st.spinner(f"Backtesting {bt_scope.lower()} over {years} history..."):
-                    # Use the selected period here; the old version always used 2y.
-                    data=_ema_three_stage_download(stocks,years)
-                    for symbol in stocks:
-                        d=data.get(symbol)
-                        if d is None or d.empty: continue
-                        try:
-                            d=d.copy()
-                            d.index=pd.to_datetime(d.index,errors="coerce")
-                            if getattr(d.index,"tz",None) is not None:
-                                d.index=d.index.tz_localize(None)
-                            d=d[~d.index.isna()].sort_index()
-                            d=d.loc[d.index<=analysis_ts]
-                            for current_setup in setups_to_test:
-                                for rec in _ema_three_stage_backtest(
-                                    d,current_setup,fwd,min_score,angle,gap,rsi,vol
-                                ):
-                                    rec["Symbol"]=symbol
-                                    rec["Stock Name"]=_ema_company_name(symbol)
-                                    all_rows.append(rec)
-                        except Exception:
-                            continue
-                out=pd.DataFrame(all_rows)
-                if out.empty:
-                    st.warning("No historical signals matched the selected setup.")
-                else:
-                    retcol=f"Forward {fwd}D Return %"
-                    summary_rows=[]
-                    for sname,g in out.groupby("Setup"):
-                        summary_rows.append({
-                            "Setup":sname,
-                            "Signals":len(g),
-                            "Positive Return %":(g[retcol]>0).mean()*100,
-                            "Average Return %":g[retcol].mean(),
-                            "Median Return %":g[retcol].median(),
-                            "Average Max Gain %":g["Max Gain %"].mean(),
-                            "Average Max Drawdown %":g["Max Drawdown %"].mean(),
-                            "Worst Max Drawdown %":g["Max Drawdown %"].min()
-                        })
-                    summary=pd.DataFrame(summary_rows).round(2)
-                    st.dataframe(summary,width="stretch",hide_index=True)
-                    st.dataframe(
-                        out.sort_values(["Setup","Signal Date"]),
-                        width="stretch",hide_index=True
-                    )
-                    st.download_button(
-                        "⬇️ Download Three-Stage Backtest",
-                        out.to_csv(index=False).encode("utf-8"),
-                        f"ema_three_stage_backtest_{fwd}d.csv",
-                        "text/csv",key="ema3_bt_download"
-                    )
-
     if scan_mode=="⚡ EMA 9/21 Power Breakout":
         st.markdown("---")
         st.subheader("⚡ EMA 9/21/200 Power Breakout")
@@ -15094,22 +14061,16 @@ if module == "🔥 Momentum Catalyst Scanner":
             ["Pre-breakout","Confirmed Breakout","Fresh Cross Only"],
             key="ema_power_mode"
         )
-        ema21_angle_thr=e2.slider(
-            "Minimum EMA21 angle (°)",
-            10,60,40,1,key="ema_power_ema21_angle",
-            help="ATR-normalized EMA21 angle over the last 10 sessions."
+        slope_thr=e2.slider(
+            "Minimum EMA200 slope (% over 10D)",
+            0.25,3.0,1.0,0.25,key="ema_power_slope"
         )
-
-        ema9_angle_thr=e3.slider(
-            "Minimum EMA9 angle (°)",
-            10,60,40,1,key="ema_power_ema9_angle",
-            help="ATR-normalized EMA9 angle over the last 5 sessions."
-        )
-        e4,e5,e6=st.columns(3)
-        min_power=e4.slider(
+        min_power=e3.slider(
             "Minimum Power Score",
             50,90,65,5,key="ema_power_min"
         )
+
+        e4,e5,e6=st.columns(3)
         vol_thr=e4.slider("Minimum Volume / SMA20",1.0,3.0,1.5,0.25,key="ema_power_vol")
         rsi_thr=e5.slider("Minimum RSI(9)",50,70,55,1,key="ema_power_rsi")
         cci_thr=e6.slider("Minimum CCI(20)",0,150,100,10,key="ema_power_cci")
@@ -15141,8 +14102,7 @@ if module == "🔥 Momentum Catalyst Scanner":
 
                         result=_ema_power_signal(
                             symbol,d,ema_mode,
-                            ema21_angle_threshold=ema21_angle_thr,
-                            ema9_angle_threshold=ema9_angle_thr,
+                            slope_threshold=slope_thr,
                             volume_threshold=vol_thr,
                             rsi_threshold=rsi_thr,
                             cci_threshold=cci_thr
@@ -15161,8 +14121,8 @@ if module == "🔥 Momentum Catalyst Scanner":
             else:
                 ema_df.insert(0,"Scan Date",analysis_date.strftime("%Y-%m-%d"))
                 ema_df=ema_df.sort_values(
-                    ["Power Score","EMA21 Angle 10D °","EMA9 Angle 5D °","Volume Ratio"],
-                    ascending=[False,False,False,False]
+                    ["Power Score","EMA200 Slope 10D %","Volume Ratio"],
+                    ascending=[False,False,False]
                 )
 
                 a,b,c,dcol=st.columns(4)
@@ -15174,8 +14134,7 @@ if module == "🔥 Momentum Catalyst Scanner":
                 display_cols=[
                     "Scan Date","Symbol","Power Score","Rating","Close",
                     "EMA9","EMA21","EMA200","EMA200 Slope 10D %",
-                    "EMA21 Slope 10D %","EMA21 Angle 10D °",
-                    "EMA9 Slope 5D %","EMA9 Angle 5D °",
+                    "EMA21 Slope 10D %","EMA9 Slope 5D %",
                     "EMA21 > EMA200","Fresh EMA21/200 Cross",
                     "RSI9","CCI20","Volume Ratio",
                     "Resistance 20D","Distance to Resistance %",
