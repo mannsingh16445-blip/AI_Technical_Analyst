@@ -517,6 +517,70 @@ def load_nse_equity_universe():
 
 
 # ============================================================
+# LOAD BSE EQUITY UNIVERSE
+# ============================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_bse_equity_universe():
+    """Load currently traded BSE equity symbols from the public BSE
+    daily equity bhavcopy and return Yahoo-compatible .BO tickers.
+    """
+    from datetime import datetime, timedelta
+    from zipfile import ZipFile
+    from io import BytesIO
+
+    headers={
+        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+        "Accept":"application/zip,application/octet-stream,text/csv,*/*",
+        "Referer":"https://www.bseindia.com/markets/MarketInfo/BhavCopy.aspx"
+    }
+
+    for back in range(0,8):
+        dt=datetime.now()-timedelta(days=back)
+        ymd=dt.strftime('%d%m%Y')
+        url=f"https://www.bseindia.com/download/BhavCopy/Equity/EQ_ISINCODE_{ymd}.zip"
+        try:
+            r=requests.get(url,headers=headers,timeout=25)
+            if r.status_code!=200 or not r.content:
+                continue
+            z=ZipFile(BytesIO(r.content))
+            csv_name=next((n for n in z.namelist() if n.upper().endswith('.CSV')),None)
+            if not csv_name:
+                continue
+            df=pd.read_csv(BytesIO(z.read(csv_name)),low_memory=False)
+            df.columns=[str(c).strip().upper() for c in df.columns]
+
+            code_col=next((c for c in ['SC_CODE','SCRIP CODE','SCRIPCODE','SECURITY CODE'] if c in df.columns),None)
+            symbol_col=next((c for c in ['SC_ID','SECURITY ID','SECURITYID','SYMBOL'] if c in df.columns),None)
+
+            if code_col:
+                codes=pd.to_numeric(df[code_col],errors='coerce').dropna().astype(int).astype(str)
+                tickers=[f"{c}.BO" for c in codes if c and c!='0']
+            elif symbol_col:
+                vals=df[symbol_col].astype(str).str.strip().str.upper()
+                vals=vals[~vals.isin({'','NAN','NONE','NULL'})]
+                tickers=[v if v.endswith('.BO') else f"{v}.BO" for v in vals]
+            else:
+                continue
+
+            # Keep regular equity series where a series column is available.
+            series_col=next((c for c in ['SC_GROUP','GROUP NAME','GROUP','SCTYSRS','SERIES'] if c in df.columns),None)
+            if series_col:
+                good=df[series_col].astype(str).str.upper().str.strip().isin({'A','B','T','X','XT','Z','EQ'})
+                if good.any() and len(good)==len(tickers):
+                    tickers=[t for t,m in zip(tickers,good.tolist()) if m]
+
+            tickers=sorted(set(tickers))
+            if len(tickers)>=500:
+                return tickers
+        except Exception:
+            continue
+
+    return []
+
+
+
+# ============================================================
 # NSE INDEX LOADING HELPERS
 # ============================================================
 
@@ -1031,7 +1095,8 @@ def resolve_stock_universe(
     nifty500,
     fno_stocks,
     nifty_midcap100,
-    nifty_smallcap250
+    nifty_smallcap250,
+    bse_stocks=None
 ):
     """
     Central universe resolver used by scanners and backtester.
@@ -1054,6 +1119,9 @@ def resolve_stock_universe(
 
     if universe == "Full NSE":
         return list(nse_stocks)
+
+    if universe == "Full BSE":
+        return list(bse_stocks or [])
 
     return []
 
@@ -7637,7 +7705,11 @@ def _mtf_prepare(df):
     return x.dropna(subset=['EMA200','RSI9','CCI20'])
 
 def _mtf_download(symbol, interval, period):
-    ticker=symbol if str(symbol).upper().endswith('.NS') else str(symbol).upper()+'.NS'
+    sym=str(symbol).upper()
+    if sym.endswith('.NS') or sym.endswith('.BO'):
+        ticker=sym
+    else:
+        ticker=sym+'.NS'
     try:
         d=yf.download(ticker,interval=interval,period=period,auto_adjust=False,progress=False,threads=False)
         if d is None or d.empty:
@@ -11596,6 +11668,10 @@ if module == "🚀 Smart Breakout Scanner":
             load_nse_equity_universe()
         )
 
+        bse_stocks = (
+            load_bse_equity_universe()
+        )
+
         nifty500 = (
             load_nifty500()
         )
@@ -11628,7 +11704,8 @@ if module == "🚀 Smart Breakout Scanner":
             "Nifty Midcap 100",
             "Nifty Smallcap 250",
             "NSE F&O Stocks",
-            "Full NSE"
+            "Full NSE",
+            "Full BSE"
         ]
     )
 
@@ -11638,7 +11715,8 @@ if module == "🚀 Smart Breakout Scanner":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap250
+        nifty_smallcap250,
+        bse_stocks
     )
 
     if (
@@ -11717,6 +11795,19 @@ if module == "🚀 Smart Breakout Scanner":
 
             Please try again later.
             """
+        )
+
+        st.stop()
+
+    if (
+        universe == "Full BSE"
+        and not stocks
+    ):
+
+        st.error(
+            "Full BSE equity list could not be loaded. "
+            "BSE public bhavcopy may be temporarily unavailable. "
+            "Please try again later."
         )
 
         st.stop()
@@ -12507,6 +12598,7 @@ if module == "🎯 Buy / Sell Signal Engine":
     st.caption("Loading stock universes...")
 
     nse_stocks=load_nse_equity_universe()
+    bse_stocks=load_bse_equity_universe()
     nifty500=load_nifty500()
     fno_stocks=load_fno_stocks()
     nifty_midcap100=load_nifty_midcap100()
@@ -12520,7 +12612,8 @@ if module == "🎯 Buy / Sell Signal Engine":
             "Nifty Midcap 100",
             "Nifty Smallcap 250",
             "NSE F&O Stocks",
-            "Full NSE"
+            "Full NSE",
+            "Full BSE"
         ],
         key="signal_engine_universe"
     )
@@ -12531,13 +12624,14 @@ if module == "🎯 Buy / Sell Signal Engine":
         nifty500,
         fno_stocks,
         nifty_midcap100,
-        nifty_smallcap250
+        nifty_smallcap250,
+        bse_stocks
     )
 
     max_stocks=st.sidebar.slider(
         "Maximum Stocks",
         10,
-        min(500,max(10,len(stocks))),
+        min(3000,max(10,len(stocks))),
         min(100,max(10,len(stocks))),
         10,
         key="signal_engine_max_stocks"
