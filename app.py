@@ -13916,6 +13916,258 @@ def _ema_company_name(symbol):
     except Exception:
         return s
 
+
+# ============================================================
+# ICHIMOKU UPTREND SCANNER
+# ============================================================
+
+def _ichimoku_prepare(data):
+    """Calculate standard Ichimoku components without look-ahead bias.
+
+    Tenkan = (9H + 9L) / 2
+    Kijun  = (26H + 26L) / 2
+    Raw Senkou A/B are the values projected 26 periods forward.
+    Visible/current Kumo at t is raw Senkou A/B from t-26.
+    The Chikou test compares current close with the Kumo where the
+    Chikou would be plotted (26 periods back), using data available at t.
+    """
+    df=data.copy()
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    req=["High","Low","Close","Volume"]
+    if any(c not in df.columns for c in req):
+        return pd.DataFrame()
+
+    df=df.dropna(subset=req).copy()
+    for c in req:
+        df[c]=pd.to_numeric(df[c],errors="coerce")
+
+    h=df["High"]
+    l=df["Low"]
+    c=df["Close"]
+
+    df["TENKAN"]=(h.rolling(9,min_periods=9).max()+l.rolling(9,min_periods=9).min())/2
+    df["KIJUN"]=(h.rolling(26,min_periods=26).max()+l.rolling(26,min_periods=26).min())/2
+
+    # Raw spans are the values projected 26 bars forward.
+    df["SENKOU_A_RAW"]=(df["TENKAN"]+df["KIJUN"])/2
+    df["SENKOU_B_RAW"]=(h.rolling(52,min_periods=52).max()+l.rolling(52,min_periods=52).min())/2
+
+    # Current/visible Kumo.
+    df["SENKOU_A"]=df["SENKOU_A_RAW"].shift(26)
+    df["SENKOU_B"]=df["SENKOU_B_RAW"].shift(26)
+
+    df["KUMO_TOP"]=df[["SENKOU_A","SENKOU_B"]].max(axis=1)
+    df["KUMO_BOTTOM"]=df[["SENKOU_A","SENKOU_B"]].min(axis=1)
+
+    # Chikou confirmation at the location where the Chikou is plotted.
+    # At date t, the Chikou value is current close plotted 26 bars back;
+    # compare it with the cloud visible 26 bars back (= raw span shifted 52).
+    chikou_kumo_a=df["SENKOU_A_RAW"].shift(52)
+    chikou_kumo_b=df["SENKOU_B_RAW"].shift(52)
+    df["CHIKOU_CLOUD_TOP_26BARS_BACK"]=pd.concat(
+        [chikou_kumo_a,chikou_kumo_b],axis=1
+    ).max(axis=1)
+    df["CHIKOU_CLOUD_BOTTOM_26BARS_BACK"]=pd.concat(
+        [chikou_kumo_a,chikou_kumo_b],axis=1
+    ).min(axis=1)
+
+    # Slope/relationship helpers.
+    df["TENKAN_SLOPE_PCT_5"]=(df["TENKAN"]/df["TENKAN"].shift(5)-1)*100
+    df["KIJUN_SLOPE_PCT_5"]=(df["KIJUN"]/df["KIJUN"].shift(5)-1)*100
+    df["KUMO_WIDTH_PCT"]=(df["KUMO_TOP"]-df["KUMO_BOTTOM"])/c.replace(0,np.nan)*100
+
+    # Optional volume context, kept separate from the five core rules.
+    df["VOL_SMA20"]=df["Volume"].rolling(20,min_periods=20).mean()
+    df["VOL_RATIO"]=df["Volume"]/df["VOL_SMA20"].replace(0,np.nan)
+
+    return df.dropna(subset=[
+        "TENKAN","KIJUN","SENKOU_A","SENKOU_B",
+        "TENKAN_SLOPE_PCT_5","KIJUN_SLOPE_PCT_5",
+        "CHIKOU_CLOUD_TOP_26BARS_BACK"
+    ]).copy()
+
+
+def _ichimoku_signal_from_df(data, min_tenkan_slope=0.0, min_kijun_slope=0.0):
+    """Evaluate the five user-defined Ichimoku uptrend criteria."""
+    d=_ichimoku_prepare(data)
+    if d.empty:
+        return None
+
+    r=d.iloc[-1]
+    close=float(r["Close"])
+    tenkan=float(r["TENKAN"])
+    kijun=float(r["KIJUN"])
+    sa=float(r["SENKOU_A"])
+    sb=float(r["SENKOU_B"])
+    future_sa=float(r["SENKOU_A_RAW"])
+    future_sb=float(r["SENKOU_B_RAW"])
+    chikou_cloud_top=float(r["CHIKOU_CLOUD_TOP_26BARS_BACK"])
+    tenkan_slope=float(r["TENKAN_SLOPE_PCT_5"])
+    kijun_slope=float(r["KIJUN_SLOPE_PCT_5"])
+
+    # The five conditions from the user's reference image.
+    c1=(close>tenkan) and (tenkan_slope>min_tenkan_slope)
+    c2=(tenkan>kijun) and (kijun_slope>min_kijun_slope)
+    c3=(future_sa>future_sb)
+    c4=(sa>sb)
+    c5=(close>chikou_cloud_top)
+
+    conditions=[c1,c2,c3,c4,c5]
+    score=int(sum(20 for x in conditions if x))
+
+    # A descriptive stage; no trading action is implied.
+    if score>=100:
+        stage="Strong Uptrend"
+    elif score>=80:
+        stage="Confirmed Uptrend"
+    elif score>=60:
+        stage="Developing Uptrend"
+    elif score>=40:
+        stage="Early Uptrend"
+    else:
+        stage="Not Qualified"
+
+    # Explain each rule clearly for manual chart review.
+    labels={
+        "Price chased by rising Tenkan":c1,
+        "Tenkan chased by rising Kijun":c2,
+        "Senkou A > Senkou B 26 bars ahead":c3,
+        "Current Kumo bullish":c4,
+        "Chikou above cloud":c5
+    }
+    reasons=[k for k,v in labels.items() if v]
+    missing=[k for k,v in labels.items() if not v]
+
+    return {
+        "Close":close,
+        "Tenkan":tenkan,
+        "Kijun":kijun,
+        "Senkou A":sa,
+        "Senkou B":sb,
+        "Future Senkou A":future_sa,
+        "Future Senkou B":future_sb,
+        "Tenkan Slope 5D %":tenkan_slope,
+        "Kijun Slope 5D %":kijun_slope,
+        "Kumo Width %":float(r["KUMO_WIDTH_PCT"]),
+        "Volume / SMA20":float(r["VOL_RATIO"]) if pd.notna(r["VOL_RATIO"]) else np.nan,
+        "Price > Tenkan":c1,
+        "Tenkan > Kijun":c2,
+        "Future Kumo Bullish":c3,
+        "Current Kumo Bullish":c4,
+        "Chikou > Cloud":c5,
+        "Score":score,
+        "Stage":stage,
+        "Why Detected":" | ".join(reasons),
+        "Missing / Weak Factors":" | ".join(missing),
+        "Qualified":"YES" if score>=60 else "NO"
+    }
+
+
+def _ichimoku_download_batches(tickers, interval="1d", period="3y", batch_size=35):
+    """Download Yahoo Finance data for NSE (.NS) and BSE (.BO) tickers."""
+    out={}
+    ticker_list=list(dict.fromkeys([str(x).strip().upper() for x in tickers if str(x).strip()]))
+
+    def yahoo_name(t):
+        if t.endswith(".NS") or t.endswith(".BO"):
+            return t
+        return f"{t}.NS"
+
+    for start in range(0,len(ticker_list),batch_size):
+        batch=ticker_list[start:start+batch_size]
+        yahoo=[yahoo_name(t) for t in batch]
+        try:
+            data=yf.download(
+                yahoo,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=False,
+                timeout=45
+            )
+            if data is None or data.empty:
+                continue
+
+            for original,y in zip(batch,yahoo):
+                try:
+                    stock=data.copy() if len(batch)==1 else data[y].copy()
+                    if stock is None or stock.empty:
+                        continue
+                    if isinstance(stock.columns,pd.MultiIndex):
+                        stock.columns=stock.columns.get_level_values(0)
+                    stock=stock.dropna(how="all")
+                    if not stock.empty:
+                        out[original]=stock
+                except Exception:
+                    continue
+        except Exception:
+            continue
+        time.sleep(0.15)
+
+    return out
+
+
+def _ichimoku_mtf_row(symbol, daily_result, weekly_result=None, monthly_result=None, mode="Daily + Weekly + Monthly"):
+    """Combine Ichimoku timeframe results for watchlist ranking."""
+    weights={
+        "Daily only": {"D":1.0},
+        "Daily + Weekly": {"D":0.60,"W":0.40},
+        "Daily + Weekly + Monthly": {"D":0.50,"W":0.30,"M":0.20}
+    }[mode]
+
+    scores={"D":daily_result["Score"] if daily_result else np.nan,
+            "W":weekly_result["Score"] if weekly_result else np.nan,
+            "M":monthly_result["Score"] if monthly_result else np.nan}
+
+    weighted=[]
+    total_weight=0.0
+    for k,w in weights.items():
+        if pd.notna(scores[k]):
+            weighted.append(scores[k]*w)
+            total_weight+=w
+    mtf_score=float(sum(weighted)/total_weight) if total_weight else np.nan
+
+    qualified_count=sum(1 for k in weights if pd.notna(scores[k]) and scores[k]>=60)
+    available_count=sum(1 for k in weights if pd.notna(scores[k]))
+    alignment=f"{qualified_count}/{available_count} timeframes qualified" if available_count else "Insufficient data"
+
+    d=daily_result or {}
+    return {
+        "Symbol":symbol,
+        "Stock Name":_ema_company_name(symbol),
+        "MTF Score":round(mtf_score,1) if pd.notna(mtf_score) else np.nan,
+        "MTF Alignment":alignment,
+        "Daily Stage":d.get("Stage",""),
+        "Daily Score":d.get("Score",np.nan),
+        "Weekly Stage":(weekly_result or {}).get("Stage","Not scanned"),
+        "Weekly Score":(weekly_result or {}).get("Score",np.nan),
+        "Monthly Stage":(monthly_result or {}).get("Stage","Not scanned"),
+        "Monthly Score":(monthly_result or {}).get("Score",np.nan),
+        "Close":d.get("Close",np.nan),
+        "Tenkan":d.get("Tenkan",np.nan),
+        "Kijun":d.get("Kijun",np.nan),
+        "Senkou A":d.get("Senkou A",np.nan),
+        "Senkou B":d.get("Senkou B",np.nan),
+        "Future Senkou A":d.get("Future Senkou A",np.nan),
+        "Future Senkou B":d.get("Future Senkou B",np.nan),
+        "Tenkan Slope 5D %":d.get("Tenkan Slope 5D %",np.nan),
+        "Kijun Slope 5D %":d.get("Kijun Slope 5D %",np.nan),
+        "Kumo Width %":d.get("Kumo Width %",np.nan),
+        "Price > Tenkan":d.get("Price > Tenkan",False),
+        "Tenkan > Kijun":d.get("Tenkan > Kijun",False),
+        "Future Kumo Bullish":d.get("Future Kumo Bullish",False),
+        "Current Kumo Bullish":d.get("Current Kumo Bullish",False),
+        "Chikou > Cloud":d.get("Chikou > Cloud",False),
+        "Volume / SMA20":d.get("Volume / SMA20",np.nan),
+        "Why Detected":d.get("Why Detected",""),
+        "Missing / Weak Factors":d.get("Missing / Weak Factors","")
+    }
+
+
 # ============================================================
 # EMA 9/21 THREE-STAGE STRATEGY
 # ============================================================
@@ -14211,6 +14463,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "⚡ EMA 9/21 Power Breakout",
             "🧩 EMA 9/21 Three-Stage Strategy",
             "🎯 CCI + EMA9/21/200 + RSI9/WMA21 Scanner",
+            "☁️ Ichimoku Uptrend Scanner",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -14370,6 +14623,254 @@ if module == "🔥 Momentum Catalyst Scanner":
                         "\n\n**Confirmed Momentum:** EMA9 has reached/crossed EMA21 with RSI/CCI/volume support.  "
                         "\n\nThe scanner is deliberately descriptive. It does not decide when you should enter or exit."
                     )
+
+    if scan_mode=="☁️ Ichimoku Uptrend Scanner":
+        st.markdown("---")
+        st.subheader("☁️ Ichimoku Uptrend Scanner — User-Defined Five-Condition Structure")
+        st.caption(
+            "Scanner-only watchlist tool based on your reference criteria: "
+            "rising Tenkan, rising Kijun leading Tenkan, bullish future Kumo, "
+            "bullish current Kumo, and Chikou above the cloud. Entry and exit remain discretionary."
+        )
+
+        i1,i2,i3=st.columns(3)
+        ich_stage=i1.selectbox(
+            "Scan Stage",
+            ["All Stages","Early Uptrend","Developing Uptrend","Confirmed Uptrend","Strong Uptrend"],
+            key="ich_stage_scan"
+        )
+        ich_mtf=i2.selectbox(
+            "Timeframe Confirmation",
+            ["Daily only","Daily + Weekly","Daily + Weekly + Monthly"],
+            index=2,
+            key="ich_mtf_scan"
+        )
+        ich_min_score=i3.slider(
+            "Minimum Ichimoku Score",20,100,60,5,
+            key="ich_min_score_scan"
+        )
+
+        i4,i5,i6=st.columns(3)
+        ich_tenkan_slope=i4.slider(
+            "Minimum Tenkan slope (5 bars, %)",-2.0,2.0,0.0,0.1,
+            key="ich_tenkan_slope"
+        )
+        ich_kijun_slope=i5.slider(
+            "Minimum Kijun slope (5 bars, %)",-2.0,2.0,0.0,0.1,
+            key="ich_kijun_slope"
+        )
+        ich_daily_prefilter=i6.slider(
+            "Daily prefilter for MTF scan",20,100,40,5,
+            key="ich_daily_prefilter",
+            help="To keep large-universe scans practical, weekly/monthly data are requested only for daily candidates meeting this score."
+        )
+
+        i7,i8=st.columns(2)
+        ich_use_volume=i7.checkbox(
+            "Show volume confirmation (not part of core five rules)",
+            value=False,key="ich_use_volume"
+        )
+        ich_min_volume=i8.slider(
+            "Volume / SMA20 reference",0.5,3.0,1.0,0.25,
+            key="ich_min_volume",
+            disabled=not ich_use_volume
+        )
+
+        st.info(
+            "Core score = 5 rules × 20 points: "
+            "(1) price chased by rising Tenkan, (2) Tenkan chased by rising Kijun, "
+            "(3) Senkou A > Senkou B 26 bars ahead, (4) bullish current Kumo, "
+            "(5) Chikou above the cloud. The score is descriptive, not a trading signal."
+        )
+        st.warning(
+            "Manual chart review only. The scanner does not generate an entry, stop-loss, target, or exit."
+        )
+
+        if st.button("☁️ RUN ICHIMOKU UPTREND SCANNER",key="ich_run_scan",type="primary"):
+            rows=[]
+            daily_fail=0
+
+            # Daily scan across the selected universe.
+            daily_data=_ichimoku_download_batches(
+                stocks,interval="1d",period="3y",
+                batch_size=35 if len(stocks)>500 else 50
+            )
+
+            daily_results={}
+            with st.spinner("Scanning Daily Ichimoku structure..."):
+                for symbol in stocks:
+                    d=daily_data.get(symbol)
+                    if d is None or d.empty:
+                        daily_fail+=1
+                        continue
+                    try:
+                        d=d.copy()
+                        d.index=pd.to_datetime(d.index,errors="coerce")
+                        if getattr(d.index,"tz",None) is not None:
+                            d.index=d.index.tz_localize(None)
+                        d=d[~d.index.isna()].sort_index()
+                        d=d.loc[d.index<=analysis_ts]
+                        if len(d)<100:
+                            daily_fail+=1
+                            continue
+                        res=_ichimoku_signal_from_df(
+                            d,
+                            min_tenkan_slope=ich_tenkan_slope,
+                            min_kijun_slope=ich_kijun_slope
+                        )
+                        if res is None:
+                            daily_fail+=1
+                            continue
+                        if ich_use_volume and (not pd.notna(res["Volume / SMA20"]) or res["Volume / SMA20"]<ich_min_volume):
+                            continue
+                        daily_results[symbol]=res
+                    except Exception:
+                        daily_fail+=1
+
+            if not daily_results:
+                st.warning(
+                    f"No usable Daily Ichimoku data were found. Loaded {len(daily_data):,} symbols; "
+                    f"{daily_fail:,} failed or lacked enough history."
+                )
+            else:
+                # Apply daily threshold before higher-TF downloads for efficiency.
+                daily_candidates={
+                    s:r for s,r in daily_results.items()
+                    if r["Score"]>=ich_daily_prefilter
+                }
+
+                weekly_results={}
+                monthly_results={}
+
+                if ich_mtf in ("Daily + Weekly","Daily + Weekly + Monthly"):
+                    weekly_data=_ichimoku_download_batches(
+                        list(daily_candidates.keys()),
+                        interval="1wk",period="10y",
+                        batch_size=35 if len(daily_candidates)>500 else 50
+                    )
+                    with st.spinner("Confirming Weekly Ichimoku structure..."):
+                        for symbol,d in weekly_data.items():
+                            try:
+                                d=d.copy()
+                                d.index=pd.to_datetime(d.index,errors="coerce")
+                                if getattr(d.index,"tz",None) is not None:
+                                    d.index=d.index.tz_localize(None)
+                                d=d[~d.index.isna()].sort_index()
+                                # Weekly data is already date-based; align to analysis date.
+                                d=d.loc[d.index<=analysis_ts]
+                                r=_ichimoku_signal_from_df(
+                                    d,
+                                    min_tenkan_slope=ich_tenkan_slope,
+                                    min_kijun_slope=ich_kijun_slope
+                                )
+                                if r is not None:
+                                    weekly_results[symbol]=r
+                            except Exception:
+                                continue
+
+                if ich_mtf=="Daily + Weekly + Monthly":
+                    monthly_data=_ichimoku_download_batches(
+                        list(daily_candidates.keys()),
+                        interval="1mo",period="max",
+                        batch_size=25 if len(daily_candidates)>500 else 40
+                    )
+                    with st.spinner("Confirming Monthly Ichimoku structure..."):
+                        for symbol,d in monthly_data.items():
+                            try:
+                                d=d.copy()
+                                d.index=pd.to_datetime(d.index,errors="coerce")
+                                if getattr(d.index,"tz",None) is not None:
+                                    d.index=d.index.tz_localize(None)
+                                d=d[~d.index.isna()].sort_index()
+                                d=d.loc[d.index<=analysis_ts]
+                                r=_ichimoku_signal_from_df(
+                                    d,
+                                    min_tenkan_slope=ich_tenkan_slope,
+                                    min_kijun_slope=ich_kijun_slope
+                                )
+                                if r is not None:
+                                    monthly_results[symbol]=r
+                            except Exception:
+                                continue
+
+                for symbol,daily_result in daily_results.items():
+                    weekly_result=weekly_results.get(symbol) if ich_mtf!="Daily only" else None
+                    monthly_result=monthly_results.get(symbol) if ich_mtf=="Daily + Weekly + Monthly" else None
+
+                    row=_ichimoku_mtf_row(
+                        symbol,daily_result,weekly_result,monthly_result,ich_mtf
+                    )
+
+                    # Use MTF score for filtering when MTF mode is selected.
+                    filter_score=row["MTF Score"] if pd.notna(row["MTF Score"]) else daily_result["Score"]
+                    if filter_score<ich_min_score:
+                        continue
+
+                    if ich_stage!="All Stages":
+                        stage_values=[daily_result.get("Stage","")]
+                        if ich_mtf!="Daily only" and weekly_result:
+                            stage_values.append(weekly_result.get("Stage",""))
+                        if ich_mtf=="Daily + Weekly + Monthly" and monthly_result:
+                            stage_values.append(monthly_result.get("Stage",""))
+                        if ich_stage not in stage_values:
+                            continue
+
+                    row["Scan Date"]=analysis_date.strftime("%Y-%m-%d")
+                    row["Manual Review"]="Review chart personally; scanner does not decide entry/exit"
+                    rows.append(row)
+
+                out=pd.DataFrame(rows)
+
+                if out.empty:
+                    st.warning(
+                        "No Ichimoku candidates matched the selected conditions. "
+                        "Try a lower score, lower daily prefilter, or 'All Stages'."
+                    )
+                else:
+                    out=out.sort_values(
+                        ["MTF Score","Daily Score","Tenkan Slope 5D %","Kijun Slope 5D %"],
+                        ascending=[False,False,False,False]
+                    )
+
+                    a,b,c,d=st.columns(4)
+                    a.metric("Candidates",len(out))
+                    b.metric("Strong Daily",int((out["Daily Stage"]=="Strong Uptrend").sum()))
+                    c.metric("3/3 / MTF",int(out["MTF Alignment"].astype(str).str.startswith("3/").sum()))
+                    d.metric("Avg MTF Score",f"{out['MTF Score'].mean():.1f}")
+
+                    st.subheader("📋 Ichimoku Uptrend Candidates — Manual Review")
+                    display_cols=[
+                        "Scan Date","Symbol","Stock Name","MTF Score","MTF Alignment",
+                        "Daily Stage","Daily Score","Weekly Stage","Weekly Score","Monthly Stage","Monthly Score",
+                        "Close","Tenkan","Kijun","Senkou A","Senkou B",
+                        "Future Senkou A","Future Senkou B","Tenkan Slope 5D %","Kijun Slope 5D %",
+                        "Kumo Width %","Price > Tenkan","Tenkan > Kijun",
+                        "Future Kumo Bullish","Current Kumo Bullish","Chikou > Cloud",
+                        "Volume / SMA20","Why Detected","Missing / Weak Factors","Manual Review"
+                    ]
+                    st.dataframe(
+                        out[[c for c in display_cols if c in out.columns]],
+                        width="stretch",hide_index=True
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Ichimoku Uptrend Candidates",
+                        out.to_csv(index=False).encode("utf-8"),
+                        f"ichimoku_uptrend_candidates_{analysis_date.strftime('%Y%m%d')}.csv",
+                        "text/csv",
+                        key="ichimoku_download"
+                    )
+
+                    with st.expander("📖 How this scanner implements your five rules",expanded=False):
+                        st.markdown(
+                            "**1. Price chased by rising Tenkan:** Close > Tenkan and Tenkan slope is positive.  "
+                            "\n\n**2. Conversion Line chased by rising Kijun:** Tenkan > Kijun and Kijun slope is positive.  "
+                            "\n\n**3. Senkou A above Senkou B, 26 candles ahead:** the unshifted/raw Senkou A is above raw Senkou B, which is the future cloud projected 26 bars forward.  "
+                            "\n\n**4. Bullish Kumo:** the visible/current Kumo has Senkou A above Senkou B.  "
+                            "\n\n**5. Chikou above cloud:** current price is above the cloud that was visible at the Chikou's plotted location 26 bars back.  "
+                            "\n\nThese are screening conditions only; final entry and exit remain your discretion."
+                        )
+
 
     if scan_mode=="🧩 EMA 9/21 Three-Stage Strategy":
         st.markdown("---")
