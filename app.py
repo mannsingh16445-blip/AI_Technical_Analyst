@@ -21371,4 +21371,3 @@ not personalized financial advice.
                     st.error(
                         f"AI error: {e}"
                     )
-
