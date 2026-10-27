@@ -14333,6 +14333,119 @@ def _ema_three_stage_backtest(df, setup, forward_days, min_score,
     return results
 
 # ============================================================
+# NEW MODULE HELPERS — SIMPLE EMA9/EMA21 BULLISH CROSS BELOW EMA200
+# Isolated helpers so the older scanner implementations remain untouched.
+# ============================================================
+
+def _mcs_simple_ema921_prepare(raw_df):
+    """Prepare daily prices and EMA9/EMA21/EMA200 for the simple cross scanner."""
+    if raw_df is None or getattr(raw_df, "empty", True):
+        return pd.DataFrame()
+    d = raw_df.copy()
+    if isinstance(d.columns, pd.MultiIndex):
+        level0 = [str(x).strip().title() for x in d.columns.get_level_values(0)]
+        level1 = [str(x).strip().title() for x in d.columns.get_level_values(1)]
+        if {"Close", "Open", "High", "Low", "Volume"}.issubset(set(level0)):
+            d.columns = d.columns.get_level_values(0)
+        elif {"Close", "Open", "High", "Low", "Volume"}.issubset(set(level1)):
+            d.columns = d.columns.get_level_values(1)
+        else:
+            d.columns = d.columns.get_level_values(0)
+    d.columns = [str(c).strip().title() for c in d.columns]
+    if "Close" not in d.columns:
+        return pd.DataFrame()
+    d["Close"] = pd.to_numeric(d["Close"], errors="coerce")
+    d = d.dropna(subset=["Close"])
+    d = d[~d.index.duplicated(keep="last")].sort_index()
+    if len(d) < 205:
+        return pd.DataFrame()
+    close = d["Close"].astype(float)
+    d["EMA9"] = close.ewm(span=9, adjust=False, min_periods=9).mean()
+    d["EMA21"] = close.ewm(span=21, adjust=False, min_periods=21).mean()
+    d["EMA200"] = close.ewm(span=200, adjust=False, min_periods=200).mean()
+    d["EMA9_ABOVE_EMA21_CROSS"] = (
+        (d["EMA9"] > d["EMA21"])
+        & (d["EMA9"].shift(1) <= d["EMA21"].shift(1))
+    )
+    return d.dropna(subset=["EMA9", "EMA21", "EMA200"]).copy()
+
+
+def _mcs_simple_ema921_evaluate(ticker, raw_df, cross_lookback=7):
+    """Evaluate exactly the three requested conditions on completed daily bars.
+
+    1) Close < EMA200 while Close > EMA9 and Close > EMA21.
+    2) EMA9 and EMA21 are both below EMA200.
+    3) EMA9 crossed above EMA21 from below within the last N sessions,
+       and the bullish EMA9 > EMA21 alignment still holds now.
+    """
+    ticker = str(ticker).strip().upper()
+    d = _mcs_simple_ema921_prepare(raw_df)
+    empty_result = {
+        "Ticker": ticker,
+        "Qualified": False,
+        "Pass Count": 0,
+        "Diagnostic": "Insufficient or invalid daily history (need at least 205 sessions with EMA200 data)",
+    }
+    if d.empty or len(d) < 2:
+        return empty_result
+
+    lookback = max(1, min(int(cross_lookback), 20))
+    latest = d.iloc[-1]
+    close = float(latest["Close"])
+    ema9 = float(latest["EMA9"])
+    ema21 = float(latest["EMA21"])
+    ema200 = float(latest["EMA200"])
+
+    cond1 = bool(close < ema200 and close > ema9 and close > ema21)
+    cond2 = bool(ema9 < ema200 and ema21 < ema200)
+
+    cross_series = d["EMA9_ABOVE_EMA21_CROSS"].iloc[-lookback:]
+    cross_positions = np.flatnonzero(cross_series.fillna(False).to_numpy(dtype=bool))
+    recent_cross_found = len(cross_positions) > 0
+    bars_since_cross = int(len(cross_series) - 1 - cross_positions[-1]) if recent_cross_found else np.nan
+    cross_date = ""
+    if recent_cross_found:
+        cross_date = pd.Timestamp(cross_series.index[cross_positions[-1]]).strftime("%Y-%m-%d")
+    cond3 = bool(recent_cross_found and ema9 > ema21)
+
+    conditions = [cond1, cond2, cond3]
+    passed = int(sum(conditions))
+    distance_close_ema200 = ((ema200 - close) / ema200 * 100.0) if ema200 > 0 else np.nan
+    distance_ema9_ema200 = ((ema200 - ema9) / ema200 * 100.0) if ema200 > 0 else np.nan
+    distance_ema21_ema200 = ((ema200 - ema21) / ema200 * 100.0) if ema200 > 0 else np.nan
+
+    diagnostics = []
+    if not cond1:
+        diagnostics.append("Close must be below EMA200 and above EMA9/EMA21")
+    if not cond2:
+        diagnostics.append("Both EMA9 and EMA21 must be below EMA200")
+    if not cond3:
+        diagnostics.append(f"No current bullish EMA9/EMA21 alignment from a cross within {lookback} sessions")
+
+    return {
+        "Ticker": ticker,
+        "Qualified": all(conditions),
+        "Pass Count": passed,
+        "Latest Date": pd.Timestamp(d.index[-1]).strftime("%Y-%m-%d"),
+        "Close": close,
+        "EMA9": ema9,
+        "EMA21": ema21,
+        "EMA200": ema200,
+        "Close Below EMA200 (%)": distance_close_ema200,
+        "EMA9 Below EMA200 (%)": distance_ema9_ema200,
+        "EMA21 Below EMA200 (%)": distance_ema21_ema200,
+        "EMA9 Above EMA21 Now": bool(ema9 > ema21),
+        "Bullish EMA9/EMA21 Cross Date": cross_date,
+        "Bars Since Bullish EMA9/EMA21 Cross": bars_since_cross,
+        "Condition 1 — Close below EMA200 but above EMA9 & EMA21": "PASS" if cond1 else "FAIL",
+        "Condition 2 — EMA9 and EMA21 below EMA200": "PASS" if cond2 else "FAIL",
+        f"Condition 3 — Bullish EMA9/EMA21 cross within {lookback} sessions": "PASS" if cond3 else "FAIL",
+        "Diagnostic": "Candidate for manual chart review — all 3 conditions pass" if all(conditions) else "; ".join(diagnostics),
+        "Manual Review": "Scanner only; entry and exit remain discretionary",
+    }
+
+
+# ============================================================
 # NEW MODULE HELPERS — EMA200 BREAKOUT + LOW-VOLUME RETEST
 # These names are deliberately prefixed to avoid modifying or
 # colliding with the existing scanner implementations.
@@ -14782,6 +14895,7 @@ if module == "🔥 Momentum Catalyst Scanner":
             "🎯 CCI + EMA9/21/200 + RSI9/WMA21 Scanner",
             "☁️ Ichimoku Uptrend Scanner",
             "🧲 EMA200 Breakout + Low-Volume Retest Scanner",
+            "🔄 EMA9/21 Cross Below EMA200 Scanner",
             "🧪 V3.1 Factor Ablation Lab",
             "🚦 V2 + Regime & Trade Plan",
             "📊 Backtest & Validation"
@@ -14792,6 +14906,150 @@ if module == "🔥 Momentum Catalyst Scanner":
     )
 
 
+
+    if scan_mode=="🔄 EMA9/21 Cross Below EMA200 Scanner":
+        st.markdown("---")
+        st.subheader("🔄 EMA9/21 Bullish Cross Below EMA200 — Stock Discovery")
+        st.caption(
+            "A simple three-rule scanner based on your conditions. It finds stocks whose close is below EMA200 "
+            "but above EMA9 and EMA21, with both short EMAs below EMA200 and a recent bullish EMA9/EMA21 cross. "
+            "It is a candidate finder only; chart review and all entry/exit decisions remain yours."
+        )
+        cross_lookback = st.slider(
+            "Bullish EMA9/EMA21 cross occurred within the last N daily sessions",
+            min_value=1, max_value=20, value=7, step=1,
+            key="mcs_simple_ema921_cross_lookback",
+            help="A qualifying stock must still have EMA9 above EMA21 today; the upward cross itself must be within this lookback."
+        )
+        show_near_misses = st.checkbox(
+            "Show near-misses with failed-condition details",
+            value=True,
+            key="mcs_simple_ema921_near_misses"
+        )
+        st.markdown("**Mandatory rules**")
+        st.write("1. Latest close < EMA200, while latest close > EMA9 and EMA21.")
+        st.write("2. EMA9 < EMA200 and EMA21 < EMA200.")
+        st.write(f"3. EMA9 crossed above EMA21 from below in the last {cross_lookback} daily sessions, and EMA9 remains above EMA21.")
+        st.info(
+            f"Universe reused from the existing app: **{selected_universe}** · **{len(stocks):,} symbols**. "
+            "No older scanner module has been replaced."
+        )
+        if st.button(
+            "🔎 RUN EMA9/21 CROSS BELOW EMA200 SCAN",
+            key="mcs_simple_ema921_run",
+            type="primary",
+            disabled=not stocks
+        ):
+            with st.spinner("Downloading daily candles and checking the three EMA conditions..."):
+                simple_data_map = (
+                    _mcs_large_universe_download(stocks)
+                    if len(stocks) > 500 else _kratter_download_batches(stocks)
+                )
+            simple_rows = []
+            simple_progress = st.progress(0)
+            simple_status = st.empty()
+            simple_total = max(1, len(stocks))
+            for simple_i, simple_symbol in enumerate(stocks, start=1):
+                simple_d = simple_data_map.get(simple_symbol)
+                if simple_d is None and str(simple_symbol).endswith(".NS"):
+                    simple_d = simple_data_map.get(str(simple_symbol)[:-3])
+                if simple_d is None and not str(simple_symbol).endswith((".NS", ".BO")):
+                    simple_d = simple_data_map.get(str(simple_symbol) + ".NS")
+                if simple_d is None or getattr(simple_d, "empty", True):
+                    simple_rows.append({
+                        "Ticker": str(simple_symbol),
+                        "Qualified": False,
+                        "Pass Count": 0,
+                        "Diagnostic": "No Yahoo Finance OHLCV data returned",
+                    })
+                else:
+                    try:
+                        simple_d = simple_d.copy()
+                        simple_d.index = pd.to_datetime(simple_d.index, errors="coerce")
+                        if getattr(simple_d.index, "tz", None) is not None:
+                            simple_d.index = simple_d.index.tz_localize(None)
+                        simple_d = simple_d[~simple_d.index.isna()].sort_index()
+                        simple_d = simple_d.loc[simple_d.index <= analysis_ts]
+                        simple_rows.append(
+                            _mcs_simple_ema921_evaluate(simple_symbol, simple_d, cross_lookback)
+                        )
+                    except Exception as simple_exc:
+                        simple_rows.append({
+                            "Ticker": str(simple_symbol),
+                            "Qualified": False,
+                            "Pass Count": 0,
+                            "Diagnostic": f"Analysis error: {type(simple_exc).__name__}",
+                        })
+                simple_progress.progress(simple_i / simple_total)
+                if simple_i % 100 == 0 or simple_i == simple_total:
+                    simple_status.write(f"Evaluated {simple_i:,} / {len(stocks):,} symbols")
+            simple_progress.empty()
+            simple_status.empty()
+
+            simple_results = pd.DataFrame(simple_rows)
+            if simple_results.empty:
+                st.error("No symbols could be analysed. Check the selected universe and data availability.")
+            else:
+                simple_qualified = simple_results[simple_results.get("Qualified", False) == True].copy()  # noqa: E712
+                if not simple_qualified.empty:
+                    simple_qualified["Symbol"] = simple_qualified["Ticker"].astype(str).str.replace(r"\.(NS|BO)$", "", regex=True)
+                    simple_qualified["Stock Name"] = simple_qualified["Ticker"].apply(_ema_company_name)
+                    simple_qualified = simple_qualified.sort_values(
+                        ["Bars Since Bullish EMA9/EMA21 Cross", "Close Below EMA200 (%)"],
+                        ascending=[True, True],
+                        na_position="last"
+                    )
+                    st.success(f"Found {len(simple_qualified):,} candidate(s) passing all three conditions.")
+                    st.caption("Results are for manual chart review, not automated trade instructions.")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Qualified candidates", len(simple_qualified))
+                    m2.metric("Fresh crosses (0–2 sessions)", int((simple_qualified["Bars Since Bullish EMA9/EMA21 Cross"] <= 2).sum()))
+                    m3.metric("Average distance below EMA200", f"{simple_qualified['Close Below EMA200 (%)'].mean():.2f}%")
+                    simple_columns = [
+                        "Symbol", "Stock Name", "Ticker", "Latest Date", "Close", "EMA9", "EMA21", "EMA200",
+                        "Close Below EMA200 (%)", "EMA9 Below EMA200 (%)", "EMA21 Below EMA200 (%)",
+                        "Bullish EMA9/EMA21 Cross Date", "Bars Since Bullish EMA9/EMA21 Cross",
+                        "Condition 1 — Close below EMA200 but above EMA9 & EMA21",
+                        "Condition 2 — EMA9 and EMA21 below EMA200",
+                        f"Condition 3 — Bullish EMA9/EMA21 cross within {cross_lookback} sessions",
+                        "Diagnostic", "Manual Review"
+                    ]
+                    simple_columns = [c for c in simple_columns if c in simple_qualified.columns]
+                    st.dataframe(simple_qualified[simple_columns], width="stretch", hide_index=True)
+                    st.download_button(
+                        "⬇️ Download Qualified EMA9/21 Cross Candidates CSV",
+                        simple_qualified.to_csv(index=False).encode("utf-8"),
+                        f"ema921_cross_below_ema200_{analysis_date.strftime('%Y%m%d')}.csv",
+                        "text/csv",
+                        key="mcs_simple_ema921_download_qualified"
+                    )
+                else:
+                    st.warning("No stock passed all three conditions. Check the near-miss diagnostics to see which rule is filtering candidates.")
+                if show_near_misses:
+                    simple_misses = simple_results[simple_results.get("Qualified", False) != True].copy()  # noqa: E712
+                    if not simple_misses.empty:
+                        simple_misses = simple_misses.sort_values(
+                            ["Pass Count", "Ticker"], ascending=[False, True], na_position="last"
+                        ).head(200)
+                        simple_misses["Symbol"] = simple_misses["Ticker"].astype(str).str.replace(r"\.(NS|BO)$", "", regex=True)
+                        st.subheader("Near-misses / failed-condition diagnostics")
+                        simple_diag_columns = [
+                            "Symbol", "Ticker", "Pass Count", "Latest Date", "Close", "EMA9", "EMA21", "EMA200",
+                            "Bullish EMA9/EMA21 Cross Date", "Bars Since Bullish EMA9/EMA21 Cross",
+                            "Condition 1 — Close below EMA200 but above EMA9 & EMA21",
+                            "Condition 2 — EMA9 and EMA21 below EMA200",
+                            f"Condition 3 — Bullish EMA9/EMA21 cross within {cross_lookback} sessions",
+                            "Diagnostic"
+                        ]
+                        simple_diag_columns = [c for c in simple_diag_columns if c in simple_misses.columns]
+                        st.dataframe(simple_misses[simple_diag_columns], width="stretch", hide_index=True)
+                        st.download_button(
+                            "⬇️ Download EMA9/21 Cross Diagnostics CSV",
+                            simple_results.to_csv(index=False).encode("utf-8"),
+                            f"ema921_cross_below_ema200_diagnostics_{analysis_date.strftime('%Y%m%d')}.csv",
+                            "text/csv",
+                            key="mcs_simple_ema921_download_diag"
+                        )
 
     if scan_mode=="🧲 EMA200 Breakout + Low-Volume Retest Scanner":
         st.markdown("---")
