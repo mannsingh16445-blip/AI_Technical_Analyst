@@ -14383,7 +14383,20 @@ def _mcs_ema200_retest_indicators(raw_df):
 
 
 def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
-    """Evaluate the four requested rules for one ticker."""
+    """Evaluate the EMA200 breakout/retest pattern using only daily candles.
+
+    Important chronology:
+      - breakout candle must be in the last N bars before the latest bar;
+      - EMA9 and EMA21 must remain below EMA200 from after breakout through
+        the previous session, rising and approaching EMA200;
+      - the previous session close must exceed the previous five closes and
+        the breakout close;
+      - the latest session is treated as follow-through after that confirmation.
+
+    A small latest-session EMA9 crossover is optionally tolerated because the
+    supplied Bharti Airtel example shows EMA9 essentially touching/slightly
+    crossing EMA200 on the strong follow-through day, while EMA21 remains below.
+    """
     d = _mcs_ema200_retest_indicators(raw_df)
     ticker = str(ticker).strip().upper()
     if d.empty or len(d) < max(230, cfg["cci_days"] + 8):
@@ -14393,7 +14406,7 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
         }
 
     d = d.dropna(subset=["EMA200", "CCI20", "VOL_SMA20"]).copy()
-    if len(d) < max(10, cfg["cci_days"] + 2):
+    if len(d) < max(10, cfg["cci_days"] + 7):
         return {
             "Ticker": ticker, "Qualified": False, "Pass Count": 0,
             "Diagnostic": "Insufficient indicators"
@@ -14401,19 +14414,21 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
 
     last_i = len(d) - 1
     latest = d.iloc[last_i]
-    prior5 = d.iloc[max(0, last_i - 5):last_i]
+    confirmation_i = last_i - 1
+    confirmation = d.iloc[confirmation_i]
+    prior5 = d.iloc[confirmation_i - 5:confirmation_i]
     if len(prior5) < 5:
         return {
             "Ticker": ticker, "Qualified": False, "Pass Count": 0,
-            "Diagnostic": "Need 5 prior closes"
+            "Diagnostic": "Need 5 closes before the prior-session confirmation"
         }
 
     def _post_breakout_ema_approach(segment):
-        """True only when EMA9/21 stay below EMA200 and trend toward it.
+        """Require both shorter EMAs below EMA200 and trending toward it.
 
-        Requires at least three completed sessions after the breakout,
-        both EMAs to remain below EMA200 through the segment, positive
-        EMA slopes, and declining percentage distance-to-EMA200 slopes.
+        The segment ends at the previous session, not the latest follow-through
+        session. This is intentional: the example's strong latest session can
+        lift EMA9 to the 200 EMA while EMA21 is still catching up.
         """
         if segment is None or len(segment) < 3:
             return False
@@ -14430,10 +14445,12 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
         if not below_200:
             return False
         x = np.arange(len(segment), dtype=float)
-        ema9_slope = float(np.polyfit(x, segment["EMA9"].astype(float).to_numpy(), 1)[0])
-        ema21_slope = float(np.polyfit(x, segment["EMA21"].astype(float).to_numpy(), 1)[0])
+        ema9_values = segment["EMA9"].astype(float).to_numpy()
+        ema21_values = segment["EMA21"].astype(float).to_numpy()
         gap9 = segment["EMA9_DIST200_PCT"].astype(float).to_numpy()
         gap21 = segment["EMA21_DIST200_PCT"].astype(float).to_numpy()
+        ema9_slope = float(np.polyfit(x, ema9_values, 1)[0])
+        ema21_slope = float(np.polyfit(x, ema21_values, 1)[0])
         gap9_slope = float(np.polyfit(x, gap9, 1)[0])
         gap21_slope = float(np.polyfit(x, gap21, 1)[0])
         endpoints_improve = bool(gap9[-1] < gap9[0] and gap21[-1] < gap21[0])
@@ -14443,10 +14460,11 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
             and endpoints_improve
         )
 
-    # Rule 1: a clean bullish breakout must have occurred within the
-    # previous N completed trading sessions (UI caps N at seven).
+    # Rule 1: scan only the last N bars before the latest follow-through bar.
+    # This includes a breakout on 16-Oct when scanning the 27-Oct daily candle
+    # with a 7-bar setting, as in the provided chart example.
     breakout = None
-    lookback = min(int(cfg["breakout_lookback"]), 7)
+    lookback = max(1, min(int(cfg["breakout_lookback"]), 7))
     search_start = max(1, last_i - lookback)
     for i in range(last_i - 1, search_start - 1, -1):
         r = d.iloc[i]
@@ -14463,21 +14481,21 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
     breakout_i = breakout[0] if breakout else None
     breakout_row = breakout[1] if breakout else None
 
-    # Rule 2: the retest must be after the breakout and on low volume.
-    # Additionally, EMA9/EMA21 must have stayed below EMA200 and have
-    # progressively approached it after the breakout, including at latest.
-    post_breakout_segment = (
-        d.iloc[breakout_i + 1:last_i + 1].copy()
+    # Rule 2: validate the EMA convergence phase through the prior-session
+    # confirmation day, not through today's strong continuation candle.
+    approach_segment = (
+        d.iloc[breakout_i + 1:confirmation_i + 1].copy()
         if breakout is not None else d.iloc[0:0].copy()
     )
     post_breakout_ema_approach = (
-        _post_breakout_ema_approach(post_breakout_segment)
+        _post_breakout_ema_approach(approach_segment)
         if breakout is not None else False
     )
-    post_breakout_bars = int(len(post_breakout_segment))
+    post_breakout_bars = int(len(approach_segment))
+
     retest = None
     if breakout is not None:
-        for i in range(last_i - 1, breakout_i, -1):
+        for i in range(confirmation_i, breakout_i, -1):
             r = d.iloc[i]
             e200 = float(r["EMA200"])
             if not np.isfinite(e200) or e200 <= 0:
@@ -14502,72 +14520,133 @@ def _mcs_ema200_retest_evaluate(ticker, raw_df, cfg):
                 retest = (i, r)
                 break
 
-    condition2 = retest is not None and post_breakout_ema_approach
+    condition2 = bool(retest is not None and post_breakout_ema_approach)
 
-    # Rule 3: CCI is above the selected threshold for consecutive recent bars.
+    # Rule 3: CCI must exceed the threshold for N consecutive latest sessions.
     cci_slice = d["CCI20"].iloc[-cfg["cci_days"]:]
     condition3 = (
         len(cci_slice) == cfg["cci_days"]
         and bool((cci_slice > cfg["cci_threshold"]).all())
     )
 
-    # Rule 4: latest available completed daily close is above prior five
-    # closes, breakout-candle close, and current EMA200.
-    close_above_prior5 = bool(float(latest["Close"]) > float(prior5["Close"].max()))
-    close_above_breakout = bool(
-        breakout is not None and float(latest["Close"]) > float(breakout_row["Close"])
+    # Rule 4: explicitly use the PREVIOUS session close, as requested. It must
+    # beat each of the five closes before it and the breakout-candle close.
+    prior_close_above_prior5 = bool(
+        float(confirmation["Close"]) > float(prior5["Close"].max())
     )
-    above_current_ema200 = bool(float(latest["Close"]) > float(latest["EMA200"]))
-    condition4 = close_above_prior5 and close_above_breakout and above_current_ema200
+    prior_close_above_breakout = bool(
+        breakout is not None and float(confirmation["Close"]) > float(breakout_row["Close"])
+    )
+    condition4 = bool(prior_close_above_prior5 and prior_close_above_breakout)
 
-    conditions = [condition1, condition2, condition3, condition4]
+    # Rule 5: today's completed candle should continue higher after the prior
+    # session's confirmation. User can set the minimum daily follow-through.
+    latest_change_pct = (
+        float(latest["Close"]) / float(confirmation["Close"]) - 1.0
+    ) * 100.0 if float(confirmation["Close"]) != 0 else np.nan
+    latest_green = bool(float(latest["Close"]) > float(latest["Open"]))
+    follow_through_enabled = bool(cfg.get("require_latest_follow_through", True))
+    if follow_through_enabled:
+        condition5 = bool(
+            latest_green and np.isfinite(latest_change_pct)
+            and latest_change_pct >= float(cfg.get("min_latest_gain_pct", 1.0))
+        )
+    else:
+        condition5 = bool(float(latest["Close"]) > float(confirmation["Close"]))
+
+    # Rule 6: stop selecting names with both short EMAs already well above
+    # EMA200. Both must be below EMA200 through the confirmation session;
+    # EMA21 must still be below on the latest session. EMA9 may only cross by
+    # a small configurable amount to accommodate the illustrated follow-through.
+    confirm_both_below = bool(
+        float(confirmation["EMA9"]) < float(confirmation["EMA200"])
+        and float(confirmation["EMA21"]) < float(confirmation["EMA200"])
+    )
+    latest_ema9_above_pct = (
+        (float(latest["EMA9"]) - float(latest["EMA200"])) / float(latest["EMA200"]) * 100.0
+        if float(latest["EMA200"]) > 0 else np.nan
+    )
+    latest_ema21_above_pct = (
+        (float(latest["EMA21"]) - float(latest["EMA200"])) / float(latest["EMA200"]) * 100.0
+        if float(latest["EMA200"]) > 0 else np.nan
+    )
+    strict_latest_below = bool(cfg.get("strict_latest_emas_below", False))
+    if strict_latest_below:
+        latest_ema_position_ok = bool(
+            float(latest["EMA9"]) < float(latest["EMA200"])
+            and float(latest["EMA21"]) < float(latest["EMA200"])
+        )
+    else:
+        latest_ema_position_ok = bool(
+            float(latest["EMA21"]) < float(latest["EMA200"])
+            and np.isfinite(latest_ema9_above_pct)
+            and latest_ema9_above_pct <= float(cfg.get("max_latest_ema9_above_pct", 0.75))
+        )
+    condition6 = bool(confirm_both_below and latest_ema_position_ok and post_breakout_ema_approach)
+
+    conditions = [condition1, condition2, condition3, condition4, condition5, condition6]
     passed = int(sum(conditions))
+    breakout_date = pd.Timestamp(breakout_row.name).strftime("%Y-%m-%d") if breakout else ""
+    retest_date = pd.Timestamp(retest[1].name).strftime("%Y-%m-%d") if retest else ""
+    prior5_high = float(prior5["Close"].max())
+    retest_row = retest[1] if retest else None
+
     out = {
         "Ticker": ticker,
         "Qualified": all(conditions),
         "Pass Count": passed,
-        "Condition 1 — Clean EMA200 breakout": "PASS" if condition1 else "FAIL",
-        "Condition 2 — Low-volume retest + EMAs approaching": "PASS" if condition2 else "FAIL",
+        "Condition 1 — Clean EMA200 breakout in recent window": "PASS" if condition1 else "FAIL",
+        "Condition 2 — Low-volume retest + EMA approach through previous close": "PASS" if condition2 else "FAIL",
         f"Condition 3 — CCI > {cfg['cci_threshold']} for {cfg['cci_days']} days": "PASS" if condition3 else "FAIL",
-        "Condition 4 — Close above prior 5 closes + breakout close": "PASS" if condition4 else "FAIL",
+        "Condition 4 — Previous close > prior 5 closes + breakout close": "PASS" if condition4 else "FAIL",
+        "Condition 5 — Latest session follow-through": "PASS" if condition5 else "FAIL",
+        "Condition 6 — EMA9/21 below/near EMA200 as required": "PASS" if condition6 else "FAIL",
         "Latest Date": pd.Timestamp(d.index[-1]).strftime("%Y-%m-%d"),
         "Latest Close": float(latest["Close"]),
+        "Latest Open": float(latest["Open"]),
+        "Latest Day Change %": float(latest_change_pct),
+        "Latest Candle Green": latest_green,
+        "Previous Session Date": pd.Timestamp(confirmation.name).strftime("%Y-%m-%d"),
+        "Previous Session Close": float(confirmation["Close"]),
+        "Previous Close > Prior 5-Close High": prior_close_above_prior5,
+        "Previous Close > Prior 5-Close High (%)": (float(confirmation["Close"]) / prior5_high - 1.0) * 100.0 if prior5_high else np.nan,
+        "Previous Close > Breakout Close": prior_close_above_breakout,
+        "Previous Close > Breakout Close (%)": (float(confirmation["Close"]) / float(breakout_row["Close"]) - 1.0) * 100.0 if breakout else np.nan,
         "EMA9": float(latest["EMA9"]),
         "EMA21": float(latest["EMA21"]),
         "EMA200": float(latest["EMA200"]),
+        "EMA9 Above EMA200 Latest (%)": float(latest_ema9_above_pct),
+        "EMA21 Above EMA200 Latest (%)": float(latest_ema21_above_pct),
+        "Both EMAs Below EMA200 on Previous Session": confirm_both_below,
+        "Latest EMA21 Below EMA200": bool(float(latest["EMA21"]) < float(latest["EMA200"])),
+        "Latest EMA9 Cross Allowance (%)": float(cfg.get("max_latest_ema9_above_pct", 0.75)),
+        "Strict Both EMAs Below Latest": strict_latest_below,
         "CCI20": float(latest["CCI20"]),
         "CCI Days Above Threshold": int((cci_slice > cfg["cci_threshold"]).sum()),
-        "Close > Prior 5-Close High (%)": (float(latest["Close"]) / float(prior5["Close"].max()) - 1) * 100.0,
         "Volume / SMA20 (latest)": float(latest["Volume"] / latest["VOL_SMA20"]) if latest["VOL_SMA20"] > 0 else np.nan,
-        "Breakout Date": pd.Timestamp(breakout_row.name).strftime("%Y-%m-%d") if breakout else "",
+        "Breakout Date": breakout_date,
         "Breakout Close": float(breakout_row["Close"]) if breakout else np.nan,
+        "Breakout EMA9": float(breakout_row["EMA9"]) if breakout else np.nan,
+        "Breakout EMA21": float(breakout_row["EMA21"]) if breakout else np.nan,
+        "Breakout EMA200": float(breakout_row["EMA200"]) if breakout else np.nan,
         "Breakout Wick %": float(breakout_row["WICK_PCT"]) if breakout else np.nan,
         "Breakout Volume": float(breakout_row["Volume"]) if breakout else np.nan,
-        "Retest Date": pd.Timestamp(retest[1].name).strftime("%Y-%m-%d") if retest else "",
-        "Retest Close": float(retest[1]["Close"]) if retest else np.nan,
-        "Retest Low": float(retest[1]["Low"]) if retest else np.nan,
-        "Retest EMA200": float(retest[1]["EMA200"]) if retest else np.nan,
-        "Retest Vol / SMA20": float(retest[1]["Volume"] / retest[1]["VOL_SMA20"]) if retest and retest[1]["VOL_SMA20"] > 0 else np.nan,
-        "Retest EMA9 Below EMA200": bool(retest[1]["EMA9"] < retest[1]["EMA200"]) if retest else False,
-        "Retest EMA21 Below EMA200": bool(retest[1]["EMA21"] < retest[1]["EMA200"]) if retest else False,
-        "Post-breakout EMA9/21 stayed below EMA200": bool(
-            breakout is not None and len(post_breakout_segment) > 0 and
-            ((post_breakout_segment["EMA9"] < post_breakout_segment["EMA200"]) &
-             (post_breakout_segment["EMA21"] < post_breakout_segment["EMA200"])).all()
-        ),
-        "Post-breakout EMA approach confirmed": bool(post_breakout_ema_approach),
-        "Post-breakout Sessions": post_breakout_bars,
-        "EMA9 Gap to EMA200 at First Post-breakout Session (%)": float(post_breakout_segment["EMA9_DIST200_PCT"].iloc[0]) if len(post_breakout_segment) else np.nan,
-        "EMA21 Gap to EMA200 at First Post-breakout Session (%)": float(post_breakout_segment["EMA21_DIST200_PCT"].iloc[0]) if len(post_breakout_segment) else np.nan,
+        "Retest Date": retest_date,
+        "Retest Close": float(retest_row["Close"]) if retest_row is not None else np.nan,
+        "Retest Low": float(retest_row["Low"]) if retest_row is not None else np.nan,
+        "Retest EMA200": float(retest_row["EMA200"]) if retest_row is not None else np.nan,
+        "Retest Vol / SMA20": float(retest_row["Volume"] / retest_row["VOL_SMA20"]) if retest_row is not None and retest_row["VOL_SMA20"] > 0 else np.nan,
+        "Post-breakout Sessions to Previous Close": post_breakout_bars,
+        "EMA9 Gap to EMA200 at First Post-breakout Session (%)": float(approach_segment["EMA9_DIST200_PCT"].iloc[0]) if len(approach_segment) else np.nan,
+        "EMA21 Gap to EMA200 at First Post-breakout Session (%)": float(approach_segment["EMA21_DIST200_PCT"].iloc[0]) if len(approach_segment) else np.nan,
+        "EMA9 Gap to EMA200 Previous Close (%)": float(confirmation["EMA9_DIST200_PCT"]),
+        "EMA21 Gap to EMA200 Previous Close (%)": float(confirmation["EMA21_DIST200_PCT"]),
         "EMA9 Gap to EMA200 Latest (%)": float(latest["EMA9_DIST200_PCT"]),
         "EMA21 Gap to EMA200 Latest (%)": float(latest["EMA21_DIST200_PCT"]),
-        "Close > Breakout Close (%)": (float(latest["Close"]) / float(breakout_row["Close"]) - 1.0) * 100.0 if breakout else np.nan,
+        "Close > Breakout Close Latest (%)": (float(latest["Close"]) / float(breakout_row["Close"]) - 1.0) * 100.0 if breakout else np.nan,
+        "Diagnostic": "Candidate for manual chart review — all six rules pass" if all(conditions) else f"{passed}/6 conditions pass",
         "Manual Review": "Review chart personally; scanner does not decide entry/exit",
     }
-    out["Diagnostic"] = (
-        "Candidate for manual chart review — all four rules pass"
-        if out["Qualified"] else f"{passed}/4 conditions pass"
-    )
     return out
 
 if module == "🔥 Momentum Catalyst Scanner":
@@ -14716,34 +14795,38 @@ if module == "🔥 Momentum Catalyst Scanner":
 
     if scan_mode=="🧲 EMA200 Breakout + Low-Volume Retest Scanner":
         st.markdown("---")
-        st.subheader("🧲 EMA200 Breakout → Low-Volume Retest → CCI Confirmation")
+        st.subheader("🧲 EMA200 Breakout → Low-Volume Retest → EMA Convergence → Follow-through")
         st.caption(
-            "Stock-discovery module added to the existing app. Previous scanner logic is preserved. "
-            "Results are candidates for manual chart review; entry and exit remain your discretion."
+            "Pattern based on the Bharti Airtel daily chart: a recent clean close above EMA200, "
+            "a low-volume retest while EMA9/EMA21 rise toward EMA200 from below, a strong previous-session close, "
+            "and latest-session follow-through. This is a candidate scanner only."
         )
 
-        with st.expander("📘 Four rules being checked", expanded=True):
+        with st.expander("📘 Pattern rules being checked", expanded=True):
             st.markdown(
-                "1. **Clean breakout:** a green candle closes above EMA200 with a limited total wick; "
-                "optionally require a close crossing EMA200 from below.\n\n"
-                "2. **Retest + EMA approach:** after the breakout, price retests the EMA200 zone on low volume. "
-                "EMA9 and EMA21 must stay below EMA200 after the breakout, both trend upward, and their "
-                "percentage gaps to EMA200 must narrow through the post-breakout period. At least three "
-                "post-breakout sessions are required to evaluate the approach.\n\n"
-                "3. **CCI confirmation:** CCI(20) stays above the chosen threshold for N consecutive "
-                "recent completed daily candles.\n\n"
-                "4. **Price confirmation:** latest available completed close exceeds the prior five "
-                "closes, the breakout-candle close, and current EMA200."
+                "1. **Recent clean breakout:** a green candle closes above EMA200 with a limited total wick; "
+                "optionally require a true close-cross from below. The breakout must be within the last seven bars.\n\n"
+                "2. **EMA convergence from below:** EMA9 and EMA21 must both remain below EMA200 from after breakout "
+                "through the previous session, both rising while their gaps to EMA200 narrow. The low-volume retest "
+                "must also occur after the breakout.\n\n"
+                "3. **CCI strength:** CCI(20) is above the selected threshold for N consecutive latest sessions.\n\n"
+                "4. **Prior-session price confirmation:** the previous session close must be higher than each of the "
+                "five closes before it and higher than the breakout candle close.\n\n"
+                "5. **Latest-session follow-through:** latest candle must be green and rise by the selected percentage "
+                "above the previous close (or simply close higher if the strict follow-through checkbox is off).\n\n"
+                "6. **No mature uptrend false positives:** both EMAs must be below EMA200 through the previous session; "
+                "EMA21 must still be below EMA200 today. To match the supplied chart, EMA9 may cross slightly above "
+                "EMA200 on the latest strong candle, but not by more than the configured allowance."
             )
 
         e1,e2,e3=st.columns(3)
         rt_breakout_lookback=e1.slider(
-            "Breakout candle within last N trading sessions",1,7,7,1,
+            "Breakout candle within last N bars",1,7,7,1,
             key="mcs_ema200rt_breakout_lookback",
-            help="The breakout candle must be within the previous seven completed trading sessions."
+            help="Searches the latest N bars before the current follow-through candle."
         )
         rt_max_wick=e2.slider(
-            "Maximum total wick (% of range)",5,60,25,5,
+            "Maximum total wick (% of breakout range)",5,60,30,5,
             key="mcs_ema200rt_max_wick"
         )
         rt_tolerance=e3.slider(
@@ -14752,7 +14835,7 @@ if module == "🔥 Momentum Catalyst Scanner":
         )
         e4,e5,e6=st.columns(3)
         rt_vol_max=e4.slider(
-            "Maximum retest volume / SMA20",0.25,1.25,0.80,0.05,
+            "Maximum retest volume / SMA20",0.25,1.25,0.90,0.05,
             key="mcs_ema200rt_volmax"
         )
         rt_cci_days=e5.slider(
@@ -14763,20 +14846,41 @@ if module == "🔥 Momentum Catalyst Scanner":
             "CCI threshold",50,200,100,10,
             key="mcs_ema200rt_cci_threshold"
         )
-        rt_require_cross=st.checkbox(
+        e7,e8,e9=st.columns(3)
+        rt_min_gain=e7.slider(
+            "Minimum latest-session gain vs previous close (%)",0.0,5.0,1.0,0.25,
+            key="mcs_ema200rt_min_latest_gain",
+            help="Set to 0.0 to require only that latest close is higher than previous close."
+        )
+        rt_ema9_allow=e8.slider(
+            "Allow latest EMA9 above EMA200 by up to (%)",0.0,2.0,0.75,0.25,
+            key="mcs_ema200rt_ema9_allow",
+            help="Set to 0.0 to require EMA9 below EMA200 on the latest candle. EMA21 must remain below EMA200 in all cases."
+        )
+        rt_strict_latest=e9.checkbox(
+            "Require BOTH EMA9 and EMA21 below EMA200 on latest candle",
+            value=False,key="mcs_ema200rt_strict_latest",
+            help="Enable for the strict version. Leave off to allow only a small EMA9 crossover on the latest follow-through candle, as in the supplied chart."
+        )
+        e10,e11=st.columns(2)
+        rt_require_cross=e10.checkbox(
             "Require breakout candle to cross EMA200 from below",
             value=True,key="mcs_ema200rt_require_cross"
         )
+        rt_require_follow=e11.checkbox(
+            "Require latest green follow-through candle",
+            value=True,key="mcs_ema200rt_require_follow"
+        )
         rt_show_near=st.checkbox(
-            "Show near-misses (1–3 conditions passed)",
+            "Show near-misses with condition-by-condition diagnostics",
             value=True,key="mcs_ema200rt_show_near"
         )
         st.info(
             f"Selected universe: **{selected_universe}** · **{len(stocks):,}** symbols. "
-            "The current universe/exchange selection above is reused; no second universe selector is created."
+            "The existing universe selection is reused; no previous scanner or stock universe is replaced."
         )
         st.warning(
-            "This module does not generate buy/sell instructions, entry price, stop-loss, target, or exit."
+            "Scanner only: it does not generate buy/sell instructions, entry price, stop-loss, target or exit."
         )
 
         if st.button(
@@ -14791,8 +14895,12 @@ if module == "🔥 Momentum Catalyst Scanner":
                 "retest_volume_max_ratio":float(rt_vol_max),
                 "cci_days":int(rt_cci_days),
                 "cci_threshold":float(rt_cci_threshold),
+                "min_latest_gain_pct":float(rt_min_gain),
+                "max_latest_ema9_above_pct":float(rt_ema9_allow),
+                "strict_latest_emas_below":bool(rt_strict_latest),
+                "require_latest_follow_through":bool(rt_require_follow),
             }
-            with st.spinner("Downloading daily OHLCV and checking the four EMA200 retest rules..."):
+            with st.spinner("Downloading daily OHLCV and checking the six chart-pattern conditions..."):
                 rt_data_map=(
                     _mcs_large_universe_download(stocks)
                     if len(stocks)>500 else _kratter_download_batches(stocks)
@@ -14838,34 +14946,34 @@ if module == "🔥 Momentum Catalyst Scanner":
             else:
                 rt_qualified=rt_results[rt_results.get("Qualified",False)==True].copy()  # noqa: E712
                 if not rt_qualified.empty:
-                    # Resolve company names only for passing candidates to avoid thousands of info lookups.
                     rt_qualified["Symbol"] = rt_qualified["Ticker"].astype(str).str.replace(r"\.(NS|BO)$","",regex=True)
                     rt_qualified["Stock Name"] = rt_qualified["Ticker"].apply(_ema_company_name)
                     rt_qualified=rt_qualified.sort_values(
-                        ["Close > Prior 5-Close High (%)","Close > Breakout Close (%)","CCI20"],
+                        ["Latest Day Change %","Previous Close > Prior 5-Close High (%)","CCI20"],
                         ascending=False,na_position="last"
                     )
-                    st.success(f"Found {len(rt_qualified):,} candidate(s) passing all four conditions.")
-                    st.caption("Candidates only; open the chart and decide entry/exit yourself.")
+                    st.success(f"Found {len(rt_qualified):,} candidate(s) passing all six pattern rules.")
+                    st.caption("Review the charts manually. A high score or passing scan is not an instruction to trade.")
                     a,b,c,d=st.columns(4)
                     a.metric("Qualified candidates",len(rt_qualified))
-                    b.metric("All 4 conditions",int((rt_qualified["Pass Count"]==4).sum()))
+                    b.metric("All 6 conditions",int((rt_qualified["Pass Count"]==6).sum()))
                     c.metric("Avg CCI20",f"{rt_qualified['CCI20'].mean():.1f}")
-                    d.metric("Avg close above 5-day high",f"{rt_qualified['Close > Prior 5-Close High (%)'].mean():.2f}%")
+                    d.metric("Avg latest-session gain",f"{rt_qualified['Latest Day Change %'].mean():.2f}%")
                     rt_preferred=[
-                        "Symbol","Stock Name","Ticker","Latest Date","Latest Close",
-                        "Breakout Date","Breakout Close","Breakout Wick %","Retest Date",
-                        "Retest Close","Retest Low","Retest Vol / SMA20","EMA9","EMA21","EMA200",
-                        "Post-breakout EMA9/21 stayed below EMA200","Post-breakout EMA approach confirmed",
-                        "Post-breakout Sessions","EMA9 Gap to EMA200 at First Post-breakout Session (%)",
-                        "EMA21 Gap to EMA200 at First Post-breakout Session (%)",
-                        "EMA9 Gap to EMA200 Latest (%)","EMA21 Gap to EMA200 Latest (%)",
-                        "CCI20","CCI Days Above Threshold","Volume / SMA20 (latest)",
-                        "Close > Prior 5-Close High (%)","Close > Breakout Close (%)",
-                        "Condition 1 — Clean EMA200 breakout",
-                        "Condition 2 — Low-volume retest + EMAs approaching",
+                        "Symbol","Stock Name","Ticker","Latest Date","Latest Close","Latest Day Change %",
+                        "Previous Session Date","Previous Session Close","Breakout Date","Breakout Close","Breakout Wick %",
+                        "Retest Date","Retest Close","Retest Low","Retest Vol / SMA20",
+                        "EMA9","EMA21","EMA200","EMA9 Above EMA200 Latest (%)","EMA21 Above EMA200 Latest (%)",
+                        "Both EMAs Below EMA200 on Previous Session","Latest EMA21 Below EMA200",
+                        "Post-breakout Sessions to Previous Close","CCI20","CCI Days Above Threshold",
+                        "Volume / SMA20 (latest)","Previous Close > Prior 5-Close High (%)",
+                        "Previous Close > Breakout Close (%)","Close > Breakout Close Latest (%)",
+                        "Condition 1 — Clean EMA200 breakout in recent window",
+                        "Condition 2 — Low-volume retest + EMA approach through previous close",
                         f"Condition 3 — CCI > {rt_cfg['cci_threshold']} for {rt_cfg['cci_days']} days",
-                        "Condition 4 — Close above prior 5 closes + breakout close","Diagnostic","Manual Review"
+                        "Condition 4 — Previous close > prior 5 closes + breakout close",
+                        "Condition 5 — Latest session follow-through",
+                        "Condition 6 — EMA9/21 below/near EMA200 as required","Diagnostic","Manual Review"
                     ]
                     rt_show=[c for c in rt_preferred if c in rt_qualified.columns]
                     st.dataframe(rt_qualified[rt_show],width="stretch",hide_index=True)
@@ -14876,26 +14984,26 @@ if module == "🔥 Momentum Catalyst Scanner":
                         "text/csv",key="mcs_ema200rt_download_qualified"
                     )
                 else:
-                    st.warning("No stock passed all four conditions. Review the near-misses to see which rule is restrictive.")
+                    st.warning("No stock passed all six conditions. Use the near-miss table to see the exact failed rules.")
 
                 if rt_show_near:
                     rt_misses=rt_results[rt_results.get("Qualified",False)!=True].copy()  # noqa: E712
                     if not rt_misses.empty:
-                        rt_misses=rt_misses.sort_values(["Pass Count","Ticker"],ascending=[False,True]).head(150)
+                        rt_misses=rt_misses.sort_values(["Pass Count","Ticker"],ascending=[False,True]).head(200)
                         rt_misses["Symbol"]=rt_misses["Ticker"].astype(str).str.replace(r"\.(NS|BO)$","",regex=True)
                         st.subheader("Near-misses / condition diagnostics")
-                        st.caption("These symbols passed one to three rules. The status columns show why they did not qualify.")
+                        st.caption("These stocks nearly matched the chart pattern. Use the rule columns to identify the blocker; no previous scanner is affected.")
                         rt_diag_cols=[
-                            "Symbol","Ticker","Pass Count","Diagnostic","Latest Date","Latest Close",
-                            "Breakout Date","Retest Date","CCI20","CCI Days Above Threshold",
-                            "Post-breakout EMA9/21 stayed below EMA200","Post-breakout EMA approach confirmed",
-                            "Post-breakout Sessions","EMA9 Gap to EMA200 at First Post-breakout Session (%)",
-                            "EMA21 Gap to EMA200 at First Post-breakout Session (%)",
-                            "EMA9 Gap to EMA200 Latest (%)","EMA21 Gap to EMA200 Latest (%)",
-                            "Condition 1 — Clean EMA200 breakout",
-                            "Condition 2 — Low-volume retest + EMAs approaching",
+                            "Symbol","Ticker","Pass Count","Diagnostic","Latest Date","Latest Close","Latest Day Change %",
+                            "Previous Session Close","Breakout Date","Breakout Close","Retest Date","CCI20","CCI Days Above Threshold",
+                            "EMA9","EMA21","EMA200","EMA9 Above EMA200 Latest (%)","EMA21 Above EMA200 Latest (%)",
+                            "Both EMAs Below EMA200 on Previous Session","Latest EMA21 Below EMA200",
+                            "Condition 1 — Clean EMA200 breakout in recent window",
+                            "Condition 2 — Low-volume retest + EMA approach through previous close",
                             f"Condition 3 — CCI > {rt_cfg['cci_threshold']} for {rt_cfg['cci_days']} days",
-                            "Condition 4 — Close above prior 5 closes + breakout close"
+                            "Condition 4 — Previous close > prior 5 closes + breakout close",
+                            "Condition 5 — Latest session follow-through",
+                            "Condition 6 — EMA9/21 below/near EMA200 as required"
                         ]
                         rt_diag_cols=[c for c in rt_diag_cols if c in rt_misses.columns]
                         st.dataframe(rt_misses[rt_diag_cols],width="stretch",hide_index=True)
